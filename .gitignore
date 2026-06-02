@@ -1,0 +1,12 @@
+
+# OpenFDE internal state
+.openfde/
+.claude/
+node_modules/
+dist/
+__pycache__/
+
+# Keep local planning/context docs out of the public repo.
+*.md
+!README.md
+!*/README.md

@@ -1,0 +1,1351 @@
+"""
+openfde/architect.py — OpenArchitect read-only repo analysis.
+
+Analyzes a repository and returns an ArchGraph containing:
+  - Module structure  (top-level directories and standalone scripts)
+  - File metadata     (language, size)
+  - Function / class definitions  (Python via ast; JS/TS via regex)
+  - Import-level dependency edges between modules
+
+This is read-only.  No code generation, no agent execution.
+"""
+
+import ast
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger("openfde.architect")
+
+# ─── Exclusion lists ─────────────────────────────────────────────────────── #
+
+_EXCLUDED_DIRS: frozenset = frozenset({
+    ".git", ".openfde", "node_modules", "dist", "__pycache__",
+    ".venv", "venv", ".mypy_cache", ".pytest_cache", ".tox",
+    ".eggs", ".cache", "build", "htmlcov", ".next", ".nuxt",
+    "coverage", ".turbo", ".parcel-cache", ".ruff_cache",
+})
+
+# Well-known root-level config / lock files that are not standalone modules
+_ROOT_SKIP_NAMES: frozenset = frozenset({
+    ".gitignore", ".gitattributes", ".editorconfig",
+    "pyproject.toml", "setup.py", "setup.cfg", "MANIFEST.in",
+    "Makefile", "Dockerfile", "docker-compose.yml",
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    ".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintignore",
+    ".prettierrc", ".prettierignore",
+    "vite.config.js", "vite.config.ts", "jest.config.js", "jest.config.ts",
+    "tsconfig.json", "tsconfig.base.json",
+    ".env", ".env.example",
+    "LICENSE", "LICENCE", "NOTICE",
+    "openfde.sh",
+})
+
+_LARGE_FILE_BYTES: int = 512 * 1_024   # skip files larger than 512 KB
+
+# ─── Language map ─────────────────────────────────────────────────────────── #
+
+_LANG_MAP: dict = {
+    ".py":   "Python",
+    ".js":   "JavaScript",
+    ".jsx":  "JavaScript",
+    ".ts":   "TypeScript",
+    ".tsx":  "TypeScript",
+    ".css":  "CSS",
+    ".scss": "CSS",
+    ".html": "HTML",
+    ".md":   "Markdown",
+    ".json": "JSON",
+    ".toml": "TOML",
+    ".sh":   "Shell",
+    ".bash": "Shell",
+    ".yaml": "YAML",
+    ".yml":  "YAML",
+    ".rs":   "Rust",
+    ".go":   "Go",
+    ".java": "Java",
+    ".rb":   "Ruby",
+    ".cpp":  "C++",
+    ".c":    "C",
+    ".h":    "C",
+}
+
+# ─── Internal data structures ─────────────────────────────────────────────── #
+
+@dataclass
+class _Module:
+    """Internal representation of a detected top-level module."""
+
+    id: str            # "module:frontend"
+    name: str          # "frontend"
+    path: str          # "frontend" (relative to root)
+    type: str          # "directory" | "file"
+    file_count: int = 0
+    languages: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dict.
+
+        Returns:
+            dict — ArchGraph module object.
+        """
+        return {
+            "id":        self.id,
+            "name":      self.name,
+            "path":      self.path,
+            "type":      self.type,
+            "fileCount": self.file_count,
+            "languages": self.languages,
+        }
+
+
+@dataclass
+class _FileNode:
+    """Internal representation of a source file."""
+
+    id: str         # "file:openfde/server.py"
+    path: str       # "openfde/server.py"
+    module_id: str  # "module:openfde"
+    language: str   # "Python"
+    size: int       # bytes
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dict.
+
+        Returns:
+            dict — ArchGraph file object.
+        """
+        return {
+            "id":       self.id,
+            "path":     self.path,
+            "moduleId": self.module_id,
+            "language": self.language,
+            "size":     self.size,
+        }
+
+
+@dataclass
+class _FunctionNode:
+    """Internal representation of a function, method, or class definition."""
+
+    id: str               # "function:openfde/server.py:start"
+    name: str             # "start"  or  "ConnectionManager.connect"
+    path: str             # "openfde/server.py"
+    module_id: str        # "module:openfde"
+    line: int
+    args: list            # [{"name": "repo_path", "type": "str"}, ...]
+    returns: Optional[str]
+    purpose: str          # first sentence of docstring, or ""
+    warnings: list        # per-definition issues
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dict.
+
+        Returns:
+            dict — ArchGraph function object.
+        """
+        return {
+            "id":       self.id,
+            "name":     self.name,
+            "path":     self.path,
+            "moduleId": self.module_id,
+            "line":     self.line,
+            "args":     self.args,
+            "returns":  self.returns,
+            "purpose":  self.purpose,
+            "warnings": self.warnings,
+        }
+
+
+@dataclass
+class _Edge:
+    """Internal representation of a module-level import dependency."""
+
+    id: str         # "edge:frontend->openfde"
+    from_id: str    # "module:frontend"
+    to_id: str      # "module:openfde"
+    type: str       # "import"
+    label: str      # "imports"
+    confidence: str # "high" | "medium" | "low"
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-compatible dict.
+
+        Returns:
+            dict — ArchGraph edge object.
+        """
+        return {
+            "id":         self.id,
+            "from":       self.from_id,
+            "to":         self.to_id,
+            "type":       self.type,
+            "label":      self.label,
+            "confidence": self.confidence,
+        }
+
+
+# ─── Public API ───────────────────────────────────────────────────────────── #
+
+def analyze_repo(root: Path) -> dict:
+    """Analyze a repository and return an ArchGraph.
+
+    Detects top-level modules, collects file metadata, extracts
+    function / class definitions, and resolves import-level dependencies
+    between modules.
+
+    Args:
+        root: Path — absolute path to the repository root.
+
+    Returns:
+        dict — ArchGraph with keys: modules, files, functions, edges, warnings.
+
+    Side effects:
+        Logs a summary line at INFO level: module/file/function/edge/warning counts.
+    """
+    modules             = _detect_modules(root)
+    module_by_id        = {m.id:   m for m in modules}
+    module_by_path      = {m.path: m for m in modules}
+
+    files, file_warns   = _collect_files(root, modules)
+    _tally_module_stats(modules, files)
+
+    functions, fn_warns       = _extract_functions(root, files)
+    import_edges, edge_warns  = _detect_edges(root, files, module_by_id, module_by_path)
+
+    file_dicts = [f.to_dict()  for f in files]
+    func_dicts = [fn.to_dict() for fn in functions]
+
+    # Function-level dataflow (Step 23): the new source of truth. Module/file
+    # import edges become fallback only where no function flow exists.
+    flows, flow_warns         = _extract_flows(root, file_dicts, func_dicts)
+    module_rollups, file_rollups = _rollup_flows(flows)
+    merged_edges              = _merge_module_edges(import_edges, module_rollups)
+    file_edges                = _build_file_edges(file_rollups, file_dicts)
+
+    all_warnings = file_warns + fn_warns + edge_warns + flow_warns
+
+    logger.info(
+        "ArchGraph: %d module(s), %d file(s), %d function(s), %d edge(s), "
+        "%d flow(s), %d file-edge(s), %d warning(s)",
+        len(modules), len(files), len(functions), len(merged_edges),
+        len(flows), len(file_edges), len(all_warnings),
+    )
+
+    return {
+        "modules":   [m.to_dict() for m in modules],
+        "files":     file_dicts,
+        "functions": func_dicts,
+        "edges":     merged_edges,   # module-level, dataflow-preferred (backward compatible)
+        "flows":     flows,          # function-level dataflow edges
+        "fileEdges": file_edges,     # file-level rollups of function flows
+        "warnings":  all_warnings,
+    }
+
+
+def generate_canvas_state(root: Path) -> tuple:
+    """Generate canvas boxes and arrows from the repo's ArchGraph.
+
+    Module boxes are placed in a deterministic grid (up to 3 columns,
+    sorted alphabetically). Box IDs are derived from module paths so
+    that regenerating the canvas yields the same IDs.
+
+    Args:
+        root: Path — absolute path to the repository root.
+
+    Returns:
+        tuple — (canvas_state: dict, graph: dict)
+            canvas_state has keys 'boxes' and 'arrows'.
+            graph is the raw ArchGraph dict from analyze_repo().
+    """
+    graph           = analyze_repo(root)
+    boxes           = _layout_boxes(graph["modules"], graph["files"])
+    # Map by each box's moduleId (boxes are alphabetically sorted, modules are
+    # not — never zip the two lists positionally).
+    mod_id_to_box   = {b["moduleId"]: b for b in boxes}
+    arrows          = _make_arrows(graph["edges"], mod_id_to_box)
+    return {"boxes": boxes, "arrows": arrows}, graph
+
+
+# ─── Module detection ─────────────────────────────────────────────────────── #
+
+def _detect_modules(root: Path) -> list:
+    """Detect top-level meaningful modules in the repository.
+
+    A module is:
+    - A top-level non-excluded, non-hidden directory, or
+    - A top-level Python / JS / TS script file that is not a known
+      configuration or metadata file.
+
+    Args:
+        root: Path — repository root.
+
+    Returns:
+        list[_Module] — detected modules, sorted: directories first, then
+        files, each group sorted alphabetically.
+    """
+    dirs  = []
+    files = []
+
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError as exc:
+        logger.error("Cannot read repo root %s: %s", root, exc)
+        return []
+
+    for entry in entries:
+        name = entry.name
+
+        # Skip all hidden entries (starts with '.')
+        if name.startswith("."):
+            continue
+
+        if entry.is_dir():
+            # Skip excluded directories and egg-info artifacts
+            if name in _EXCLUDED_DIRS or name.endswith(".egg-info"):
+                continue
+            dirs.append(_Module(
+                id=f"module:{name}",
+                name=name,
+                path=name,
+                type="directory",
+            ))
+
+        elif entry.is_file():
+            # Only surface top-level Python / JS / TS source files, skipping
+            # well-known config / lock files.
+            if name in _ROOT_SKIP_NAMES:
+                continue
+            suffix = entry.suffix.lower()
+            if suffix not in (".py", ".js", ".ts"):
+                continue
+            files.append(_Module(
+                id=f"module:{name}",
+                name=name,
+                path=name,
+                type="file",
+            ))
+
+    return dirs + files
+
+
+# ─── File collection ──────────────────────────────────────────────────────── #
+
+def _collect_files(root: Path, modules: list) -> tuple:
+    """Collect all source files that belong to each detected module.
+
+    Skips excluded directories, hidden entries, files larger than
+    _LARGE_FILE_BYTES, and files whose extension is not in _LANG_MAP.
+
+    Args:
+        root:    Path — repository root.
+        modules: list[_Module] — detected modules.
+
+    Returns:
+        tuple — (files: list[_FileNode], warnings: list[str])
+    """
+    files:    list = []
+    warnings: list = []
+
+    for mod in modules:
+        mod_abs = root / mod.path
+
+        if mod.type == "file":
+            size = _safe_size(mod_abs)
+            lang = _LANG_MAP.get(mod_abs.suffix.lower(), "Unknown")
+            files.append(_FileNode(
+                id=f"file:{mod.path}",
+                path=mod.path,
+                module_id=mod.id,
+                language=lang,
+                size=size,
+            ))
+            continue
+
+        # Directory module — walk recursively
+        try:
+            for abs_path in _walk_source_files(mod_abs):
+                rel  = abs_path.relative_to(root).as_posix()
+                size = _safe_size(abs_path)
+                if size > _LARGE_FILE_BYTES:
+                    warnings.append(f"skipped large file: {rel} ({size // 1024} KB)")
+                    continue
+                lang = _LANG_MAP.get(abs_path.suffix.lower(), "Unknown")
+                files.append(_FileNode(
+                    id=f"file:{rel}",
+                    path=rel,
+                    module_id=mod.id,
+                    language=lang,
+                    size=size,
+                ))
+        except OSError as exc:
+            warnings.append(f"error reading module {mod.path}: {exc}")
+
+    return files, warnings
+
+
+def _walk_source_files(directory: Path):
+    """Yield source files recursively, skipping excluded and hidden directories.
+
+    Args:
+        directory: Path — root directory to start from.
+
+    Yields:
+        Path — absolute path to each recognized source file.
+    """
+    try:
+        entries = sorted(directory.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return
+
+    for entry in entries:
+        if entry.is_dir():
+            name = entry.name
+            if name.startswith("."):
+                continue
+            if name in _EXCLUDED_DIRS or name.endswith(".egg-info"):
+                continue
+            yield from _walk_source_files(entry)
+        elif entry.is_file():
+            if entry.suffix.lower() in _LANG_MAP:
+                yield entry
+
+
+def _tally_module_stats(modules: list, files: list) -> None:
+    """Update file_count and languages on each module in-place.
+
+    Args:
+        modules: list[_Module] — modules to update.
+        files:   list[_FileNode] — all collected files.
+
+    Returns:
+        None
+    """
+    for mod in modules:
+        mod_files   = [f for f in files if f.module_id == mod.id]
+        lang_counts: dict = {}
+        for f in mod_files:
+            lang_counts[f.language] = lang_counts.get(f.language, 0) + 1
+        mod.file_count = len(mod_files)
+        mod.languages  = lang_counts
+
+
+def _safe_size(path: Path) -> int:
+    """Return file size in bytes, or 0 on error.
+
+    Args:
+        path: Path — file to stat.
+
+    Returns:
+        int — size in bytes.
+    """
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+# ─── Function / class extraction ──────────────────────────────────────────── #
+
+def _extract_functions(root: Path, files: list) -> tuple:
+    """Extract function and class definitions from Python and JS/TS files.
+
+    Python: uses ast for full type-annotation and docstring extraction.
+    JS/TS:  uses regex to detect obvious function declarations (v1).
+
+    Args:
+        root:  Path — repository root.
+        files: list[_FileNode] — collected source files.
+
+    Returns:
+        tuple — (functions: list[_FunctionNode], warnings: list[str])
+    """
+    functions: list = []
+    warnings:  list = []
+
+    for f in files:
+        abs_path = root / f.path
+        if f.language == "Python":
+            fns, warns = _extract_python_functions(abs_path, f.path, f.module_id)
+            functions.extend(fns)
+            warnings.extend(warns)
+        elif f.language in ("JavaScript", "TypeScript"):
+            fns = _extract_js_functions(abs_path, f.path, f.module_id)
+            functions.extend(fns)
+
+    return functions, warnings
+
+
+# ── Python extraction ─────────────────────────────────────────────────────── #
+
+def _extract_python_functions(abs_path: Path, rel_path: str, module_id: str) -> tuple:
+    """Extract top-level functions, classes, and methods from a Python file.
+
+    Uses ast.iter_child_nodes to stay at the top level; for classes also
+    iterates direct child nodes to capture methods (not nested helpers).
+
+    Args:
+        abs_path:  Path — absolute path to the .py file.
+        rel_path:  str  — repo-relative path (used in IDs and messages).
+        module_id: str  — parent module ID.
+
+    Returns:
+        tuple — (functions: list[_FunctionNode], warnings: list[str])
+
+    Side effects:
+        None.
+    """
+    functions: list = []
+    warnings:  list = []
+
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+        tree   = ast.parse(source, filename=rel_path)
+    except SyntaxError as exc:
+        warnings.append(f"syntax error in {rel_path}: {exc}")
+        return functions, warnings
+    except OSError:
+        return functions, warnings
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn = _py_func_to_node(node, rel_path, module_id)
+            functions.append(fn)
+            if not fn.purpose and not fn.name.startswith("_"):
+                warnings.append(f"missing docstring: {rel_path}:{fn.name}()")
+
+        elif isinstance(node, ast.ClassDef):
+            cls_fn = _py_class_to_node(node, rel_path, module_id)
+            functions.append(cls_fn)
+            if not cls_fn.purpose and not cls_fn.name.startswith("_"):
+                warnings.append(f"missing docstring: {rel_path}:{cls_fn.name}")
+
+            for item in ast.iter_child_nodes(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    method = _py_func_to_node(item, rel_path, module_id, class_name=node.name)
+                    functions.append(method)
+
+    return functions, warnings
+
+
+def _py_func_to_node(
+    node,
+    rel_path: str,
+    module_id: str,
+    class_name: Optional[str] = None,
+) -> _FunctionNode:
+    """Convert an ast FunctionDef / AsyncFunctionDef to a _FunctionNode.
+
+    Args:
+        node      — ast.FunctionDef or ast.AsyncFunctionDef.
+        rel_path:  str — repo-relative file path.
+        module_id: str — parent module ID.
+        class_name: str | None — enclosing class name for methods.
+
+    Returns:
+        _FunctionNode
+    """
+    qualified = f"{class_name}.{node.name}" if class_name else node.name
+    fn_id     = f"function:{rel_path}:{qualified}"
+
+    # Positional + keyword args (skip 'self' / 'cls')
+    args = []
+    for arg in node.args.args:
+        if arg.arg in ("self", "cls"):
+            continue
+        type_str: Optional[str] = None
+        if arg.annotation:
+            try:
+                type_str = ast.unparse(arg.annotation)
+            except Exception:  # noqa: BLE001
+                pass
+        args.append({"name": arg.arg, "type": type_str})
+
+    # Return annotation
+    returns: Optional[str] = None
+    if node.returns:
+        try:
+            returns = ast.unparse(node.returns)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Docstring — first non-empty sentence only
+    purpose = ""
+    if (
+        node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        doc   = node.body[0].value.value.strip()
+        first = doc.split("\n")[0].split(". ")[0]
+        purpose = first.rstrip(".").strip()
+
+    return _FunctionNode(
+        id=fn_id,
+        name=qualified,
+        path=rel_path,
+        module_id=module_id,
+        line=node.lineno,
+        args=args,
+        returns=returns,
+        purpose=purpose,
+        warnings=[],
+    )
+
+
+def _py_class_to_node(node, rel_path: str, module_id: str) -> _FunctionNode:
+    """Convert an ast ClassDef to a _FunctionNode representing the class.
+
+    Args:
+        node      — ast.ClassDef.
+        rel_path:  str — repo-relative file path.
+        module_id: str — parent module ID.
+
+    Returns:
+        _FunctionNode — with empty args and no return annotation.
+    """
+    fn_id   = f"function:{rel_path}:{node.name}"
+    purpose = ""
+    if (
+        node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        doc   = node.body[0].value.value.strip()
+        first = doc.split("\n")[0].split(". ")[0]
+        purpose = first.rstrip(".").strip()
+
+    return _FunctionNode(
+        id=fn_id,
+        name=node.name,
+        path=rel_path,
+        module_id=module_id,
+        line=node.lineno,
+        args=[],
+        returns=None,
+        purpose=purpose,
+        warnings=[],
+    )
+
+
+# ── JS / TS extraction ────────────────────────────────────────────────────── #
+
+# Patterns ordered from most specific to least.  Applied in sequence;
+# a name seen by an earlier pattern is not emitted again.
+_JS_FUNC_PATTERNS: list = [
+    # export default function name(
+    re.compile(r"^export\s+default\s+(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE),
+    # export function name(
+    re.compile(r"^export\s+(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE),
+    # function name(
+    re.compile(r"^(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE),
+    # export const name = (...) =>   or   export const name = async (...) =>
+    re.compile(r"^export\s+const\s+(\w+)\s*=\s*(?:async\s*)?\(", re.MULTILINE),
+    # const name = (...) =>
+    re.compile(r"^const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]{0,200}\)\s*=>", re.MULTILINE),
+]
+
+
+def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list:
+    """Extract function declarations from a JS / TS / JSX / TSX file via regex.
+
+    Only detects top-level and exported function forms.  Nested arrow
+    functions inside other functions are not captured (v1 limitation).
+
+    Args:
+        abs_path:  Path — absolute path to the source file.
+        rel_path:  str  — repo-relative path (used in IDs).
+        module_id: str  — parent module ID.
+
+    Returns:
+        list[_FunctionNode]
+    """
+    functions: list = []
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return functions
+
+    seen: set = set()
+    for pattern in _JS_FUNC_PATTERNS:
+        for m in pattern.finditer(source):
+            name = m.group(1)
+            if name in seen:
+                continue
+            seen.add(name)
+            line_no = source[: m.start()].count("\n") + 1
+            functions.append(_FunctionNode(
+                id=f"function:{rel_path}:{name}",
+                name=name,
+                path=rel_path,
+                module_id=module_id,
+                line=line_no,
+                args=[],
+                returns=None,
+                purpose="",
+                warnings=[],
+            ))
+
+    return functions
+
+
+# ─── Import / dependency edges ────────────────────────────────────────────── #
+
+def _detect_edges(
+    root: Path,
+    files: list,
+    module_by_id: dict,
+    module_by_path: dict,
+) -> tuple:
+    """Detect module-level import dependencies and return deduplicated edges.
+
+    Python: resolves 'import x' and 'from x import y' via ast; maps the
+    top-level package name to a known module.  Confidence: high.
+
+    JS/TS: resolves 'import … from' and require() via regex; relative paths
+    are traced back to their containing module.  Confidence: medium.
+
+    Args:
+        root:            Path — repository root.
+        files:           list[_FileNode] — collected source files.
+        module_by_id:   dict — module_id → _Module.
+        module_by_path: dict — module.path → _Module.
+
+    Returns:
+        tuple — (edges: list[_Edge], warnings: list[str])
+    """
+    name_to_mod_id: dict = {m.name: m.id for m in module_by_id.values()}
+
+    # Accumulate (from_id, to_id) → highest confidence seen
+    pair_conf: dict = {}
+    warnings:  list = []
+
+    for f in files:
+        abs_path   = root / f.path
+        from_mod   = f.module_id
+
+        if f.language == "Python":
+            for imp in _parse_python_imports(abs_path):
+                top = imp.split(".")[0]
+                to_mod = name_to_mod_id.get(top)
+                if to_mod and to_mod != from_mod:
+                    key = (from_mod, to_mod)
+                    if pair_conf.get(key) != "high":
+                        pair_conf[key] = "high"
+
+        elif f.language in ("JavaScript", "TypeScript"):
+            for spec in _parse_js_imports(abs_path):
+                to_mod = _resolve_js_import(spec, f.path, module_by_path, name_to_mod_id)
+                if to_mod and to_mod != from_mod:
+                    key = (from_mod, to_mod)
+                    if key not in pair_conf:
+                        pair_conf[key] = "medium"
+
+    # Build deduplicated Edge objects
+    edges: list = []
+    seen_ids: set = set()
+    for (from_id, to_id), confidence in pair_conf.items():
+        from_name = from_id.replace("module:", "")
+        to_name   = to_id.replace("module:", "")
+        edge_id   = f"edge:{from_name}->{to_name}"
+        if edge_id in seen_ids:
+            continue
+        seen_ids.add(edge_id)
+        edges.append(_Edge(
+            id=edge_id,
+            from_id=from_id,
+            to_id=to_id,
+            type="import",
+            label="imports",
+            confidence=confidence,
+        ))
+
+    return edges, warnings
+
+
+def _parse_python_imports(abs_path: Path) -> list:
+    """Parse import statements from a Python file using ast.
+
+    Args:
+        abs_path: Path — absolute path to the .py file.
+
+    Returns:
+        list[str] — imported module names (e.g. "os", "openfde.server").
+    """
+    imports: list = []
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+        tree   = ast.parse(source, filename=str(abs_path))
+    except (SyntaxError, OSError):
+        return imports
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.append(node.module)
+
+    return imports
+
+
+# Static import: 'from … from "specifier"' covers both named and default forms
+_RE_JS_FROM    = re.compile(r"""from\s+['"]([^'"]+)['"]""")
+# CommonJS require
+_RE_JS_REQUIRE = re.compile(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""")
+# Dynamic import()
+_RE_JS_DYN     = re.compile(r"""import\s*\(\s*['"]([^'"]+)['"]\s*\)""")
+
+
+def _parse_js_imports(abs_path: Path) -> list:
+    """Parse import / require specifiers from a JS / TS file via regex.
+
+    Args:
+        abs_path: Path — absolute path to the source file.
+
+    Returns:
+        list[str] — specifiers (relative paths or bare package names).
+    """
+    imports: list = []
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return imports
+
+    for pattern in (_RE_JS_FROM, _RE_JS_REQUIRE, _RE_JS_DYN):
+        for m in pattern.finditer(source):
+            imports.append(m.group(1))
+
+    return imports
+
+
+def _resolve_js_import(
+    specifier: str,
+    source_rel: str,
+    module_by_path: dict,
+    name_to_mod_id: dict,
+) -> Optional[str]:
+    """Resolve a JS import specifier to a known module ID.
+
+    Relative specifiers (e.g. '../api/backend') are resolved from the
+    importing file's directory.  Bare specifiers (e.g. 'react') are
+    matched against the top-level module names.
+
+    Args:
+        specifier:     str  — the imported path string.
+        source_rel:    str  — repo-relative path of the importing file.
+        module_by_path: dict — module.path → _Module.
+        name_to_mod_id: dict — module name → module ID.
+
+    Returns:
+        str | None — module ID if resolved, else None.
+    """
+    if specifier.startswith("."):
+        # Relative import — resolve against the importing file's directory
+        source_dir = Path(source_rel).parent
+        resolved   = (source_dir / specifier).as_posix()
+        for mod_path, mod in module_by_path.items():
+            if resolved == mod_path or resolved.startswith(mod_path + "/"):
+                return mod.id
+        return None
+    else:
+        # Bare specifier — match top-level name only
+        top = specifier.split("/")[0]
+        return name_to_mod_id.get(top)
+
+
+# ─── Function-level dataflow (Step 23) ────────────────────────────────────── #
+#
+# Data flows at function level (one function calls another); those flows roll up
+# to file-level and module-level edges. Import edges become fallback-only. The
+# resolver is deliberately conservative — high-signal edges over noisy guesses.
+# Python: ast-based (same-file, self-method, and `from x import fn` resolution).
+# JS/TS: same-file heuristic at low confidence, with a warning.
+
+_CONF_RANK: dict = {"high": 3, "medium": 2, "low": 1}
+_ROLLUP_FLOW_CAP: int = 12   # underlying flow summaries kept per rollup edge
+
+
+def _conf_max(a: str, b: str) -> str:
+    """Return the higher-confidence label of two."""
+    return a if _CONF_RANK.get(a, 0) >= _CONF_RANK.get(b, 0) else b
+
+
+def _short_name(name: str) -> str:
+    """Return the short callable name (drop an enclosing Class. prefix)."""
+    return name.split(".")[-1]
+
+
+def _extract_flows(root: Path, file_dicts: list, func_dicts: list) -> tuple:
+    """Resolve function-level call flows across the collected files.
+
+    Args:
+        root:       Path — repository root.
+        file_dicts: list[dict] — serialised file nodes (path, moduleId, language).
+        func_dicts: list[dict] — serialised function nodes (id, name, path, …).
+
+    Returns:
+        tuple — (flows: list[dict], warnings: list[str]). Each flow has the
+        Step-23 shape: id, fromFunctionId, toFunctionId, fromFile, toFile,
+        fromModuleId, toModuleId, type, label, confidence, evidence.
+    """
+    callable_by_file_name: dict = {}   # (path, simple_name) -> fn_id  (funcs + classes)
+    methods_by_file:       dict = {}   # (path, class, method) -> fn_id
+    fn_by_id:              dict = {}
+    module_by_file:        dict = {}
+
+    for fn in func_dicts:
+        fn_by_id[fn["id"]] = fn
+        nm = fn["name"]
+        if "." in nm:
+            cls, meth = nm.split(".", 1)
+            methods_by_file[(fn["path"], cls, meth)] = fn["id"]
+        else:
+            callable_by_file_name[(fn["path"], nm)] = fn["id"]
+
+    for fl in file_dicts:
+        module_by_file[fl["path"]] = fl["moduleId"]
+
+    # Dotted python module name -> repo file path (for `from x import fn`).
+    dotted_to_path: dict = {}
+    for fl in file_dicts:
+        if fl["language"] != "Python":
+            continue
+        p = fl["path"]
+        no_ext = p[:-3] if p.endswith(".py") else p
+        parts = no_ext.split("/")
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts:
+            dotted_to_path[".".join(parts)] = p
+
+    flows:    dict = {}   # (owner_id, callee_id) -> flow dict (deduped)
+    warnings: list = []
+    js_seen = False
+
+    for fl in file_dicts:
+        abs_path = root / fl["path"]
+        if fl["language"] == "Python":
+            _py_flows(abs_path, fl["path"], fl["moduleId"], flows,
+                      callable_by_file_name, methods_by_file, fn_by_id,
+                      module_by_file, dotted_to_path)
+        elif fl["language"] in ("JavaScript", "TypeScript"):
+            js_seen = True
+            _js_flows(abs_path, fl["path"], fl["moduleId"], flows, func_dicts, fn_by_id)
+
+    if js_seen:
+        warnings.append("JS/TS function-level flows are heuristic and low-confidence (same-file only).")
+
+    return list(flows.values()), warnings
+
+
+def _resolve_importfrom(node, rel: str, dotted_to_path: dict):
+    """Resolve a `from X import …` statement to a repo file path, or None.
+
+    Handles absolute (`from auth.tokens import x`) and simple relative
+    (`from .tokens import x`) forms.
+    """
+    if node.level and node.level > 0:
+        base_parts = rel.split("/")[:-1]          # package dir of the importing file
+        up = node.level - 1
+        if up:
+            base_parts = base_parts[:-up] if up <= len(base_parts) else []
+        target = list(base_parts) + (node.module.split(".") if node.module else [])
+        return dotted_to_path.get(".".join(target)) if target else None
+    if not node.module:
+        return None
+    return dotted_to_path.get(node.module)
+
+
+def _py_flows(abs_path, rel, module_id, flows,
+              callable_by_file_name, methods_by_file, fn_by_id,
+              module_by_file, dotted_to_path) -> None:
+    """Extract Python function-call flows from one file into the `flows` dict."""
+    try:
+        tree = ast.parse(abs_path.read_text(encoding="utf-8", errors="replace"), filename=rel)
+    except (SyntaxError, OSError):
+        return
+
+    # Local name -> (target_file, original_attr) for resolvable `from x import fn`.
+    import_map: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            t_rel = _resolve_importfrom(node, rel, dotted_to_path)
+            if not t_rel:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                import_map[alias.asname or alias.name] = (t_rel, alias.name)
+
+    def add(owner_id, callee_id, conf, lineno):
+        if owner_id == callee_id:
+            return                                  # ignore self-recursion
+        caller, callee = fn_by_id.get(owner_id), fn_by_id.get(callee_id)
+        if not caller or not callee:
+            return
+        key = (owner_id, callee_id)
+        existing = flows.get(key)
+        if existing and _CONF_RANK.get(conf, 0) <= _CONF_RANK.get(existing["confidence"], 0):
+            return
+        flows[key] = {
+            "id":             f"flow:{owner_id}->{callee_id}",
+            "fromFunctionId": owner_id,
+            "toFunctionId":   callee_id,
+            "fromFile":       caller["path"],
+            "toFile":         callee["path"],
+            "fromModuleId":   module_by_file.get(caller["path"], module_id),
+            "toModuleId":     module_by_file.get(callee["path"], callee["moduleId"]),
+            "type":           "call",
+            "label":          f"{_short_name(caller['name'])}() → {_short_name(callee['name'])}()",
+            "confidence":     conf,
+            "evidence":       f"line {lineno}: {_short_name(callee['name'])}()",
+        }
+
+    def resolve(call, class_name):
+        func = call.func
+        if isinstance(func, ast.Name):
+            nm = func.id
+            tid = callable_by_file_name.get((rel, nm))
+            if tid:
+                return tid, "high"               # same-file bare call
+            if nm in import_map:
+                t_rel, t_attr = import_map[nm]
+                tid = callable_by_file_name.get((t_rel, t_attr))
+                if tid:
+                    return tid, "medium"         # imported function
+            return None
+        if isinstance(func, ast.Attribute):
+            if isinstance(func.value, ast.Name) and func.value.id == "self" and class_name:
+                tid = methods_by_file.get((rel, class_name, func.attr))
+                if tid:
+                    return tid, "high"           # self.method()
+        return None
+
+    def scan(owner_id, body_node, class_name):
+        for sub in ast.walk(body_node):
+            if isinstance(sub, ast.Call):
+                r = resolve(sub, class_name)
+                if r:
+                    add(owner_id, r[0], r[1], getattr(sub, "lineno", 0))
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scan(f"function:{rel}:{node.name}", node, None)
+        elif isinstance(node, ast.ClassDef):
+            for item in ast.iter_child_nodes(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scan(f"function:{rel}:{node.name}.{item.name}", item, node.name)
+
+
+def _js_flows(abs_path, rel, module_id, flows, func_dicts, fn_by_id) -> None:
+    """Heuristic same-file JS/TS call flows (low confidence) into `flows`."""
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    defs = sorted([f for f in func_dicts if f["path"] == rel], key=lambda f: f["line"])
+    if not defs:
+        return
+
+    def owner_at(line):
+        owner = None
+        for f in defs:
+            if f["line"] <= line:
+                owner = f
+            else:
+                break
+        return owner
+
+    for f in defs:
+        # Bare call `name(` not preceded by a word char or '.' (excludes obj.name()).
+        pat = re.compile(r"(?<![\w.])" + re.escape(f["name"]) + r"\s*\(")
+        for m in pat.finditer(source):
+            line = source[: m.start()].count("\n") + 1
+            if line == f["line"]:
+                continue                            # the definition itself
+            owner = owner_at(line)
+            if not owner or owner["id"] == f["id"]:
+                continue
+            key = (owner["id"], f["id"])
+            if key in flows:
+                continue
+            flows[key] = {
+                "id":             f"flow:{owner['id']}->{f['id']}",
+                "fromFunctionId": owner["id"],
+                "toFunctionId":   f["id"],
+                "fromFile":       rel,
+                "toFile":         rel,
+                "fromModuleId":   module_id,
+                "toModuleId":     module_id,
+                "type":           "call",
+                "label":          f"{_short_name(owner['name'])}() → {_short_name(f['name'])}()",
+                "confidence":     "low",
+                "evidence":       f"line {line}: {_short_name(f['name'])}()",
+            }
+
+
+def _rollup_flows(flows: list) -> tuple:
+    """Roll function flows up to module-level and file-level groupings.
+
+    Args:
+        flows: list[dict] — function-level flow edges.
+
+    Returns:
+        tuple — (module_rollups, file_rollups), each a dict keyed by an
+        ordered pair → {"confidence", "flows": [capped summaries], "count"}.
+    """
+    module_rollups: dict = {}
+    file_rollups:   dict = {}
+
+    def accumulate(store, key, fw):
+        entry = store.setdefault(key, {"confidence": "low", "flows": [], "count": 0})
+        entry["count"] += 1
+        entry["confidence"] = _conf_max(entry["confidence"], fw["confidence"])
+        if len(entry["flows"]) < _ROLLUP_FLOW_CAP:
+            entry["flows"].append({
+                "id":             fw["id"],
+                "label":          fw["label"],
+                "fromFile":       fw["fromFile"],
+                "toFile":         fw["toFile"],
+                "fromFunctionId": fw["fromFunctionId"],
+                "toFunctionId":   fw["toFunctionId"],
+                "type":           fw["type"],
+                "confidence":     fw["confidence"],
+            })
+
+    for fw in flows:
+        if fw["fromModuleId"] != fw["toModuleId"]:
+            accumulate(module_rollups, (fw["fromModuleId"], fw["toModuleId"]), fw)
+        if fw["fromFile"] != fw["toFile"]:
+            accumulate(file_rollups, (fw["fromFile"], fw["toFile"]), fw)
+
+    return module_rollups, file_rollups
+
+
+def _rollup_label(entry: dict) -> str:
+    """Compact label for a rollup edge.
+
+    Single underlying flow → the function pair (`validate() → save()`);
+    multiple → `N function flows`.
+    """
+    if entry["count"] == 1 and entry["flows"]:
+        return entry["flows"][0]["label"]
+    return f"{entry['count']} function flows"
+
+
+def _merge_module_edges(import_edges: list, module_rollups: dict) -> list:
+    """Merge dataflow rollups with import edges; dataflow wins per module pair.
+
+    Args:
+        import_edges:   list[_Edge] — raw import edges.
+        module_rollups: dict — (from_mod, to_mod) → rollup entry.
+
+    Returns:
+        list[dict] — module edges (backward-compatible shape + flow metadata).
+    """
+    by_pair: dict = {}
+
+    for (fm, tm), entry in module_rollups.items():
+        from_name, to_name = fm.replace("module:", ""), tm.replace("module:", "")
+        by_pair[(fm, tm)] = {
+            "id":         f"edge:{from_name}->{to_name}",
+            "from":       fm,
+            "to":         tm,
+            "type":       "dataflow",
+            "label":      _rollup_label(entry),
+            "confidence": entry["confidence"],
+            "flows":      entry["flows"],
+            "flowCount":  entry["count"],
+        }
+
+    for e in import_edges:
+        key = (e.from_id, e.to_id)
+        if key in by_pair:
+            by_pair[key]["hasImport"] = True          # dataflow already present
+            continue
+        d = e.to_dict()
+        d["flows"] = []
+        d["flowCount"] = 0
+        by_pair[key] = d
+
+    return list(by_pair.values())
+
+
+def _build_file_edges(file_rollups: dict, file_dicts: list) -> list:
+    """Build file-level dataflow rollup edges from grouped flows.
+
+    Args:
+        file_rollups: dict — (from_file, to_file) → rollup entry.
+        file_dicts:   list[dict] — serialised file nodes.
+
+    Returns:
+        list[dict] — file-level edges (id, from/to file ids, label, flows, …).
+    """
+    fid_by_path = {f["path"]: f["id"] for f in file_dicts}
+    mod_by_path = {f["path"]: f["moduleId"] for f in file_dicts}
+    out: list = []
+    for (ff, tf), entry in file_rollups.items():
+        out.append({
+            "id":           f"fileedge:{ff}->{tf}",
+            "from":         fid_by_path.get(ff, f"file:{ff}"),
+            "to":           fid_by_path.get(tf, f"file:{tf}"),
+            "fromFile":     ff,
+            "toFile":       tf,
+            "fromModuleId": mod_by_path.get(ff, ""),
+            "toModuleId":   mod_by_path.get(tf, ""),
+            "type":         "dataflow",
+            "label":        _rollup_label(entry),
+            "confidence":   entry["confidence"],
+            "flows":        entry["flows"],
+            "flowCount":    entry["count"],
+        })
+    return out
+
+
+# ─── Canvas layout ────────────────────────────────────────────────────────── #
+
+_BOX_W:    int = 220
+_BOX_H:    int = 130
+_COL_GAP:  int = 60
+_ROW_GAP:  int = 80
+_MAX_COLS: int = 3
+_ORIGIN_X: int = 80
+_ORIGIN_Y: int = 80
+_ARROW_FLOW_CAP: int = 8   # flow summaries embedded per canvas arrow
+
+
+def _module_id_to_box_id(module_id: str) -> str:
+    """Derive a stable canvas box ID from a module ID.
+
+    Args:
+        module_id: str — e.g. "module:frontend".
+
+    Returns:
+        str — e.g. "box:module:frontend".
+    """
+    return f"box:{module_id}"
+
+
+_LINKED_FILES_CAP: int = 25   # max file paths stored per box
+
+
+def _layout_boxes(modules: list, files: list) -> list:
+    """Arrange module dicts into a deterministic grid of canvas boxes.
+
+    Modules are sorted alphabetically.  IDs are derived from module IDs
+    so that regenerating the canvas yields the same box IDs.  Each box
+    includes linked path metadata for future Source Inspector / plan context.
+
+    Args:
+        modules: list[dict] — serialised module dicts from analyze_repo().
+        files:   list[dict] — serialised file dicts from analyze_repo().
+            Used to populate linkedFiles for each box.
+
+    Returns:
+        list[dict] — canvas box dicts with keys:
+            id, x, y, w, h, type, title, prompt, files,
+            linkedPath, linkedFiles, moduleId.
+    """
+    # Index files by moduleId for O(1) lookup
+    files_by_module: dict = {}
+    for f in files:
+        files_by_module.setdefault(f["moduleId"], []).append(f["path"])
+
+    boxes: list = []
+    sorted_mods = sorted(modules, key=lambda m: m["name"].lower())
+
+    for i, mod in enumerate(sorted_mods):
+        col = i % _MAX_COLS
+        row = i // _MAX_COLS
+        x   = _ORIGIN_X + col * (_BOX_W + _COL_GAP)
+        y   = _ORIGIN_Y + row * (_BOX_H + _ROW_GAP)
+
+        # Short description for the box prompt field
+        lang_parts = [
+            f"{v} {k}"
+            for k, v in sorted(mod["languages"].items(), key=lambda kv: -kv[1])
+        ]
+        lang_str = ", ".join(lang_parts[:3]) if lang_parts else "no source files"
+        prompt   = f"{mod['type'].capitalize()}: {mod['fileCount']} file(s) — {lang_str}"
+
+        linked_files = sorted(files_by_module.get(mod["id"], []))[:_LINKED_FILES_CAP]
+
+        boxes.append({
+            "id":          _module_id_to_box_id(mod["id"]),
+            "x":           x,
+            "y":           y,
+            "w":           _BOX_W,
+            "h":           _BOX_H,
+            "type":        "dotted",
+            "title":       mod["name"],
+            "prompt":      prompt,
+            "files":       [],
+            "linkedPath":  mod["path"],
+            "linkedFiles": linked_files,
+            "moduleId":    mod["id"],
+        })
+
+    return boxes
+
+
+def _make_arrows(edges: list, mod_id_to_box: dict) -> list:
+    """Convert ArchGraph edge dicts to canvas arrow dicts.
+
+    Port direction is derived from the relative positions of the source
+    and target boxes:
+    - Horizontal separation dominates → E→W or W→E
+    - Vertical separation dominates   → S→N or N→S
+
+    Args:
+        edges:        list[dict] — serialised edge dicts from analyze_repo().
+        mod_id_to_box: dict — module_id → canvas box dict.
+
+    Returns:
+        list[dict] — canvas arrow dicts (id, fromBox, fromPort, toBox, toPort, label).
+    """
+    arrows: list = []
+
+    for edge in edges:
+        from_box = mod_id_to_box.get(edge["from"])
+        to_box   = mod_id_to_box.get(edge["to"])
+        if not from_box or not to_box:
+            continue
+
+        from_cx = from_box["x"] + from_box["w"] / 2
+        to_cx   = to_box["x"]   + to_box["w"] / 2
+        from_cy = from_box["y"] + from_box["h"] / 2
+        to_cy   = to_box["y"]   + to_box["h"] / 2
+
+        dx = to_cx - from_cx
+        dy = to_cy - from_cy
+
+        if abs(dx) >= abs(dy):
+            from_port = "E" if dx > 0 else "W"
+            to_port   = "W" if dx > 0 else "E"
+        else:
+            from_port = "S" if dy > 0 else "N"
+            to_port   = "N" if dy > 0 else "S"
+
+        arrows.append({
+            "id":         f"arrow:{edge['id']}",
+            "fromBox":    from_box["id"],
+            "fromPort":   from_port,
+            "toBox":      to_box["id"],
+            "toPort":     to_port,
+            "label":      edge.get("label", ""),
+            # Step 23: carry rollup metadata so the inspector/hover can show the
+            # underlying function flows without refetching the graph.
+            "edgeType":   edge.get("type", "import"),
+            "confidence": edge.get("confidence", ""),
+            "flowCount":  edge.get("flowCount", 0),
+            "flows":      (edge.get("flows") or [])[:_ARROW_FLOW_CAP],
+            "hasImport":  edge.get("hasImport", edge.get("type") == "import"),
+        })
+
+    return arrows
