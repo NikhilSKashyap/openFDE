@@ -260,7 +260,7 @@ def generate_canvas_state(root: Path) -> tuple:
             graph is the raw ArchGraph dict from analyze_repo().
     """
     graph           = analyze_repo(root)
-    boxes           = _layout_boxes(graph["modules"], graph["files"])
+    boxes           = _layout_boxes(graph["modules"], graph["files"], graph["edges"])
     # Map by each box's moduleId (boxes are alphabetically sorted, modules are
     # not — never zip the two lists positionally).
     mod_id_to_box   = {b["moduleId"]: b for b in boxes}
@@ -1212,7 +1212,7 @@ def _build_file_edges(file_rollups: dict, file_dicts: list) -> list:
 
 _BOX_W:    int = 220
 _BOX_H:    int = 130
-_COL_GAP:  int = 60
+_COL_GAP:  int = 210
 _ROW_GAP:  int = 80
 _MAX_COLS: int = 3
 _ORIGIN_X: int = 80
@@ -1235,48 +1235,74 @@ def _module_id_to_box_id(module_id: str) -> str:
 _LINKED_FILES_CAP: int = 25   # max file paths stored per box
 
 
-def _layout_boxes(modules: list, files: list) -> list:
-    """Arrange module dicts into a deterministic grid of canvas boxes.
+def _module_layers(mod_ids: list, edges: list):
+    """Assign each module a flow layer via longest-path from a source.
 
-    Modules are sorted alphabetically.  IDs are derived from module IDs
-    so that regenerating the canvas yields the same box IDs.  Each box
-    includes linked path metadata for future Source Inspector / plan context.
+    Used to lay modules out left-to-right in dependency order (a clean pipeline)
+    instead of an alphabetical grid. Returns None when there are no module edges
+    or when the graph has a cycle — callers then fall back to the grid.
+
+    Args:
+        mod_ids: list[str] — module ids.
+        edges:   list[dict] — module edges ({from, to, …}).
+
+    Returns:
+        dict | None — {module_id: layer_index}, or None to use the grid.
+    """
+    ids = set(mod_ids)
+    adj = {m: [] for m in mod_ids}
+    indeg = {m: 0 for m in mod_ids}
+    has_edge = False
+    for e in (edges or []):
+        f, t = e.get("from"), e.get("to")
+        if f in ids and t in ids and f != t:
+            adj[f].append(t)
+            indeg[t] += 1
+            has_edge = True
+    if not has_edge:
+        return None
+    layer = {m: 0 for m in mod_ids}
+    indeg2 = dict(indeg)
+    queue = sorted(m for m in mod_ids if indeg2[m] == 0)
+    processed = 0
+    while queue:
+        m = queue.pop(0)
+        processed += 1
+        for t in sorted(adj[m]):
+            if layer[t] < layer[m] + 1:
+                layer[t] = layer[m] + 1
+            indeg2[t] -= 1
+            if indeg2[t] == 0:
+                queue.append(t)
+    if processed < len(mod_ids):
+        return None   # cycle — fall back to the grid for safety
+    return layer
+
+
+def _layout_boxes(modules: list, files: list, edges: list = None) -> list:
+    """Arrange module dicts into canvas boxes.
+
+    When module dataflow edges exist, modules are laid out left-to-right in
+    **flow order** (dependency layers) so the architecture reads as a clean
+    pipeline; otherwise they fall back to a deterministic alphabetical grid.
+    IDs are derived from module IDs so regenerating yields the same box IDs.
 
     Args:
         modules: list[dict] — serialised module dicts from analyze_repo().
-        files:   list[dict] — serialised file dicts from analyze_repo().
-            Used to populate linkedFiles for each box.
+        files:   list[dict] — serialised file dicts (for linkedFiles).
+        edges:   list[dict] — module edges (for flow-order layout); optional.
 
     Returns:
-        list[dict] — canvas box dicts with keys:
-            id, x, y, w, h, type, title, prompt, files,
-            linkedPath, linkedFiles, moduleId.
+        list[dict] — canvas box dicts.
     """
-    # Index files by moduleId for O(1) lookup
     files_by_module: dict = {}
     for f in files:
         files_by_module.setdefault(f["moduleId"], []).append(f["path"])
 
-    boxes: list = []
-    sorted_mods = sorted(modules, key=lambda m: m["name"].lower())
-
-    for i, mod in enumerate(sorted_mods):
-        col = i % _MAX_COLS
-        row = i // _MAX_COLS
-        x   = _ORIGIN_X + col * (_BOX_W + _COL_GAP)
-        y   = _ORIGIN_Y + row * (_BOX_H + _ROW_GAP)
-
-        # Short description for the box prompt field
-        lang_parts = [
-            f"{v} {k}"
-            for k, v in sorted(mod["languages"].items(), key=lambda kv: -kv[1])
-        ]
+    def make_box(mod, x, y):
+        lang_parts = [f"{v} {k}" for k, v in sorted(mod["languages"].items(), key=lambda kv: -kv[1])]
         lang_str = ", ".join(lang_parts[:3]) if lang_parts else "no source files"
-        prompt   = f"{mod['type'].capitalize()}: {mod['fileCount']} file(s) — {lang_str}"
-
-        linked_files = sorted(files_by_module.get(mod["id"], []))[:_LINKED_FILES_CAP]
-
-        boxes.append({
+        return {
             "id":          _module_id_to_box_id(mod["id"]),
             "x":           x,
             "y":           y,
@@ -1284,12 +1310,33 @@ def _layout_boxes(modules: list, files: list) -> list:
             "h":           _BOX_H,
             "type":        "dotted",
             "title":       mod["name"],
-            "prompt":      prompt,
+            "prompt":      f"{mod['type'].capitalize()}: {mod['fileCount']} file(s) — {lang_str}",
             "files":       [],
             "linkedPath":  mod["path"],
-            "linkedFiles": linked_files,
+            "linkedFiles": sorted(files_by_module.get(mod["id"], []))[:_LINKED_FILES_CAP],
             "moduleId":    mod["id"],
-        })
+        }
+
+    sorted_mods = sorted(modules, key=lambda m: m["name"].lower())
+    layers = _module_layers([m["id"] for m in modules], edges)
+
+    boxes: list = []
+    if layers is None:
+        # Alphabetical grid (no module dataflow / cyclic — unchanged behavior).
+        for i, mod in enumerate(sorted_mods):
+            x = _ORIGIN_X + (i % _MAX_COLS) * (_BOX_W + _COL_GAP)
+            y = _ORIGIN_Y + (i // _MAX_COLS) * (_BOX_H + _ROW_GAP)
+            boxes.append(make_box(mod, x, y))
+    else:
+        # Flow-order: one column per dependency layer, stacked within a layer.
+        by_layer: dict = {}
+        for mod in sorted_mods:
+            by_layer.setdefault(layers[mod["id"]], []).append(mod)
+        for lyr in sorted(by_layer):
+            for row, mod in enumerate(by_layer[lyr]):
+                x = _ORIGIN_X + lyr * (_BOX_W + _COL_GAP)
+                y = _ORIGIN_Y + row * (_BOX_H + _ROW_GAP)
+                boxes.append(make_box(mod, x, y))
 
     return boxes
 

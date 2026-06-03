@@ -68,7 +68,7 @@ from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
-from openfde.git_timeline import changed_paths, ensure_baseline, git_commit, git_diff, git_status, git_timeline
+from openfde.git_timeline import changed_paths, ensure_baseline, git_commit, git_diff, git_status, git_timeline, worktree_diff
 from openfde.report import generate_report
 from openfde.spec import compile_spec
 from openfde.workflow_result import commit_message, source_files, tests_summary, validate_result
@@ -1274,9 +1274,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     _ARCH_SYS = ("You are the Architect. Produce a short, concrete implementation brief for the "
                  "Senior Dev: what to change, the expected outcome, and how to verify it. Stay within "
                  "the editable files. No code fences, no preamble — just the brief.")
-    _VER_SYS = ("You are the Verifier. Review the Senior Dev's result against the brief. Respond with "
+    _VER_SYS = ("You are the Verifier. Review the Senior Dev's ACTUAL DIFF against the brief — judge the "
+                "code that was written, not the self-report. Respond with "
                 'JSON ONLY: {"status":"passed|failed|needs_human","summary":"...","fixPrompt":"...",'
-                '"testsSuggested":[],"risks":[]}. Fail if the change does not satisfy the intent.')
+                '"testsSuggested":[],"risks":[]}. Fail if the diff does not satisfy the intent, is empty, '
+                "or only adds a placeholder/comment without real behavior.")
 
     async def post_council_run(request: web.Request) -> web.Response:
         """Run one bounded Agent Council loop over the selected scope (Step 29).
@@ -1347,16 +1349,27 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     f"Edit only: {', '.join(c['editable'])}. Keep changes minimal and verify the intent.")
 
         def verifier(brief, result):
+            # The Senior Dev's writes are still uncommitted in the work tree here
+            # (reconcile commits AFTER the council returns), so this is the REAL diff.
+            changed = [f["path"] for f in result.get("filesChanged", [])]
+            diff = worktree_diff(path, changed or editable)
+            patch = (diff.get("patch") or "").strip()
             if ver_caller:
                 user = (f"Brief:\n{brief}\n\nResult status: {result.get('status')}\n"
-                        f"Files changed: {[f['path'] for f in result.get('filesChanged', [])]}\n"
+                        f"Files changed: {changed}\n"
                         f"Report: {result.get('reportSummary', '')}\n"
-                        f"Verification: {result.get('verificationResult', '')}")
+                        f"Verification: {result.get('verificationResult', '')}\n\n"
+                        f"Actual diff (review THIS directly):\n{patch or '(no diff captured)'}")
                 return _parse_verdict(ver_caller(_VER_SYS, user), result)
-            if result.get("status") == "passed" and result.get("filesChanged"):
-                return {"status": "passed", "summary": "In-scope changes applied; accepted.",
+            # Deterministic fallback: require an accepted status AND a real diff.
+            if result.get("status") == "passed" and patch:
+                where = ", ".join(changed) or "scope"
+                return {"status": "passed",
+                        "summary": f"Diff applied to {where} ({len(patch)} chars); accepted.",
                         "fixPrompt": "", "testsSuggested": [], "risks": []}
-            return {"status": "failed", "summary": "No accepted in-scope change.",
+            return {"status": "failed",
+                    "summary": "No real in-scope diff to accept." if not patch
+                               else "Change did not pass review.",
                     "fixPrompt": "Make a concrete in-scope edit that satisfies the intent.",
                     "testsSuggested": [], "risks": []}
 

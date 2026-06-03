@@ -1,5 +1,20 @@
 import { getPortPos, bezierPath, getBezierMidpoint } from './arrowUtils'
 
+function nudgePortPoint(point, port, amount) {
+  switch (String(port || '').toLowerCase()) {
+    case 'n': return { ...point, y: point.y - amount }
+    case 'e': return { ...point, x: point.x + amount }
+    case 's': return { ...point, y: point.y + amount }
+    case 'w': return { ...point, x: point.x - amount }
+    default: return point
+  }
+}
+
+function fitLabel(text, maxWidth) {
+  const maxChars = Math.max(4, Math.floor((maxWidth - 16) / 6.5))
+  return text.length > maxChars ? `${text.slice(0, Math.max(1, maxChars - 1))}…` : text
+}
+
 export default function Arrow({ arrow, boxes, selected, runStatus }) {
   const fromBox = boxes.find(b => b.id === arrow.fromBox)
   const toBox   = boxes.find(b => b.id === arrow.toBox)
@@ -7,20 +22,26 @@ export default function Arrow({ arrow, boxes, selected, runStatus }) {
 
   const start = getPortPos(fromBox, arrow.fromPort)
   const end   = getPortPos(toBox,   arrow.toPort)
-  const d     = bezierPath(start, arrow.fromPort, end, arrow.toPort)
-  const mid   = getBezierMidpoint(start, arrow.fromPort, end, arrow.toPort)
+  const visualStart = nudgePortPoint(start, arrow.fromPort, 14)
+  const visualEnd   = nudgePortPoint(end,   arrow.toPort,   14)
+  const d     = bezierPath(visualStart, arrow.fromPort, visualEnd, arrow.toPort)
+  const mid   = getBezierMidpoint(visualStart, arrow.fromPort, visualEnd, arrow.toPort)
 
-  const isDotted = arrow.type === 'dotted'
+  const isDotted = arrow.type !== 'solid'
   const failed   = runStatus === 'failed'
   const active   = runStatus === 'active'
   // Failure recolours to violation; dotted/solid styling otherwise preserved.
   const color    = failed ? 'var(--violation)' : (isDotted ? 'var(--dotted)' : 'var(--solid)')
   const markerId = failed ? 'arrowhead-failed' : (isDotted ? 'arrowhead-dotted' : 'arrowhead-solid')
   const hasLabel = arrow.label && arrow.label.trim().length > 0
-  const labelText = hasLabel
-    ? (arrow.label.length > 16 ? arrow.label.slice(0, 15) + '…' : arrow.label)
+  const rawLabel = hasLabel ? arrow.label.trim() : ''
+  const horizontalGap = Math.abs(visualEnd.x - visualStart.x)
+  const showLabel = hasLabel && horizontalGap >= 110
+  const maxLabelW = Math.max(64, Math.min(118, horizontalGap - 42))
+  const labelText = showLabel
+    ? fitLabel(rawLabel, maxLabelW)
     : ''
-  const labelW = Math.max(44, labelText.length * 6.5 + 16)
+  const labelW = Math.min(maxLabelW, Math.max(52, labelText.length * 6.2 + 14))
 
   // Step 23: hover tooltip summarising the underlying function-level flows.
   const flows = arrow.flows || []
@@ -52,7 +73,7 @@ export default function Arrow({ arrow, boxes, selected, runStatus }) {
         d={d}
         fill="none"
         stroke={color}
-        strokeWidth={failed ? 2 : 1.5}
+        strokeWidth={failed ? 2 : 1.25}
         strokeDasharray={isDotted ? '6 3' : undefined}
         markerEnd={`url(#${markerId})`}
         pointerEvents="none"
@@ -85,24 +106,25 @@ export default function Arrow({ arrow, boxes, selected, runStatus }) {
       </path>
 
       {/* Label pill at bezier midpoint */}
-      {hasLabel && (
+      {showLabel && (
         <g pointerEvents="none">
           <rect
             x={mid.x - labelW / 2}
-            y={mid.y - 9}
+            y={mid.y - 25}
             width={labelW}
-            height={18}
-            rx={9}
+            height={16}
+            rx={8}
             fill="var(--surface)"
             stroke={color}
-            strokeWidth={1}
+            strokeWidth={0.75}
+            opacity={0.9}
           />
           <text
             x={mid.x}
-            y={mid.y + 4}
+            y={mid.y - 13.5}
             textAnchor="middle"
             fill={color}
-            fontSize={10}
+            fontSize={9.5}
             fontFamily="inherit"
           >
             {labelText}

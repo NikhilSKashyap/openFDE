@@ -343,6 +343,39 @@ def git_diff(root: Path, sha: str, max_patch: int = _MAX_PATCH_CHARS) -> Optiona
     }
 
 
+def worktree_diff(root: Path, paths=None, max_patch: int = _MAX_PATCH_CHARS) -> dict:
+    """Return the *uncommitted* working-tree diff vs HEAD, optionally scoped to paths.
+
+    Unlike ``git_diff`` (which inspects a committed sha), this surfaces changes that
+    are still in the work tree — exactly what the Senior Dev just wrote, before the
+    council reconciles/commits. Brand-new files are made visible via intent-to-add
+    (``git add -N``), which is harmless because the later commit re-stages with
+    ``git add -A``. Used to give the Verifier the *real* change to review.
+
+    Args:
+        root: Path — repository root.
+        paths: list[str] | None — repo-relative paths to limit the diff to (all if None).
+        max_patch: int — maximum characters of patch text to return.
+
+    Returns:
+        dict — {"patch": str, "files": [str], "truncated": bool}.
+    """
+    if not is_git_repo(root):
+        return {"patch": "", "files": [], "truncated": False}
+    sel = [str(p) for p in (paths or []) if p]
+    # intent-to-add so freshly-written untracked files appear as additions
+    _run((["git", "add", "-N", "--"] + sel) if sel else ["git", "add", "-N", "."], root)
+    args = ["git", "diff", "--no-color", "HEAD"] + (["--"] + sel if sel else [])
+    res = _run(args, root)
+    if res.returncode != 0:                          # e.g. repo has no HEAD yet
+        res = _run(["git", "diff", "--no-color"] + (["--"] + sel if sel else []), root)
+    patch = res.stdout or ""
+    truncated = len(patch) > max_patch
+    if truncated:
+        patch = patch[:max_patch] + "\n… [diff truncated]"
+    return {"patch": patch, "files": changed_paths(root, sel) if sel else [], "truncated": truncated}
+
+
 # ─── Commit ───────────────────────────────────────────────────────────────── #
 
 def git_commit(root: Path, summary: str, detail: str = "", trailers: dict = None) -> dict:

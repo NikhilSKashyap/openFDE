@@ -1114,6 +1114,31 @@
 .work-stage-status { font-size: 10px; text-transform: capitalize; }
 .work-stage-summary { font-size: 11px; color: var(--text-muted); line-height: 1.45; margin-top: 2px; }
 
+/* Inline diff in Work Review (Step 30 — Review shows the change in-place) */
+.work-sha {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; color: var(--accent); text-decoration: underline;
+}
+.work-sha code { color: var(--accent); }
+.work-diffwrap { margin-top: 8px; }
+.work-diff-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted); margin-bottom: 4px;
+}
+.work-diff {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1.5; white-space: pre;
+  overflow: auto; max-height: 280px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px;
+}
+.work-diff > div { padding: 0 4px; border-radius: 2px; }
+.work-diff-add { background: rgba(61, 186, 110, 0.14); color: var(--solid); }
+.work-diff-del { background: rgba(238, 51, 51, 0.12); color: var(--violation); }
+.work-diff-hunk { color: var(--accent); }
+.work-diff-meta { color: var(--text-muted); }
+.work-diff-ctx { color: var(--text); }
+
 /* Story card (Batch 5) */
 .story-card {
   padding: 12px 12px 10px;
@@ -1753,28 +1778,35 @@
 
 /* ─── Live-run activity (Step 17) ────────────────────────────────── */
 .run-ring {
-  stroke-width: 2;
+  stroke-width: 2.5;
   stroke-linejoin: round;
 }
 .run-ring.run-planning {
   stroke: var(--active);
-  stroke-dasharray: 5 4;
-  opacity: 0.5;
-  animation: run-pulse 1.6s ease-in-out infinite;
+  stroke-dasharray: 6 5;
+  filter: drop-shadow(0 0 4px var(--active));
+  animation: run-glow 1.8s ease-in-out infinite;
 }
 .run-ring.run-running {
   stroke: var(--active);
-  animation: run-pulse 1s ease-in-out infinite;
+  filter: drop-shadow(0 0 6px var(--active));
+  animation: run-glow 1.5s ease-in-out infinite;
 }
 .run-ring.run-passed {
   stroke: var(--solid);
+  filter: drop-shadow(0 0 6px var(--solid));
   animation: run-fade 2.4s ease-out forwards;
 }
 .run-ring.run-failed {
   stroke: var(--violation);
-  stroke-width: 2.5;
-  opacity: 0.95;
-  animation: run-pulse 1.4s ease-in-out infinite;
+  stroke-width: 3;
+  filter: drop-shadow(0 0 6px var(--violation));
+  animation: run-glow 1.4s ease-in-out infinite;
+}
+/* Soft breathing halo — calmer than a hard opacity flash, reads well on camera. */
+@keyframes run-glow {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
 }
 @keyframes run-pulse {
   0%, 100% { opacity: 0.35; }

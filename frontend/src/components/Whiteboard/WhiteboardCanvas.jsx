@@ -541,8 +541,8 @@ export default function WhiteboardCanvas({
           {/* Live-run activity rings (pulse / passed / failed) */}
           {runRings.map(r => (
             <rect key={`ring-${r.id}`} className={`run-ring run-${r.status}`}
-              x={r.geom.x - 5} y={r.geom.y - 5} width={r.geom.w + 10} height={r.geom.h + 10}
-              rx={11} fill="none" pointerEvents="none" />
+              x={r.geom.x - 7} y={r.geom.y - 7} width={r.geom.w + 14} height={r.geom.h + 14}
+              rx={14} fill="none" pointerEvents="none" />
           ))}
 
           {rubberBand && (

@@ -1,5 +1,5 @@
 export function getPortPos(box, port) {
-  switch (port) {
+  switch (String(port || '').toLowerCase()) {
     case 'n': return { x: box.x + box.w / 2, y: box.y }
     case 'e': return { x: box.x + box.w,     y: box.y + box.h / 2 }
     case 's': return { x: box.x + box.w / 2, y: box.y + box.h }
@@ -9,7 +9,7 @@ export function getPortPos(box, port) {
 }
 
 function ctrlOffset(port, x, y, d) {
-  switch (port) {
+  switch (String(port || '').toLowerCase()) {
     case 'n': return { x,     y: y - d }
     case 's': return { x,     y: y + d }
     case 'e': return { x: x + d, y }

@@ -20,10 +20,15 @@ function scopeLabel(sel) {
   return ''
 }
 
+function councilRunId(msg) {
+  const m = /^council-stage-(.+)-\d+$/.exec(msg?.id || '')
+  return m ? m[1] : null
+}
+
 export default function WorkPanel({
   moment = 'orient', selectionContext = null, story = null,
   specMarkdown = null, commitDiff = null, agentMessages = [], approvals = [],
-  onExecute = null, onExplain = null, onReset = null,
+  onExecute = null, onExplain = null, onOpenDiff = null, onReset = null,
   intent = '', onIntentChange = null,
 }) {
   const setIntent = onIntentChange || (() => {})
@@ -36,11 +41,19 @@ export default function WorkPanel({
   const reviewCommitSha = lastResult
     ? (lastResult.committed ? lastResult.commitSha : null)
     : (commitDiff?.sha || null)
+  // Inline diff for THIS run's commit (pre-loaded after the council commits), so
+  // Review shows the actual change in-place — no detour to the Diff tab.
+  const reviewDiffPatch =
+    reviewCommitSha && commitDiff?.data?.patch &&
+    String(commitDiff.sha).slice(0, 7) === String(reviewCommitSha).slice(0, 7)
+      ? commitDiff.data.patch : null
   const reviewNeedsApproval = !!(lastResult?.approval) || (!lastResult && pendingApproval)
   // Council stage story (Step 29 Slice 3 polish): the Architect → Sr Dev →
   // Verifier stages for THIS run, surfaced directly in Work Review.
-  const councilStages = lastResult?.fromRun
-    ? agentMessages.filter(m => m.councilStage && m.id.startsWith(`council-stage-${lastResult.fromRun}-`))
+  const latestCouncilRun = lastResult?.fromRun ||
+    [...agentMessages].reverse().map(councilRunId).find(Boolean)
+  const councilStages = latestCouncilRun
+    ? agentMessages.filter(m => m.councilStage && councilRunId(m) === latestCouncilRun)
     : []
 
   return (
@@ -128,7 +141,21 @@ export default function WorkPanel({
                 </div>
               )}
               {reviewCommitSha && (
-                <div className="work-scope">Committed <code>{String(reviewCommitSha).slice(0, 7)}</code></div>
+                <div className="work-scope">
+                  Committed{' '}
+                  {onOpenDiff
+                    ? <button className="work-sha" onClick={() => onOpenDiff(reviewCommitSha)}
+                        title="Open the full diff">
+                        <code>{String(reviewCommitSha).slice(0, 7)}</code>
+                      </button>
+                    : <code>{String(reviewCommitSha).slice(0, 7)}</code>}
+                </div>
+              )}
+              {reviewDiffPatch && (
+                <div className="work-diffwrap">
+                  <div className="work-diff-title">The change</div>
+                  <DiffView patch={reviewDiffPatch} />
+                </div>
               )}
               {reviewNeedsApproval && (
                 <p className="work-sub" style={{ color: 'var(--accent)' }}>Approval required — resolve it in Technical.</p>
@@ -136,7 +163,11 @@ export default function WorkPanel({
               {lastResult && !lastResult.committed && !reviewNeedsApproval && lastResult.status !== 'passed' && (
                 <p className="work-sub">No commit — work was not accepted.</p>
               )}
-              {!lastResult && !commitDiff && <p className="work-sub">Run complete.</p>}
+              {!lastResult && !commitDiff && (
+                <p className="work-sub">
+                  No fresh execution result yet. Use the Agent Council backend for the full Architect → Senior Dev → Verifier story.
+                </p>
+              )}
             </Section>
             <div className="work-actions">
               <button className="work-primary" onClick={() => onReset && onReset()}>Done</button>
@@ -167,6 +198,26 @@ function CouncilStage({ stage }) {
         </span>
       </div>
       {stage.summary && <div className="work-stage-summary">{(stage.summary || '').slice(0, 120)}</div>}
+    </div>
+  )
+}
+
+function diffLineClass(ln) {
+  if (ln.startsWith('+') && !ln.startsWith('+++')) return 'work-diff-add'
+  if (ln.startsWith('-') && !ln.startsWith('---')) return 'work-diff-del'
+  if (ln.startsWith('@@')) return 'work-diff-hunk'
+  if (ln.startsWith('diff ') || ln.startsWith('index ') ||
+      ln.startsWith('+++') || ln.startsWith('---')) return 'work-diff-meta'
+  return 'work-diff-ctx'
+}
+
+function DiffView({ patch }) {
+  const lines = String(patch || '').split('\n').slice(0, 120)
+  return (
+    <div className="work-diff">
+      {lines.map((ln, i) => (
+        <div key={i} className={diffLineClass(ln)}>{ln || ' '}</div>
+      ))}
     </div>
   )
 }

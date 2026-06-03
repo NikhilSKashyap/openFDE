@@ -653,6 +653,7 @@ export default function App() {
     setPanelMode('Agent')
     const selectedBoxIds   = [...(canvasState.selectedIds ?? [])]
     const selectedArrowIds = [...(canvasState.selectedArrowIds ?? [])]
+    startSimulatedRun(selectedBoxIds, selectedArrowIds, { hold: true })
     const stamp = new Date().toISOString()
     setAgentMessages(prev => [...prev, {
       id: `agent-start-${stamp}`, role: 'sr_dev', timestamp: stamp,
@@ -662,6 +663,7 @@ export default function App() {
     const res = await postAgentRun({ selectedBoxIds, selectedArrowIds, prompt: userPrompt })
     setExecuting(false)
     if (!res || res.ok === false) {
+      finishRun('failed')
       const reason = (res && res.error) ||
         'Senior Dev must be in API mode — either Anthropic (key + model) or the keyless Echo provider. Open Agent Settings.'
       setAgentMessages(prev => [...prev, {
@@ -671,6 +673,7 @@ export default function App() {
       }])
       return
     }
+    finishRun(res.status === 'failed' ? 'failed' : 'passed')
     const done = new Date().toISOString()
     setAgentMessages(prev => [...prev, {
       id: `agent-result-${res.runId || done}`, role: 'result', timestamp: done,
@@ -698,6 +701,7 @@ export default function App() {
     setPanelMode('Agent')
     const selectedBoxIds   = [...(canvasState.selectedIds ?? [])]
     const selectedArrowIds = [...(canvasState.selectedArrowIds ?? [])]
+    startSimulatedRun(selectedBoxIds, selectedArrowIds, { hold: true })
     const stamp = new Date().toISOString()
     setAgentMessages(prev => [...prev, {
       id: `council-start-${stamp}`, role: 'sr_dev', timestamp: stamp, nativeAgent: true,
@@ -706,6 +710,7 @@ export default function App() {
     const res = await postCouncilRun({ selectedBoxIds, selectedArrowIds, prompt: userPrompt })
     setExecuting(false)
     if (!res || res.ok === false) {
+      finishRun('failed')
       const reason = (res && res.error) ||
         'Agent Council needs Senior Dev in API mode — Anthropic (key + model) or the keyless Echo provider. Open Agent Settings.'
       setAgentMessages(prev => [...prev, {
@@ -714,6 +719,7 @@ export default function App() {
       }])
       return
     }
+    finishRun(res.status === 'failed' ? 'failed' : 'passed')
     const done = new Date().toISOString()
     // Each council stage → a concise story message (Architect/Sr Dev/Verifier).
     const stageMsgs = (res.stages || []).map((s, i) => ({
@@ -731,7 +737,13 @@ export default function App() {
       fromRun: res.runId,
     }
     setAgentMessages(prev => [...prev, ...stageMsgs, resultMsg])
-    if (res.commit && res.commit.committed) refreshGitTimeline()
+    if (res.commit && res.commit.committed) {
+      refreshGitTimeline()
+      // Pre-load this run's diff so Work Review can show the change inline (and
+      // the Diff tab is ready) without a detour through the Timeline.
+      const sha = res.commit.sha
+      getGitDiff(sha).then(data => setCommitDiff({ loading: false, sha, data: data || null }))
+    }
     if (res.approval) setApprovals(prev => [res.approval, ...prev])
     getBoxSpecs().then(s => { if (s && typeof s === 'object') setBoxSpecs(s) })
   }
@@ -838,7 +850,7 @@ export default function App() {
     return data.id   // module boxes are already canvas ids (box:module:...)
   }
 
-  async function startSimulatedRun(scopedBoxIds, scopedArrowIds) {
+  async function startSimulatedRun(scopedBoxIds, scopedArrowIds, opts = {}) {
     if (!backendRef.current || scopedBoxIds.length === 0) return
     const res = await postRunStart({ scopedBoxIds, scopedArrowIds, scopedFileIds: [], scopedFunctionIds: [] })
     const runId = res?.run?.runId
@@ -865,22 +877,45 @@ export default function App() {
       } : r)
     }, 700)
 
-    // → passed
-    setTimeout(async () => {
-      if (runRef.current !== runId) return
-      const ev = await postRunEvent(runId, { type: 'run_passed' })
-      if (ev?.timelineEvent) addLiveEvent(ev.timelineEvent)
-      setRun(r => (r && r.runId === runId) ? {
-        ...r, status: 'passed', endedAt: new Date().toISOString(),
-        nodeStates: stateMap(scopedBoxIds, 'passed'), edgeStates: {},
-        trace: appendTrace(r.trace, scopedBoxIds, { type: 'node_passed', status: 'passed' }),
-      } : r)
-      // fade the visual back to idle (keeps trace data for the Inspector)
-      setTimeout(() => {
-        setRun(r => (r && r.runId === runId && r.status === 'passed')
-          ? { ...r, status: 'idle', nodeStates: {}, edgeStates: {} } : r)
-      }, 2600)
-    }, 2100)
+    // → passed (only for fast/simulated runs). Real runs (opts.hold) keep
+    // pulsing at 'running' until the actual result lands; the caller then calls
+    // finishRun(...) so the canvas stays alive for the whole 40–50s loop.
+    if (!opts.hold) {
+      setTimeout(async () => {
+        if (runRef.current !== runId) return
+        const ev = await postRunEvent(runId, { type: 'run_passed' })
+        if (ev?.timelineEvent) addLiveEvent(ev.timelineEvent)
+        setRun(r => (r && r.runId === runId) ? {
+          ...r, status: 'passed', endedAt: new Date().toISOString(),
+          nodeStates: stateMap(scopedBoxIds, 'passed'), edgeStates: {},
+          trace: appendTrace(r.trace, scopedBoxIds, { type: 'node_passed', status: 'passed' }),
+        } : r)
+        // fade the visual back to idle (keeps trace data for the Inspector)
+        setTimeout(() => {
+          setRun(r => (r && r.runId === runId && r.status === 'passed')
+            ? { ...r, status: 'idle', nodeStates: {}, edgeStates: {} } : r)
+        }, 2600)
+      }, 2100)
+    }
+  }
+
+  // Finish a held run (real agent/council) once the actual result lands: settle
+  // the pulse to passed/failed, then fade to idle. Acts on the current run.
+  function finishRun(status) {
+    const runId = runRef.current
+    if (!runId) return
+    const ring = status === 'failed' ? 'failed' : 'passed'
+    postRunEvent(runId, { type: ring === 'passed' ? 'run_passed' : 'run_failed' })
+      .then(ev => { if (ev?.timelineEvent) addLiveEvent(ev.timelineEvent) })
+    setRun(r => (r && r.runId === runId) ? {
+      ...r, status: ring, endedAt: new Date().toISOString(),
+      nodeStates: stateMap(r.scopedBoxIds, ring), edgeStates: {},
+      trace: appendTrace(r.trace, r.scopedBoxIds, { type: `node_${ring}`, status: ring }),
+    } : r)
+    setTimeout(() => {
+      setRun(r => (r && r.runId === runId && r.status === ring)
+        ? { ...r, status: 'idle', nodeStates: {}, edgeStates: {} } : r)
+    }, 2600)
   }
 
   // Dev-only: inject a failure trace so red failure states can be verified
@@ -1116,6 +1151,7 @@ export default function App() {
                 approvals={approvals}
                 onExecute={backendAvailable ? onWorkExecute : null}
                 onExplain={backendAvailable ? onExplain : null}
+                onOpenDiff={onSelectCommit}
                 onReset={onWorkReset}
                 intent={workIntent}
                 onIntentChange={handleWorkIntent}
