@@ -345,6 +345,20 @@ export async function postCouncilRun(payload) {
   }
 }
 
+// Cancel an in-flight council run (Step 33). Best-effort; never throws.
+export async function cancelCouncilRun(runId) {
+  if (!runId) return { ok: false, error: 'No run id.' }
+  try {
+    const res = await fetch(`/api/council/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+    const ct = res.headers.get('content-type') ?? ''
+    const data = ct.includes('application/json') ? await res.json() : null
+    if (!res.ok) return { ok: false, error: (data && data.error) || `Cancel failed (HTTP ${res.status}).` }
+    return data ?? { ok: true }
+  } catch {
+    return { ok: false, error: 'Cancel request failed.' }
+  }
+}
+
 // ── Agent settings (role → provider config, Step 21) ───────────────────────
 
 /**

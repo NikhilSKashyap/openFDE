@@ -47,7 +47,7 @@ KEYLESS_PROVIDERS = ("echo",)
 
 _ROLE_LABELS = {"architect": "Architect", "senior_dev": "Senior Dev", "verifier": "Verifier"}
 _PROVIDER_LABELS = {
-    "claude-code-workflow": "Claude Code Workflow",
+    "claude-code-workflow": "Claude Code (local CLI)",
     "echo": "Echo (offline demo)",
     "openai-compatible": "OpenAI-compatible",
     "anthropic": "Anthropic",

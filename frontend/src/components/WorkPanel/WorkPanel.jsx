@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { MOMENT_LABEL, MOMENT_PROMPT } from '../../productFlow/deriveMoment'
 
 /**
@@ -29,7 +29,7 @@ export default function WorkPanel({
   moment = 'orient', selectionContext = null, story = null,
   specMarkdown = null, commitDiff = null, agentMessages = [], approvals = [],
   onExecute = null, onExplain = null, onOpenDiff = null, onReset = null,
-  intent = '', onIntentChange = null,
+  intent = '', onIntentChange = null, run = null, onStop = null,
 }) {
   const setIntent = onIntentChange || (() => {})
   const scope = scopeLabel(selectionContext)
@@ -115,10 +115,10 @@ export default function WorkPanel({
           </>
         )}
 
-        {/* ── Execute (status only; no competing action) ───────────── */}
+        {/* ── Execute: live run status + Stop ──────────────────────── */}
         {moment === 'execute' && (
           <Section title="Working">
-            <div className="work-running"><span className="work-spin" /> Agents are working…</div>
+            <RunStatus run={run} onStop={onStop} />
             <RecentMessages messages={agentMessages} />
           </Section>
         )}
@@ -134,7 +134,12 @@ export default function WorkPanel({
               </Section>
             )}
             <Section title="Review">
-              {lastResult?.reportSummary && <p className="work-sub">{lastResult.reportSummary}</p>}
+              {lastResult?.cancelled && (
+                <div className="work-cancelled">■ Cancelled by user — nothing was committed.</div>
+              )}
+              {lastResult?.reportSummary && !lastResult?.cancelled && (
+                <p className="work-sub">{lastResult.reportSummary}</p>
+              )}
               {(lastResult?.writes?.length > 0) && (
                 <div className="work-files">
                   {lastResult.writes.slice(0, 8).map(f => <code key={f} className="work-file">{f}</code>)}
@@ -193,6 +198,7 @@ function CouncilStage({ stage }) {
     <div className="work-stage">
       <div className="work-stage-head">
         <span className="work-stage-role">{STAGE_ROLE[stage.role] || stage.role}</span>
+        {stage.provider && <span className="work-stage-provider">· {stage.provider}</span>}
         <span className="work-stage-status" style={{ color: tone }}>
           {stage.status}{stage.attempt > 1 ? ` · try ${stage.attempt}` : ''}
         </span>
@@ -218,6 +224,31 @@ function DiffView({ patch }) {
       {lines.map((ln, i) => (
         <div key={i} className={diffLineClass(ln)}>{ln || ' '}</div>
       ))}
+    </div>
+  )
+}
+
+function RunStatus({ run, onStop }) {
+  // `now` lives in state (updated by the interval) so render stays pure.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const planned = run?.plannedFiles?.length || 0
+  const written = run?.written?.length || 0
+  const active = run?.activeFile || null
+  const elapsed = run?.startedAt ? Math.max(0, Math.floor((now - run.startedAt) / 1000)) : null
+  const fileName = p => (p ? p.split('/').pop() : null)
+  return (
+    <div className="work-run">
+      <div className="work-running"><span className="work-spin" /> Agents are working…</div>
+      {active && <div className="work-run-active">Editing <code>{fileName(active)}</code></div>}
+      <div className="work-run-stats">
+        {planned > 0 && <span className="work-run-stat">{written}/{planned} files</span>}
+        {elapsed != null && <span className="work-run-stat">{elapsed}s</span>}
+      </div>
+      {onStop && <button className="work-stop" onClick={() => onStop()}>■ Stop</button>}
     </div>
   )
 }

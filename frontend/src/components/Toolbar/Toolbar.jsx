@@ -1,4 +1,4 @@
-export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onOpenCommandPalette }) {
+export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onOpenCommandPalette, onHome }) {
   const tools = [
     { id: 'select', label: 'Select', icon: <IconCursor /> },
     { id: 'dotted', label: 'Dotted box', icon: <IconDottedBox /> },
@@ -8,10 +8,10 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
 
   return (
     <div className="toolbar">
-      <div className="toolbar-brand">
+      <button className="toolbar-brand" onClick={() => onHome?.()} title="Back to the architecture canvas">
         <span className="brand-dot" />
         openfde
-      </div>
+      </button>
 
       {/* Drawing tools */}
       <div className="toolbar-group">

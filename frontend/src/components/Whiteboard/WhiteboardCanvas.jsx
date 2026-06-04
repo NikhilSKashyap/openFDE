@@ -23,6 +23,7 @@ export default function WhiteboardCanvas({
 }) {
   const svgRef = useRef(null)
   const interaction = useRef(null)
+  const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
   const [contextMenu, setContextMenu] = useState(null)
   const [editOverlay, setEditOverlay] = useState(null)
@@ -198,15 +199,60 @@ export default function WhiteboardCanvas({
     return [null, null]
   }
 
+  // The module id under an event — its chevron, or its box chrome (collapsed
+  // body / expanded header + background). A file/function node inside an expanded
+  // module owns its own double-click, so it never counts as the module. This lets
+  // double-click TOGGLE: expand a collapsed module, collapse an expanded one.
+  function moduleIdAt(e) {
+    const tog = e.target.closest?.('[data-expand-toggle]')
+    if (tog && tog.dataset.nodeKind === 'module') return tog.dataset.nodeId
+    const nodeEl = e.target.closest?.('[data-node-id]')
+    if (nodeEl && (nodeEl.dataset.nodeKind === 'file' || nodeEl.dataset.nodeKind === 'function')) return null
+    const boxEl = e.target.closest?.('[data-box-id]')
+    if (boxEl) {
+      const b = boxes.find(bx => bx.id === boxEl.dataset.boxId)
+      if (b?.moduleId) return boxEl.dataset.boxId
+    }
+    return null
+  }
+
   function handlePointerDown(e) {
     if (e.button === 2) return
     if (contextMenu) { setContextMenu(null); return }
     if (editOverlay) return
 
+    // ── Module drill-in: reliable single-vs-double click ──────────────────
+    // Native dblclick is unreliable here because box pointerdown uses
+    // setPointerCapture + preventDefault. So detect it ourselves: two
+    // pointerdowns on the SAME module within 400ms = expand; one = select
+    // (falls through to the normal selection logic below).
+    if (activeTool === 'select') {
+      const modId = moduleIdAt(e)
+      if (modId) {
+        const now = Date.now()
+        const last = lastModDownRef.current
+        if (last && last.id === modId && now - last.t < 400) {
+          lastModDownRef.current = null
+          onToggleExpand?.(modId, 'module')
+          e.preventDefault()
+          return
+        }
+        lastModDownRef.current = { id: modId, t: now }
+      }
+    }
+
     // ── Nested: expand toggle (chevron) ───────────────────────────────────
     const toggleEl = e.target.closest?.('[data-expand-toggle]')
     if (toggleEl && activeTool === 'select') {
-      onToggleExpand?.(toggleEl.dataset.nodeId, toggleEl.dataset.nodeKind)
+      // Single click only selects/inspects. Double-click owns expansion so the
+      // canvas does not unexpectedly drill in while the user is setting scope.
+      if (toggleEl.dataset.nodeKind === 'module') {
+        dispatch({ type: 'SELECT', id: toggleEl.dataset.nodeId })
+        onSelectArchEntity?.(null, null)
+      } else {
+        const [kind, data] = nestedEntity(toggleEl)
+        if (kind && data) onSelectArchEntity?.(kind, data)
+      }
       e.preventDefault()
       return
     }
@@ -400,7 +446,9 @@ export default function WhiteboardCanvas({
     // Double-click an arrow → edit its relationship label inline.
     const arrowId = e.target.dataset?.arrowId || e.target.closest?.('[data-arrow-id]')?.dataset.arrowId
     if (arrowId) { openArrowEdit(arrowId); return }
-    // Double-click a file box → toggle its functions.
+    // Double-click a file box → toggle its functions. (Module drill-in is owned
+    // by the manual double-click detection in handlePointerDown — keeping it out
+    // of here avoids a double-toggle that cancels itself out to a no-op.)
     const nodeEl = e.target.closest?.('[data-node-id]')
     if (nodeEl) {
       if (nodeEl.dataset.nodeKind === 'file') { onToggleExpand?.(nodeEl.dataset.nodeId, 'file') }
@@ -410,8 +458,7 @@ export default function WhiteboardCanvas({
     if (!boxId) return
     const box = boxes.find(b => b.id === boxId)
     if (!box) return
-    // Drillable module → expand in place; otherwise edit title/prompt.
-    if (box.moduleId) { onToggleExpand?.(boxId, 'module'); return }
+    if (box.moduleId) return   // module expand handled in handlePointerDown
     const pos = getSVGPos(e)
     const field = (pos.y - box.y) < 40 ? 'title' : 'prompt'
     openEdit(boxId, field)
@@ -442,7 +489,13 @@ export default function WhiteboardCanvas({
   // Live-run overlay: pulse the most-specific *visible* node per scoped target.
   const nodeStates = runNodeStates || {}
   const edgeStates = runEdgeStates || {}
-  const runRings = computeRunRings(nodeStates, nodes, layout)
+  // Adaptive glow: ride the lowest *visible* node — a collapsed module, or a
+  // file/function inside an expanded one. Only the big expanded-module container
+  // is skipped (its children carry the activity instead).
+  const runRings = storyStage ? [] : computeRunRings(nodeStates, nodes, layout).filter(r => {
+    const n = nodes.find(nn => nn.id === r.id)
+    return !(n && n.expanded)
+  })
 
   return (
     <div className="wb-canvas-root">
@@ -487,11 +540,16 @@ export default function WhiteboardCanvas({
               selectedId={archSelId} />
           ) : (
             <>
-              {/* Arrows behind boxes (anchored to effective/expanded geometry) */}
-              {arrows.map(arrow => (
-                <Arrow key={arrow.id} arrow={arrow} boxes={effectiveBoxes}
-                  selected={selectedArrowIds.has(arrow.id)} runStatus={edgeStates[arrow.id]} />
-              ))}
+              {/* Arrows behind boxes (anchored to effective/expanded geometry).
+                  When a module is expanded its function-level flow (purple)
+                  arrows resolve precisely into the box, so the coarse module
+                  (blue) arrow touching it is a duplicate — hide it. */}
+              {arrows
+                .filter(arrow => !(expanded.has(arrow.fromBox) || expanded.has(arrow.toBox)))
+                .map(arrow => (
+                  <Arrow key={arrow.id} arrow={arrow} boxes={effectiveBoxes}
+                    selected={selectedArrowIds.has(arrow.id)} runStatus={edgeStates[arrow.id]} />
+                ))}
 
               {pendingArrow && <PendingArrow pendingArrow={pendingArrow} boxes={effectiveBoxes} />}
 
@@ -866,7 +924,7 @@ function compactSig(fn) {
  * screen, otherwise the nearest visible parent (function → file → module).
  * When several scoped ids resolve to the same target, the highest-severity
  * status wins (failed > running > planning/active > passed). */
-const _RUN_SEV = { passed: 0, planning: 1, active: 1, running: 2, failed: 3 }
+const _RUN_SEV = { done: 0, passed: 0, queued: 1, planning: 1, read: 2, next: 3, running: 4, active: 5, failed: 6 }
 
 function computeRunRings(nodeStates, nodes, layout) {
   const ids = Object.keys(nodeStates)
@@ -890,7 +948,13 @@ function computeRunRings(nodeStates, nodes, layout) {
     return lp && (p === lp || p.startsWith(`${lp}/`))
   }) || null
 
-  // Nearest visible render target (rollup when the node itself is collapsed).
+  // Resolve a run-state id to the lowest VISIBLE node, rolling up only (Step 33):
+  //   function box (only if the id is a function AND it's visible)
+  //     → visible file node
+  //       → parent module.
+  // It never descends, so a file-level state (box:file:<path>) lights the file
+  // box, never the function boxes inside it — file/comment/doc tasks don't force
+  // function glow.
   const resolve = (id) => {
     if (geomFor(id)) return id
     const p = pathOf(id)

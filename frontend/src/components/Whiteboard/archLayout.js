@@ -31,13 +31,10 @@ const FN_W = 200
 const FN_H = 42
 const FN_GAP = 13
 
-// Top-level repack (effective layout when anything is expanded). Generous gaps
-// keep expanded modules + their flow arrows legible; the canvas scrolls in both
-// axes so wide/tall expansions stay navigable.
-const PACK_ORIGIN_X = 80
-const PACK_ORIGIN_Y = 80
-const PACK_GAP_X = 140
-const PACK_GAP_Y = 140
+// When a module expands it grows in place (anchored at its persisted top-left);
+// only the boxes it now overlaps are shoved further right so the flow structure
+// is preserved and the (infinite) canvas simply grows to fit.
+const SEP_GAP = 56
 
 export const fileId = (path) => `box:file:${path}`
 export const fnId = (path, name) => `box:function:${path}:${name}`
@@ -170,11 +167,12 @@ export function computeArchLayout(boxes, archGraph, expanded) {
   }
 
   // ── Effective top-level layout pass ─────────────────────────────────────
-  // Expanded modules grow, so when anything is expanded we repack every
-  // visible module box into collision-free rows with generous spacing. This
-  // is render-only — persisted box x/y are never mutated here.
+  // Expanded modules grow in place. Rather than re-flowing everything (which
+  // scrambles the persisted flow order and tangles arrows), keep every box where
+  // the user put it and only shove the boxes an expansion now overlaps further
+  // right, cascading down the chain. Render-only — persisted box x/y untouched.
   const anyExpanded = nodes.some(n => n.expanded)
-  if (anyExpanded) repackTopLevel(nodes)
+  if (anyExpanded) separateNodes(nodes)
 
   // Effective boxes carry the (possibly repacked) geometry for arrows + ports.
   const effectiveBoxes = nodes.map(n => ({ ...n.box, x: n.x, y: n.y, w: n.w, h: n.h }))
@@ -191,32 +189,39 @@ export function computeArchLayout(boxes, archGraph, expanded) {
 }
 
 /**
- * Collision-free top-level repack. Orders modules by their current reading
- * order (top→bottom, left→right) and flows them into rows with generous gaps,
- * wrapping by a width budget. Mutates each node's x/y (and shifts its file /
- * function children by the same delta) in place.
+ * Structure-preserving separation. Every box stays at its persisted position;
+ * when an expanded module grows into a neighbour, the neighbour (and only the
+ * boxes that genuinely overlap, cascading) is shoved just far enough to the
+ * right to clear it. Reading order is preserved and the canvas grows to fit —
+ * no reshuffle, no row-wrapping. Render-only: shifts the node's x (and its file/
+ * function children) in place; persisted box x/y are never mutated.
  *
  * @param {Array} nodes - module render nodes (with computed w/h).
  */
-function repackTopLevel(nodes) {
-  if (nodes.length === 0) return
-  const ordered = [...nodes].sort((a, b) => (a.y - b.y) || (a.x - b.x))
-  const maxW = Math.max(...ordered.map(n => n.w))
-  const maxRowW = Math.max(1100, Math.round(2.4 * maxW))
-
-  let cx = PACK_ORIGIN_X
-  let cy = PACK_ORIGIN_Y
-  let rowH = 0
-  for (const n of ordered) {
-    if (cx > PACK_ORIGIN_X && cx + n.w > PACK_ORIGIN_X + maxRowW) {
-      cx = PACK_ORIGIN_X
-      cy += rowH + PACK_GAP_Y
-      rowH = 0
+function separateNodes(nodes) {
+  if (nodes.length < 2) return
+  // Anchor by persisted reading order (left→right, then top→bottom).
+  const ordered = [...nodes].sort((a, b) => (a.x - b.x) || (a.y - b.y))
+  // A few passes let a shove cascade down a chain of boxes.
+  for (let pass = 0; pass < 6; pass++) {
+    let moved = false
+    for (let i = 1; i < ordered.length; i++) {
+      const b = ordered[i]
+      for (let k = 0; k < i; k++) {
+        const a = ordered[k]
+        if (!boxesOverlap(a, b, SEP_GAP)) continue
+        const targetX = a.x + a.w + SEP_GAP   // place b just right of a
+        if (targetX - b.x > 0.5) { shiftNode(b, targetX - b.x, 0); moved = true }
+      }
     }
-    shiftNode(n, cx - n.x, cy - n.y)
-    cx += n.w + PACK_GAP_X
-    rowH = Math.max(rowH, n.h)
+    if (!moved) break
   }
+}
+
+// AABB overlap test with a breathing gap on every side.
+function boxesOverlap(a, b, gap) {
+  return a.x < b.x + b.w + gap && b.x < a.x + a.w + gap &&
+         a.y < b.y + b.h + gap && b.y < a.y + a.h + gap
 }
 
 function shiftNode(n, dx, dy) {

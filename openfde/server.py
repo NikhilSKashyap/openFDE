@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,7 @@ from aiohttp import web
 from openfde import agent_settings as agent_settings_mod
 from openfde.agent_runner import build_system_prompt, run_agent
 from openfde.anthropic_transport import make_transport
+from openfde.claude_code_runner import cli_available as claude_cli_available, run_claude_code, run_claude_code_text
 from openfde.echo_transport import make_echo_transport
 from openfde.openai_transport import complete as llm_complete, make_transport as make_openai_transport
 from openfde.council import run_council
@@ -77,6 +79,39 @@ from openfde.persistence import Persistence
 from openfde.plan import generate_plan
 
 logger = logging.getLogger("openfde.server")
+
+
+# ------------------------------------------------------------------ #
+#  Run cancellation (Step 33)                                          #
+# ------------------------------------------------------------------ #
+
+class CancelToken:
+    """Per-run cancellation handle. `is_set()` is polled by the in-process agent
+    runner between turns; `proc` (if set by the Claude Code runner) is the live
+    subprocess so cancel can terminate it. Thread-safe (Event)."""
+
+    def __init__(self):
+        self._ev = threading.Event()
+        self.proc = None
+
+    def is_set(self):
+        return self._ev.is_set()
+
+    def set_proc(self, p):
+        self.proc = p
+
+    def cancel(self):
+        self._ev.set()
+        p = self.proc
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# runId → CancelToken, for in-flight council runs only.
+_RUN_CONTROLS = {}
 
 
 # ------------------------------------------------------------------ #
@@ -1238,11 +1273,24 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     def _text_role(cfg: dict):
         """Build a text-completion caller (system, user) -> str for a role config,
-        or None when the role isn't an API role with a key + model. Architect /
-        Verifier only — Senior Dev uses the scoped agent_runner."""
+        or None to fall back to the deterministic role. Architect / Verifier only —
+        Senior Dev uses the scoped agent_runner / Claude Code runner.
+
+        Providers: 'claude-code-workflow' drives the local `claude` CLI as a pure
+        text role (keyless — uses the user's login); 'anthropic' / OpenAI-compatible
+        use the API (key + model required)."""
+        prov = cfg.get("provider")
+        # Claude Code (local CLI) text role — no key, runs on the user's login.
+        if prov == "claude-code-workflow":
+            if not claude_cli_available():
+                return None
+            model = cfg.get("model") or "sonnet"
+            return lambda system, user: run_claude_code_text(
+                system=system, user=user, model=model, cwd=path)
+        # API providers (Anthropic / OpenAI-compatible) — require a key + model.
         if cfg.get("mode") != "api" or not cfg.get("apiKey") or not cfg.get("model"):
             return None
-        prov, key, model, base = (cfg.get("provider"), cfg["apiKey"], cfg["model"], cfg.get("baseUrl", ""))
+        key, model, base = (cfg["apiKey"], cfg["model"], cfg.get("baseUrl", ""))
         if prov == "anthropic":
             tr = make_transport(key, base)
         elif prov in ("openai-compatible", "openrouter", "custom", "ollama"):
@@ -1250,6 +1298,31 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         else:
             return None
         return lambda system, user: llm_complete(tr, model=model, system=system, user=user)
+
+    def _resolve_sr_dev_backend(sd: dict):
+        """Pick the Senior Dev implementation backend from its role config (Step 31).
+
+        Returns (backend_id, None) on success or (None, error_message). backend_id
+        is one of: 'claude_code' | 'echo' | 'anthropic'. Claude Code Workflow is
+        selected by provider 'claude-code-workflow' (it drives the local `claude`
+        CLI and uses the user's existing login — no key/model required here).
+        """
+        mode, provider = sd.get("mode"), sd.get("provider")
+        if provider == "claude-code-workflow":
+            if not claude_cli_available():
+                return None, ("Claude Code CLI not found on PATH. Install Claude Code "
+                              "or pick another Senior Dev provider (Anthropic or Echo).")
+            return "claude_code", None
+        if mode != "api":
+            return None, "Senior Dev is not in API mode. Open Agent Settings."
+        if provider == "echo":
+            return "echo", None
+        if provider == "anthropic":
+            if not (sd.get("model") and sd.get("apiKey")):
+                return None, "Senior Dev (Anthropic) needs a model + API key."
+            return "anthropic", None
+        return None, (f"Senior Dev must be 'anthropic', 'echo', or 'claude-code-workflow' "
+                      f"(is '{provider}').")
 
     def _parse_verdict(text: str, result: dict) -> dict:
         """Best-effort parse of a Verifier JSON verdict; safe fallback otherwise."""
@@ -1302,15 +1375,34 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
         settings = persistence.load_agent_settings()
         sd = settings.get("senior_dev", {})
-        provider = sd.get("provider")
-        if sd.get("mode") != "api":
-            return web.json_response({"ok": False, "error":
-                "Senior Dev is not in API mode. Open Agent Settings."}, status=400)
-        if provider not in ("anthropic", "echo"):
-            return web.json_response({"ok": False, "error":
-                f"Senior Dev must be 'anthropic' or 'echo' (is '{provider}')."}, status=400)
-        if provider == "anthropic" and not (sd.get("model") and sd.get("apiKey")):
-            return web.json_response({"ok": False, "error": "Senior Dev needs a model + API key."}, status=400)
+        sd_backend, sd_err = _resolve_sr_dev_backend(sd)
+        if sd_err:
+            return web.json_response({"ok": False, "error": sd_err}, status=400)
+        # Human label per role's backend — surfaced on every stage so Work Review
+        # shows which agent did each step (e.g. all three "Claude Code").
+        _PROV_LABEL = {"claude-code-workflow": "Claude Code (local CLI)",
+                       "anthropic": "Anthropic API", "echo": "Echo",
+                       "openai-compatible": "OpenAI-compatible", "openrouter": "OpenRouter",
+                       "ollama": "Ollama", "custom": "Custom"}
+        sd_label = {"claude_code": "Claude Code (local CLI)", "anthropic": "Anthropic API",
+                    "echo": "Echo"}.get(sd_backend, sd_backend)
+
+        def _role_label(role):
+            if role == "sr_dev":
+                return sd_label
+            prov = settings.get(role, {}).get("provider")
+            return _PROV_LABEL.get(prov, prov)
+
+        def _stages_out(stages):
+            rows = []
+            for s in stages:
+                row = {"role": s["role"], "status": s["status"], "summary": s["summary"],
+                       "attempt": s.get("attempt", 0)}
+                lbl = _role_label(s["role"])
+                if lbl:
+                    row["provider"] = lbl
+                rows.append(row)
+            return rows
 
         ensure_baseline(path)
         compiled = _compile_workflow_for(body)
@@ -1336,11 +1428,34 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         })
         await manager.broadcast({"type": "event_appended", "event": started})
 
+        # ── Live activity stream (adaptive glow) ─────────────────────────────
+        # Announce the planned files now (canvas pre-pulses them + drills in),
+        # then stream each write the moment it lands so the glow follows the agent.
+        loop = asyncio.get_event_loop()
+        await manager.broadcast({"type": "agent_plan",
+                                 "payload": {"runId": wid, "files": editable}})
+
+        def emit_progress(rel, action="write"):
+            # Called from the executor thread (run_agent) — hop back to the loop.
+            # action: "read" (agent is looking at the file) | "write" (just edited).
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast({"type": "agent_progress",
+                                       "payload": {"runId": wid, "file": rel, "action": action}}), loop)
+            except Exception:  # noqa: BLE001 — progress must never break the run
+                pass
+
+        # Cancellation handle for this run — the Stop button hits /cancel below.
+        cancel_token = CancelToken()
+        _RUN_CONTROLS[wid] = cancel_token
+
         # ── Build the three roles ────────────────────────────────────────────
         arch_caller = _text_role(settings.get("architect", {}))
         ver_caller = _text_role(settings.get("verifier", {}))
 
         def architect(c):
+            if cancel_token.is_set():
+                return ""
             if arch_caller:
                 user = (f"Intent: {c['prompt']}\nScope: {c['scopeSummary']}\n"
                         f"Editable files: {c['editable']}\nProtected (approval needed): {c['protected']}")
@@ -1349,6 +1464,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     f"Edit only: {', '.join(c['editable'])}. Keep changes minimal and verify the intent.")
 
         def verifier(brief, result):
+            if cancel_token.is_set():
+                return {"status": "failed", "summary": "Run cancelled by user.",
+                        "fixPrompt": "", "testsSuggested": [], "risks": []}
             # The Senior Dev's writes are still uncommitted in the work tree here
             # (reconcile commits AFTER the council returns), so this is the REAL diff.
             changed = [f["path"] for f in result.get("filesChanged", [])]
@@ -1373,24 +1491,65 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     "fixPrompt": "Make a concrete in-scope edit that satisfies the intent.",
                     "testsSuggested": [], "risks": []}
 
-        if provider == "echo":
-            sd_transport, sd_model = make_echo_transport(path, editable), (sd.get("model") or "echo-1")
+        if sd_backend == "claude_code":
+            # OpenFDE drives the local `claude` CLI as Senior Dev — no copy/paste.
+            # Scope is enforced post-hoc inside the runner (out-of-scope reverted,
+            # protected → needs_approval), so the Verifier still judges the real diff.
+            def senior_dev(brief):
+                ed = ", ".join(editable) or "(none)"
+                pr = ", ".join(protected) or "(none)"
+                cc_prompt = (f"{brief}\n\nConstraints:\n"
+                             f"- Edit ONLY these files: {ed}\n"
+                             f"- Do NOT modify these protected files: {pr}\n"
+                             f"- Keep the change minimal and correct. Do not run tests or git.")
+                return run_claude_code(repo_root=path, prompt=cc_prompt,
+                                       editable=editable, protected=protected,
+                                       model=(sd.get("model") or "sonnet"),
+                                       should_cancel=cancel_token.is_set,
+                                       on_proc=cancel_token.set_proc)
         else:
-            sd_transport, sd_model = make_transport(sd["apiKey"], sd.get("baseUrl", "")), sd["model"]
-        sd_system = build_system_prompt(scope_summary, editable, protected)
+            if sd_backend == "echo":
+                sd_transport, sd_model = make_echo_transport(path, editable), (sd.get("model") or "echo-1")
+            else:  # anthropic
+                sd_transport, sd_model = make_transport(sd["apiKey"], sd.get("baseUrl", "")), sd["model"]
+            sd_system = build_system_prompt(scope_summary, editable, protected)
 
-        def senior_dev(brief):
-            return run_agent(sd_transport, model=sd_model, system=sd_system, user_prompt=brief,
-                             root=path, editable_files=editable, protected_files=protected)
+            def senior_dev(brief):
+                return run_agent(sd_transport, model=sd_model, system=sd_system, user_prompt=brief,
+                                 root=path, editable_files=editable, protected_files=protected,
+                                 on_write=lambda r: emit_progress(r, "write"),
+                                 on_read=lambda r: emit_progress(r, "read"),
+                                 should_cancel=cancel_token.is_set)
 
         # ── Run the bounded loop off the event loop ──────────────────────────
-        loop = asyncio.get_event_loop()
         outcome = await loop.run_in_executor(None, lambda: run_council(
             architect=architect, senior_dev=senior_dev, verifier=verifier,
             context={"prompt": user_prompt, "scopeSummary": scope_summary,
                      "editable": editable, "protected": protected},
             max_reprompts=1,
         ))
+
+        # ── Cancelled? Land nothing — no reconcile, no commit. ───────────────
+        was_cancelled = cancel_token.is_set()
+        _RUN_CONTROLS.pop(wid, None)
+        if was_cancelled:
+            persistence.upsert_run({
+                "runId": wid, "status": "cancelled", "backend": "openfde-council",
+                "kind": "council_run", "simulated": False, "startedAt": now,
+                "endedAt": datetime.now(timezone.utc).isoformat(),
+                "scopedBoxIds": box_ids, "scopedArrowIds": [],
+                "scopedFileIds": [], "scopedFunctionIds": [],
+            })
+            cev = persistence.append_event({
+                "type": "council_cancelled",
+                "payload": {"runId": wid, "detail": "Agent Council cancelled by user."},
+            })
+            await manager.broadcast({"type": "event_appended", "event": cev})
+            return web.json_response({
+                "ok": True, "runId": wid, "status": "cancelled",
+                "stages": _stages_out(outcome["stages"]),
+                "commit": None, "approval": None, "verifier": None,
+            })
 
         # ── Record each stage: project.md ledger + timeline event ────────────
         stage_event_ids = []
@@ -1439,13 +1598,34 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         payload = await reconcile_result(artifact, wid, final)
         return web.json_response({
             "ok": True, "runId": wid, "status": outcome["status"],
-            "stages": [{"role": s["role"], "status": s["status"], "summary": s["summary"],
-                        "attempt": s.get("attempt", 0)} for s in outcome["stages"]],
+            "stages": _stages_out(outcome["stages"]),
             "commit": ({"sha": payload.get("commitSha"), "committed": True}
                        if payload.get("committed") else None),
             "approval": payload.get("approval"),
             "verifier": outcome.get("verifier"),
         })
+
+    async def post_council_cancel(request: web.Request) -> web.Response:
+        """Cancel an in-flight council run (Step 33). Sets the run's cancel flag
+        (polled by the in-process agent runner between turns) and terminates the
+        Claude Code subprocess if one is live. The run itself short-circuits and
+        returns `status: cancelled` without committing.
+
+        Args:
+            request: web.Request — match_info 'runId'.
+
+        Returns:
+            web.Response — {ok, runId, cancelled} or 404 if the run isn't in flight.
+        """
+        run_id = request.match_info.get("runId", "")
+        token = _RUN_CONTROLS.get(run_id)
+        if token is None:
+            return web.json_response(
+                {"ok": False, "error": "Run is not in flight (already finished or unknown)."},
+                status=404)
+        token.cancel()
+        logger.info("Council run cancelled by user: %s", run_id)
+        return web.json_response({"ok": True, "runId": run_id, "cancelled": True})
 
     async def get_workflows(request: web.Request) -> web.Response:
         """List workflow artifacts (newest-first).
@@ -1935,6 +2115,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/execution/run",             post_execution_run)
     app.router.add_post("/api/agent/run",                 post_agent_run)
     app.router.add_post("/api/council/run",               post_council_run)
+    app.router.add_post("/api/council/{runId}/cancel",     post_council_cancel)
     app.router.add_get( "/api/execution/workflows",       get_workflows)
     app.router.add_post("/api/execution/workflow/{workflowId}/result", post_workflow_result)
     app.router.add_get( "/api/execution/workflow/{workflowId}", get_workflow_one)

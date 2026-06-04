@@ -141,7 +141,8 @@ def _safe_repo_path(root: Path, rel: str):
 # ─── The loop ────────────────────────────────────────────────────────────── #
 
 def run_agent(transport, *, model, system, user_prompt, root,
-              editable_files, protected_files, max_turns=_MAX_TURNS):
+              editable_files, protected_files, max_turns=_MAX_TURNS, on_write=None,
+              on_read=None, should_cancel=None):
     """Drive a bounded tool-use loop; return a Step-20 result contract.
 
     Args:
@@ -153,6 +154,8 @@ def run_agent(transport, *, model, system, user_prompt, root,
         editable_files: list[str] — writable in-scope paths.
         protected_files: list[str] — protected paths (force needs_approval).
         max_turns: int — hard cap on transport round-trips.
+        on_write: callable | None — invoked with each repo-relative path the moment
+            it is successfully written (live progress for the canvas). Never raises.
 
     Returns:
         dict — {result, transcript, writes, rejected, protectedAttempts, turns, error}
@@ -181,6 +184,11 @@ def run_agent(transport, *, model, system, user_prompt, root,
             return False, f"Could not read '{rel}': {exc}"
         if len(text) > _MAX_READ_CHARS:
             text = text[:_MAX_READ_CHARS] + "\n… [truncated]"
+        if on_read:
+            try:
+                on_read(_norm(rel))
+            except Exception:  # noqa: BLE001 — progress must never break the run
+                pass
         return True, text
 
     def do_write(rel, content):
@@ -210,9 +218,17 @@ def run_agent(transport, *, model, system, user_prompt, root,
             return False, f"Could not write '{rel}': {exc}"
         if rel_n not in writes:
             writes.append(rel_n)
+        if on_write:
+            try:
+                on_write(rel_n)
+            except Exception:  # noqa: BLE001 — progress must never break the run
+                pass
         return True, f"Wrote {rel} ({len(content)} bytes)."
 
     for turns in range(1, max_turns + 1):
+        if should_cancel and should_cancel():
+            error = "Cancelled by user."
+            break
         try:
             resp = transport({
                 "model": model, "system": system,
@@ -289,7 +305,8 @@ def _build_contract(submitted, writes, rejected, protected_attempts, error) -> d
             report = f"Requested changes to protected file(s): {', '.join(protected_attempts)}."
     elif error:
         status = "failed"
-        report = report or f"Run did not complete: {error}"
+        report = ("Cancelled by user." if "cancel" in error.lower()
+                  else (report or f"Run did not complete: {error}"))
         errors.append(error)
     elif rejected and not writes:
         status = "failed"

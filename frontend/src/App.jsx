@@ -38,6 +38,7 @@ import {
   getAgentSettings,
   postAgentRun,
   postCouncilRun,
+  cancelCouncilRun,
   postExplain,
   postStory,
 } from './api/backend'
@@ -60,6 +61,8 @@ export default function App() {
   const [activeTool, setActiveTool] = useState('select')
   const [activeView, setActiveView] = useState('whiteboard')
   const [canvasState, _rawCanvasDispatch] = useCanvasState()
+  // Live mirror of boxes so WS handlers (stable closures) can map file→module.
+  const boxesRef = useRef(canvasState.boxes)
   const [tasks, pmDispatch] = usePMState()
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [panelMode, setPanelMode] = useState('Agent')
@@ -98,7 +101,7 @@ export default function App() {
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false)
   const [leftOpen, setLeftOpen]   = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
-  const [flowMode, setFlowMode]   = useState('story')   // Story | Focused | All (Batch 5)
+  const [flowMode, setFlowMode]   = useState('focused') // Story | Focused | All (Batch 5)
   const [story, setStory]         = useState(null)
   const [rightView, setRightView] = useState('work')    // 'work' (primary) | 'technical' (old tabbed panel)
   const [workIntent, setWorkIntent] = useState('')      // lifted Work-panel intent text
@@ -199,6 +202,68 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ── Live activity glow (adaptive) ─────────────────────────────────────────
+  // Keep boxesRef synced so the WS handlers can map a file path → its module.
+  useEffect(() => { boxesRef.current = canvasState.boxes }, [canvasState.boxes])
+
+  const fileNodeId = (p) => `box:file:${p}`
+  function moduleBoxForFile(path) {
+    return (boxesRef.current || []).find(b => (b.linkedFiles || []).includes(path)) || null
+  }
+
+  // Architect plan arrived: pre-pulse the planned files and drill into their
+  // modules so the work is visible. First file is queued as `next`.
+  function handleAgentPlan({ runId, files }) {
+    if (!Array.isArray(files) || files.length === 0) return
+    const moduleIds = new Set()
+    const nodeStates = {}
+    files.forEach((f, i) => {
+      nodeStates[fileNodeId(f)] = i === 0 ? 'next' : 'queued'
+      const m = moduleBoxForFile(f)
+      if (m) moduleIds.add(m.id)
+    })
+    if (moduleIds.size) {
+      setExpandedIds(prev => { const s = new Set(prev); moduleIds.forEach(id => s.add(id)); return s })
+    }
+    setRun(prev => ({
+      ...(prev || { runId: runRef.current, scopedBoxIds: [], scopedArrowIds: [], trace: {}, failures: {} }),
+      status: 'running', councilRunId: runId || prev?.councilRunId,
+      plannedFiles: files, written: [], read: [], nodeStates, edgeStates: {},
+    }))
+  }
+
+  // The agent touched a file — `action` is 'read' or 'write'. The touched file
+  // glows `active` (the live focus follows the agent). Written files settle to
+  // `done` (green), read-only files to `read` (a soft "looked here" mark that
+  // persists so the trail is visible, not a flash). The next untouched target is
+  // `next`; the rest stay `queued`.
+  function handleAgentProgress({ file, action }) {
+    if (!file) return
+    const m = moduleBoxForFile(file)
+    if (m) setExpandedIds(prev => (prev.has(m.id) ? prev : new Set(prev).add(m.id)))
+    setRun(prev => {
+      if (!prev) return prev
+      const base = (prev.plannedFiles && prev.plannedFiles.length) ? prev.plannedFiles : []
+      const written = (action === 'write' && !prev.written?.includes(file))
+        ? [...(prev.written || []), file] : (prev.written || [])
+      const read = prev.read?.includes(file) ? prev.read : [...(prev.read || []), file]
+      // Include any out-of-plan file the agent actually touched.
+      const targets = base.includes(file) ? base : [...base, file]
+      const nodeStates = { ...prev.nodeStates }
+      targets.forEach(f => {
+        nodeStates[fileNodeId(f)] =
+          f === file ? 'active'
+            : written.includes(f) ? 'done'
+              : read.includes(f) ? 'read'
+                : 'queued'
+      })
+      const idx = targets.indexOf(file)
+      const next = targets.slice(idx + 1).find(f => !written.includes(f) && !read.includes(f))
+      if (next) nodeStates[fileNodeId(next)] = 'next'
+      return { ...prev, written, read, activeFile: file, nodeStates }
+    })
+  }
+
   // ------------------------------------------------------------------ //
   //  WebSocket connection (runs once on mount)                           //
   // ------------------------------------------------------------------ //
@@ -209,10 +274,14 @@ export default function App() {
       if (msg?.type === 'event_appended' && msg.event?.id) {
         setDesignEvents(prev => mergeEvents(prev, [{ ...msg.event, live: true }]))
       }
+      // Live activity stream (adaptive glow): the agent's plan + per-file writes.
+      else if (msg?.type === 'agent_plan') { handleAgentPlan(msg.payload || {}) }
+      else if (msg?.type === 'agent_progress') { handleAgentProgress(msg.payload || {}) }
       // state_updated / tasks_updated: no-op; this client's own writes are the
       // source of truth for its local state.
     })
     return () => closeWS()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ------------------------------------------------------------------ //
@@ -653,7 +722,7 @@ export default function App() {
     setPanelMode('Agent')
     const selectedBoxIds   = [...(canvasState.selectedIds ?? [])]
     const selectedArrowIds = [...(canvasState.selectedArrowIds ?? [])]
-    startSimulatedRun(selectedBoxIds, selectedArrowIds, { hold: true })
+    startSimulatedRun(architectureModuleIds(selectedBoxIds), selectedArrowIds, { hold: true })
     const stamp = new Date().toISOString()
     setAgentMessages(prev => [...prev, {
       id: `agent-start-${stamp}`, role: 'sr_dev', timestamp: stamp,
@@ -701,7 +770,7 @@ export default function App() {
     setPanelMode('Agent')
     const selectedBoxIds   = [...(canvasState.selectedIds ?? [])]
     const selectedArrowIds = [...(canvasState.selectedArrowIds ?? [])]
-    startSimulatedRun(selectedBoxIds, selectedArrowIds, { hold: true })
+    await startSimulatedRun(architectureModuleIds(selectedBoxIds), selectedArrowIds, { hold: true, live: true })
     const stamp = new Date().toISOString()
     setAgentMessages(prev => [...prev, {
       id: `council-start-${stamp}`, role: 'sr_dev', timestamp: stamp, nativeAgent: true,
@@ -719,18 +788,22 @@ export default function App() {
       }])
       return
     }
-    finishRun(res.status === 'failed' ? 'failed' : 'passed')
+    const cancelled = res.status === 'cancelled'
+    finishRun(cancelled ? 'cancelled' : res.status === 'failed' ? 'failed' : 'passed')
     const done = new Date().toISOString()
     // Each council stage → a concise story message (Architect/Sr Dev/Verifier).
     const stageMsgs = (res.stages || []).map((s, i) => ({
       id: `council-stage-${res.runId}-${i}`, role: s.role, timestamp: done,
       councilStage: true, status: s.status, attempt: s.attempt, summary: s.summary,
+      provider: s.provider || null,
     }))
     // Fresh outcome (drives Review accuracy — this run's commit/approval, not stale).
     const resultMsg = {
       id: `council-result-${res.runId || done}`, role: 'result', timestamp: done,
       status: res.status,
-      reportSummary: (res.verifier && res.verifier.summary) || `Council ${res.status}.`,
+      reportSummary: cancelled ? 'Cancelled by user — nothing was committed.'
+        : (res.verifier && res.verifier.summary) || `Council ${res.status}.`,
+      cancelled,
       committed: !!(res.commit && res.commit.committed),
       commitSha: res.commit ? res.commit.sha : null,
       approval: res.approval || null,
@@ -746,6 +819,19 @@ export default function App() {
     }
     if (res.approval) setApprovals(prev => [res.approval, ...prev])
     getBoxSpecs().then(s => { if (s && typeof s === 'object') setBoxSpecs(s) })
+  }
+
+  // Stop button (Step 33): cancel the in-flight council run. The council POST
+  // (still awaiting in onExecuteCouncil) returns status:cancelled and finishes
+  // the visual; nothing commits.
+  async function onStopRun() {
+    const id = run?.councilRunId
+    if (!id) return
+    setAgentMessages(prev => [...prev, {
+      id: `council-stopping-${Date.now()}`, role: 'sr_dev', timestamp: new Date().toISOString(),
+      nativeAgent: true, summary: 'Stopping… cancelling the run.',
+    }])
+    await cancelCouncilRun(id)
   }
 
   // Submit a Claude workflow result (pasted JSON) for reconciliation.
@@ -850,6 +936,13 @@ export default function App() {
     return data.id   // module boxes are already canvas ids (box:module:...)
   }
 
+  function architectureModuleIds(ids = []) {
+    const wanted = new Set(ids)
+    return canvasState.boxes
+      .filter(b => wanted.has(b.id))
+      .map(b => b.id)
+  }
+
   async function startSimulatedRun(scopedBoxIds, scopedArrowIds, opts = {}) {
     if (!backendRef.current || scopedBoxIds.length === 0) return
     const res = await postRunStart({ scopedBoxIds, scopedArrowIds, scopedFileIds: [], scopedFunctionIds: [] })
@@ -859,11 +952,16 @@ export default function App() {
     if (res?.event) addLiveEvent(res.event)
 
     setRun({
-      runId, status: 'planning', scopedBoxIds, scopedArrowIds,
-      nodeStates: stateMap(scopedBoxIds, 'planning'), edgeStates: {},
+      runId, status: opts.live ? 'running' : 'planning', scopedBoxIds, scopedArrowIds,
+      nodeStates: stateMap(scopedBoxIds, opts.live ? 'running' : 'planning'), edgeStates: {},
       trace: appendTrace({}, scopedBoxIds, { type: 'node_planning', status: 'planning' }),
-      failures: {},
+      failures: {}, plannedFiles: [], written: [], startedAt: Date.now(),
     })
+
+    // Live runs let agent_plan / agent_progress events drive node states (and
+    // finishRun settles them), so skip the coarse simulated timers that would
+    // otherwise clobber the file-level activity glow.
+    if (opts.live) return
 
     // → running
     setTimeout(() => {
@@ -904,18 +1002,28 @@ export default function App() {
   function finishRun(status) {
     const runId = runRef.current
     if (!runId) return
-    const ring = status === 'failed' ? 'failed' : 'passed'
-    postRunEvent(runId, { type: ring === 'passed' ? 'run_passed' : 'run_failed' })
-      .then(ev => { if (ev?.timelineEvent) addLiveEvent(ev.timelineEvent) })
-    setRun(r => (r && r.runId === runId) ? {
-      ...r, status: ring, endedAt: new Date().toISOString(),
-      nodeStates: stateMap(r.scopedBoxIds, ring), edgeStates: {},
-      trace: appendTrace(r.trace, r.scopedBoxIds, { type: `node_${ring}`, status: ring }),
-    } : r)
+    const ring = status === 'failed' ? 'failed' : status === 'cancelled' ? 'cancelled' : 'passed'
+    if (status !== 'cancelled') {
+      postRunEvent(runId, { type: ring === 'passed' ? 'run_passed' : 'run_failed' })
+        .then(ev => { if (ev?.timelineEvent) addLiveEvent(ev.timelineEvent) })
+    }
+    setRun(r => {
+      if (!(r && r.runId === runId)) return r
+      // Settle every node we touched — scoped modules AND any file-level activity
+      // nodes from the live stream — to the final ring, then fade.
+      const ns = {}
+      Object.keys(r.nodeStates || {}).forEach(k => { ns[k] = ring })
+      ;(r.scopedBoxIds || []).forEach(id => { ns[id] = ring })
+      return {
+        ...r, status: ring, endedAt: new Date().toISOString(),
+        nodeStates: ns, edgeStates: {},
+        trace: appendTrace(r.trace, r.scopedBoxIds, { type: `node_${ring}`, status: ring }),
+      }
+    })
     setTimeout(() => {
       setRun(r => (r && r.runId === runId && r.status === ring)
         ? { ...r, status: 'idle', nodeStates: {}, edgeStates: {} } : r)
-    }, 2600)
+    }, status === 'cancelled' ? 1500 : 2600)
   }
 
   // Dev-only: inject a failure trace so red failure states can be verified
@@ -1071,6 +1179,15 @@ export default function App() {
   }
   function onWorkReset() { setWorkUnit(null); setWorkIntent('') }
 
+  function goHome() {
+    collapseAll()
+    canvasDispatch({ type: 'CLEAR_SELECTION' })
+    setFlowMode('focused')
+    setStory(null)
+    setActiveView('whiteboard')
+    setRightView('work')
+  }
+
   // Secondary "Technical" escape: open the old tabbed RightPanel at `mode`.
   function openTechnicalMode(mode) { setRightView('technical'); if (mode) setPanelMode(mode) }
   // Command-palette routing: Inspector maps to Work's Understand (box already
@@ -1093,6 +1210,7 @@ export default function App() {
           hasDottedSelected={hasDottedSelected}
           onLockSelected={() => canvasDispatch({ type: 'FREEZE_SELECTED' })}
           onOpenCommandPalette={() => setPaletteOpen(true)}
+          onHome={goHome}
         />
         <div className="panels">
           <aside className={`panel-left${leftOpen ? '' : ' collapsed'}`}>
@@ -1155,6 +1273,8 @@ export default function App() {
                 onReset={onWorkReset}
                 intent={workIntent}
                 onIntentChange={handleWorkIntent}
+                run={run}
+                onStop={onStopRun}
               />
             )}
             {rightOpen && rightView === 'work' && (
