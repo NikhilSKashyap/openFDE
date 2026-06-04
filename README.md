@@ -36,6 +36,9 @@ http://127.0.0.1:7420
   - **Verifier** reads the *actual diff* and gates the commit — if it fails, the
     Senior Dev is reprompted once; if it still fails, nothing lands.
 - Shows the real change **inline in Review** (colored diff) the moment it commits.
+- **Streams the agent live**: each node glows as the council reads and writes it
+  (active → next → queued → done / failed), so you watch the work move through the
+  canvas instead of staring at a spinner. Stop a run mid-flight at any time.
 - Records the story in Timeline and Ledger; commits successful changes locally.
 - Respects scope: **dotted = agent-editable**, **solid = locked** (protected files
   force an approval gate before anything touches them).
@@ -48,7 +51,18 @@ Two settings, both from the command palette (`⌘K`):
 2. **Assign providers** — `⌘K` → **Open Agent Settings**, then set each role
    (Architect / Senior Dev / Verifier).
 
-### Real models
+### Claude Code (local CLI) — keyless
+
+Set any role to provider **Claude Code (local CLI)**. OpenFDE drives your local
+`claude` CLI headlessly — no copy-paste, no API key in OpenFDE. The Senior Dev
+edits in-scope files (scope is enforced before and after the run, and pre-existing
+dirty files are never reverted); the Architect and Verifier run as text roles on
+the same CLI. Auth comes from your existing `claude` login, so on a Pro/Max plan
+the whole council runs against your subscription with **zero keys** anywhere in
+the project. Each stage is labeled with its provider in Review so the proof is
+visible.
+
+### Real models (API)
 
 Set each role to mode **API**, provider **Anthropic**, with a model id (e.g.
 `claude-sonnet-4-5`) and key. The council calls the model in-process, edits
@@ -64,7 +78,9 @@ key for actual code generation.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.2.0**, the architecture-to-execution
-loop runs end-to-end with real models: select scope, describe intent, and the
-council implements, verifies against the diff, and commits — within the
-boundaries you draw.
+OpenFDE is early and moving fast. As of **0.3.0**, the full council can run
+**keyless on your local Claude Code CLI** (Architect, Senior Dev, and Verifier),
+with the agent **streamed live on the canvas** as it works and a **stop control**
+to halt any run. The architecture-to-execution loop runs end-to-end: select scope,
+describe intent, and the council implements, verifies against the real diff, and
+commits — within the boundaries you draw.
