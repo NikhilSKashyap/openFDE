@@ -21,6 +21,8 @@ export default function Whiteboard({
   story = null,
   runNodeStates,
   runEdgeStates,
+  tetherSpotlight = null,
+  onClearTetherSpotlight,
   gitCommits,
   onSelectCommit,
   // PM props
@@ -88,6 +90,8 @@ export default function Whiteboard({
           story={story}
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
+          tetherSpotlight={tetherSpotlight}
+          onClearTetherSpotlight={onClearTetherSpotlight}
         />
       </div>
     </div>

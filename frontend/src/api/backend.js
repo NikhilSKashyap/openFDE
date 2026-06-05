@@ -388,6 +388,23 @@ export const putAgentSettings = (payload) =>
 export const checkAgentSettings = (payload = {}) =>
   apiFetch('/api/agent-settings/check', { method: 'POST', body: JSON.stringify(payload) })
 
+// ── Semantic graph (Step 37a) ───────────────────────────────────────────────
+
+/**
+ * Fetch the stored semantic-graph summary (counts, top tethers, provider runs).
+ *
+ * @returns {Promise<{ok, exists, summary}|null>}
+ */
+export const getSemanticGraph = () => apiFetch('/api/semantic-graph')
+
+/**
+ * Regenerate .openfde/semantic_graph.json for the watched repo; returns summary.
+ *
+ * @returns {Promise<{ok, summary}|null>}
+ */
+export const refreshSemanticGraph = () =>
+  apiFetch('/api/semantic-graph/refresh', { method: 'POST' })
+
 // ── Plan ──────────────────────────────────────────────────────────────────
 
 /**

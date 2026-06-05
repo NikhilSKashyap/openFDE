@@ -839,22 +839,17 @@ const ROLE_ROW = [
   { id: 'verifier',   short: 'Verify' },
 ]
 
+// Provider-driven status chip (no "mode" axis — transport is the provider).
 function roleStatusTone(cfg) {
   if (!cfg) return { tone: 'muted', label: '—' }
-  if (cfg.mode === 'disabled' || cfg.enabled === false) return { tone: 'muted', label: 'off' }
-  if (cfg.mode === 'local_bridge') return { tone: 'muted', label: 'n/a' }
-  if (cfg.mode === 'workflow') {
-    return cfg.provider === 'claude-code-workflow'
-      ? { tone: 'ok', label: 'workflow' }
-      : { tone: 'warn', label: 'check' }
-  }
-  if (cfg.mode === 'api') {
-    if (cfg.provider === 'echo') return { tone: 'ok', label: 'echo' }
-    if (!cfg.model) return { tone: 'warn', label: 'no model' }
-    if (!cfg.hasApiKey) return { tone: 'warn', label: 'no key' }
-    return { tone: 'ok', label: cfg.provider }
-  }
-  return { tone: 'muted', label: '—' }
+  if (cfg.enabled === false) return { tone: 'muted', label: 'off' }
+  if (cfg.provider === 'codex-local') return { tone: 'ok', label: 'codex' }
+  if (cfg.provider === 'claude-code-local') return { tone: 'ok', label: 'claude code' }
+  if (cfg.provider === 'echo') return { tone: 'ok', label: 'echo' }
+  // Hosted API providers: need a model + key.
+  if (!cfg.model) return { tone: 'warn', label: 'no model' }
+  if (!cfg.hasApiKey) return { tone: 'warn', label: 'no key' }
+  return { tone: 'ok', label: cfg.provider }
 }
 
 function RoleStatusRow({ agentSettings, onOpenAgentSettings }) {

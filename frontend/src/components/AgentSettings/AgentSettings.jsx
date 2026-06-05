@@ -11,13 +11,12 @@ import { putAgentSettings, checkAgentSettings } from '../../api/backend'
  *
  * @param {object}   props
  * @param {object}   props.settings  - sanitized public settings (no raw keys)
- * @param {object}   props.options   - {roles, modes, providers}
+ * @param {object}   props.options   - {roles, providers}
  * @param {Function} props.onClose
  * @param {Function} props.onSettingsChange - called with new public settings after save
  */
 export default function AgentSettings({ settings, options, onClose, onSettingsChange }) {
   const roles     = options?.roles     ?? []
-  const modes     = options?.modes     ?? []
   const providers = options?.providers ?? []
   const providerById = Object.fromEntries(providers.map(p => [p.id, p]))
 
@@ -44,7 +43,31 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
   const sd = settings?.[activeRole] ?? {}
   const provMeta = providerById[rd.provider] ?? {}
   const showBaseUrl = !!provMeta.supportsBaseUrl
-  const isApi = rd.mode === 'api'
+  // Transport is determined entirely by the provider (no separate "mode" axis).
+  // API providers (kind 'api') show model/key/base-URL; Echo is a keyless 'api'.
+  const isApi = provMeta.kind === 'api'
+  // Keyless local-CLI providers (Codex Local, Claude Code local CLI) drive a local
+  // coding app on its own login — no API key, optional model override. textOnly
+  // marks the read-only text role (Codex) vs the editing one (Claude Code).
+  const isLocalCli = provMeta.kind === 'local' && provMeta.available !== false
+  const isTextOnly = isLocalCli && !!provMeta.textOnly
+  // Quick-pick model suggestions per provider family (devs can still type any id).
+  const modelOptions = MODEL_SUGGESTIONS[rd.provider] ?? []
+  const modelDoc = MODEL_DOCS[rd.provider]
+  const modelSuggest = (
+    <>
+      {modelOptions.length > 0 && (
+        <datalist id="agentset-model-suggestions">
+          {modelOptions.map(m => <option key={m} value={m} />)}
+        </datalist>
+      )}
+      {modelDoc && (
+        <a className="agentset-doclink" href={modelDoc} target="_blank" rel="noreferrer">
+          Browse all models ↗
+        </a>
+      )}
+    </>
+  )
   const typedKey = keyInput[activeRole] ?? ''
   const wantClear = !!clearKey[activeRole]
 
@@ -57,7 +80,7 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
   // user typed one or explicitly cleared it.
   function rolePayload() {
     const cfg = {
-      mode: rd.mode, provider: rd.provider,
+      provider: rd.provider,
       model: rd.model || '', baseUrl: rd.baseUrl || '',
       enabled: rd.enabled !== false,
     }
@@ -119,7 +142,7 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
         </div>
 
         <div className="agentset-body">
-          {/* Enable + mode row */}
+          {/* Enable row (transport comes from the provider — no mode dropdown) */}
           <div className="agentset-row">
             <label className="agentset-toggle">
               <input
@@ -129,12 +152,6 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
               />
               <span>Enabled</span>
             </label>
-            <div className="agentset-field">
-              <span className="agentset-lbl">Mode</span>
-              <select value={rd.mode} onChange={e => patch('mode', e.target.value)}>
-                {modes.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </select>
-            </div>
           </div>
 
           {/* Provider */}
@@ -155,8 +172,41 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
             </div>
           )}
 
+          {/* Keyless local-CLI providers (Codex Local, Claude Code) — no key, optional model */}
+          {isLocalCli && (
+            <>
+              <div className="agentset-note">
+                {isTextOnly ? (
+                  <>
+                    Drives your local <strong>Codex CLI</strong> as a text role
+                    (Architect / Verifier). No API key — it uses your Codex login and runs
+                    read-only, so it can review the repo and the diff but never edits files.
+                  </>
+                ) : (
+                  <>
+                    Drives your local <strong>Claude Code CLI</strong> headlessly on your
+                    Claude login. No API key. As Senior Dev it edits in-scope files; as
+                    Architect / Verifier it runs as a text role.
+                  </>
+                )}
+              </div>
+              <div className="agentset-field full">
+                <span className="agentset-lbl">Model <span className="agentset-opt">optional</span></span>
+                <input
+                  type="text"
+                  list={modelOptions.length ? 'agentset-model-suggestions' : undefined}
+                  placeholder={isTextOnly ? 'Codex default (e.g. gpt-5.3-codex)'
+                                          : 'Claude Code default (e.g. sonnet, opus, haiku)'}
+                  value={rd.model || ''}
+                  onChange={e => patch('model', e.target.value)}
+                />
+                {modelSuggest}
+              </div>
+            </>
+          )}
+
           {/* Keyless offline demo provider — no model/key needed */}
-          {isApi && provMeta.available && provMeta.keyless && (
+          {isApi && provMeta.available && provMeta.keyless && !isLocalCli && (
             <div className="agentset-note">
               Echo is an offline demo: no key or model needed. With the
               “OpenFDE native agent” backend, Execute makes the echo agent append a
@@ -172,10 +222,12 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
                 <span className="agentset-lbl">Model</span>
                 <input
                   type="text"
-                  placeholder="e.g. gpt-4o, claude-sonnet-4, llama3.1"
+                  list={modelOptions.length ? 'agentset-model-suggestions' : undefined}
+                  placeholder="e.g. claude-sonnet-4-6, gpt-5.4, llama3.1"
                   value={rd.model || ''}
                   onChange={e => patch('model', e.target.value)}
                 />
+                {modelSuggest}
               </div>
               {showBaseUrl && (
                 <div className="agentset-field full">
@@ -244,13 +296,34 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
 
+// Quick-pick model ids per provider family. These are suggestions in a datalist
+// (the input stays free-text — devs can type any id). Keep in sync with the docs
+// linked in MODEL_DOCS. Claude Code local CLI takes short aliases (sonnet/opus/
+// haiku); the Anthropic API takes full pinned ids; Codex/OpenAI take gpt-5.x ids.
+const MODEL_SUGGESTIONS = {
+  'codex-local': ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2'],
+  'claude-code-local': ['sonnet', 'opus', 'haiku'],
+  'anthropic': ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5',
+                'claude-opus-4-7', 'claude-sonnet-4-5', 'claude-opus-4-5'],
+  'openai-compatible': ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
+}
+
+// Official "browse all models" reference per provider family.
+const CLAUDE_DOC = 'https://platform.claude.com/docs/en/about-claude/models/overview'
+const OPENAI_DOC = 'https://developers.openai.com/codex/models'
+const MODEL_DOCS = {
+  'codex-local': OPENAI_DOC,
+  'openai-compatible': OPENAI_DOC,
+  'claude-code-local': CLAUDE_DOC,
+  'anthropic': CLAUDE_DOC,
+}
+
 function seedDraft(settings, roles) {
   const out = {}
   for (const r of roles) {
     const s = settings?.[r.id] ?? {}
     out[r.id] = {
-      mode: s.mode ?? 'workflow',
-      provider: s.provider ?? 'claude-code-workflow',
+      provider: s.provider ?? 'claude-code-local',
       model: s.model ?? '',
       baseUrl: s.baseUrl ?? '',
       enabled: s.enabled !== false,
@@ -261,30 +334,32 @@ function seedDraft(settings, roles) {
 
 // Compute a status pill without requiring a server Check. A server Check result,
 // when present, takes precedence (it is authoritative for shape validity).
+// Validity is a pure function of the provider — there is no separate "mode" axis.
 function deriveStatus(rd, sd, typedKey, wantClear, provMeta, check) {
   if (check) {
     const tone = check.ok ? 'ok' : (check.supported === false ? 'muted' : 'warn')
     return { tone, message: check.message }
   }
   if (provMeta && provMeta.available === false) {
-    return { tone: 'muted', message: 'Local bridge — unavailable for now.' }
+    return { tone: 'muted', message: 'Unavailable for now.' }
   }
-  if (rd.mode === 'disabled' || rd.enabled === false) {
+  if (rd.enabled === false) {
     return { tone: 'muted', message: 'Disabled.' }
   }
-  if (rd.mode === 'workflow') {
-    return rd.provider === 'claude-code-workflow'
-      ? { tone: 'ok', message: 'Configured — Claude Code workflow.' }
-      : { tone: 'warn', message: 'Workflow mode needs the claude-code-workflow provider.' }
-  }
-  if (rd.mode === 'api') {
-    if (provMeta && provMeta.keyless) {
-      return { tone: 'ok', message: 'Configured — echo (offline demo, no key needed).' }
+  if (provMeta && provMeta.kind === 'local') {
+    return {
+      tone: 'ok',
+      message: provMeta.textOnly
+        ? 'Configured — Codex (local CLI, no key needed).'
+        : 'Configured — Claude Code (local CLI, no key needed).',
     }
-    if (!rd.model) return { tone: 'warn', message: 'Missing model.' }
-    const hasKey = (!!typedKey) || (sd.hasApiKey && !wantClear)
-    if (!hasKey) return { tone: 'warn', message: 'Missing API key.' }
-    return { tone: 'ok', message: 'Configured.' }
   }
-  return { tone: 'muted', message: '' }
+  // Hosted API providers (Echo is keyless): need a model + key unless keyless.
+  if (provMeta && provMeta.keyless) {
+    return { tone: 'ok', message: 'Configured — Echo (offline demo, no key needed).' }
+  }
+  if (!rd.model) return { tone: 'warn', message: 'Missing model.' }
+  const hasKey = (!!typedKey) || (sd.hasApiKey && !wantClear)
+  if (!hasKey) return { tone: 'warn', message: 'Missing API key.' }
+  return { tone: 'ok', message: 'Configured.' }
 }

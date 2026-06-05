@@ -8,6 +8,7 @@ import WorkPanel from './components/WorkPanel/WorkPanel'
 import { deriveMoment } from './productFlow/deriveMoment'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import AgentSettings from './components/AgentSettings/AgentSettings'
+import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
@@ -99,6 +100,9 @@ export default function App() {
   const [agentSettings, setAgentSettings] = useState(null)
   const [agentOptions, setAgentOptions]   = useState(null)
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false)
+  const [semanticGraphOpen, setSemanticGraphOpen] = useState(false)
+  // Tether spotlight: { identifier, kind, files } a concept to light up on canvas.
+  const [tetherSpotlight, setTetherSpotlight] = useState(null)
   const [leftOpen, setLeftOpen]   = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [flowMode, setFlowMode]   = useState('focused') // Story | Focused | All (Batch 5)
@@ -1242,6 +1246,8 @@ export default function App() {
               story={story}
               runNodeStates={run?.nodeStates}
               runEdgeStates={run?.edgeStates}
+              tetherSpotlight={tetherSpotlight}
+              onClearTetherSpotlight={() => setTetherSpotlight(null)}
               gitCommits={gitCommits}
               onSelectCommit={onSelectCommit}
               tasks={tasks}
@@ -1357,6 +1363,7 @@ export default function App() {
         activeBackend={activeBackend}
         onSetBackend={onSetBackend}
         onOpenAgentSettings={() => { setPaletteOpen(false); setAgentSettingsOpen(true) }}
+        onOpenSemanticGraph={() => { setPaletteOpen(false); setSemanticGraphOpen(true) }}
       />
       {agentSettingsOpen && agentSettings && agentOptions && (
         <AgentSettings
@@ -1364,6 +1371,16 @@ export default function App() {
           options={agentOptions}
           onClose={() => setAgentSettingsOpen(false)}
           onSettingsChange={setAgentSettings}
+        />
+      )}
+      {semanticGraphOpen && (
+        <SemanticGraphCard
+          onClose={() => setSemanticGraphOpen(false)}
+          onSpotlightTether={(t) => {
+            setTetherSpotlight(t)
+            setActiveView('whiteboard')
+            setSemanticGraphOpen(false)
+          }}
         />
       )}
     </>

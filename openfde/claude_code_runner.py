@@ -33,8 +33,11 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger("openfde.claude_code_runner")
@@ -137,6 +140,141 @@ def _parse_cli_json(stdout: str) -> dict:
     return {}
 
 
+# ── Live progress streaming (stream-json) ──────────────────────────────────── #
+# Map Claude Code tool-use events to the same read/write activity the in-process
+# Anthropic runner emits, so the canvas glow follows the local CLI agent too.
+_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+_READ_TOOLS = {"Read"}
+_STREAM_POLL = 0.4  # seconds between cancel/timeout checks while reading stdout
+
+
+def _rel_to_root(file_path, root: Path):
+    """Normalize a tool's absolute file_path to a repo-relative path, or None if
+    it is empty or outside the repo. Uses realpath on both sides so macOS symlinks
+    (e.g. /tmp → /private/tmp) reconcile and new (not-yet-created) files still map."""
+    if not file_path or not isinstance(file_path, str):
+        return None
+    p = file_path.strip().strip('"')
+    if not p:
+        return None
+    ap = p if os.path.isabs(p) else os.path.join(str(root), p)
+    try:
+        rel = os.path.relpath(os.path.realpath(ap), os.path.realpath(str(root)))
+    except (OSError, ValueError):
+        return None
+    if rel == "." or rel.startswith(".."):
+        return None
+    return _norm(rel)
+
+
+def _parse_event(line: str):
+    """Parse one stream-json line into a dict, or None if it is not JSON."""
+    try:
+        ev = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return ev if isinstance(ev, dict) else None
+
+
+def _emit_tools(ev: dict, root: Path, on_read, on_write) -> None:
+    """Translate an `assistant` event's tool_use blocks into on_read/on_write
+    activity callbacks (best-effort — a callback must never break the run)."""
+    msg = ev.get("message") or {}
+    for b in (msg.get("content") or []):
+        if not isinstance(b, dict) or b.get("type") != "tool_use":
+            continue
+        rel = _rel_to_root((b.get("input") or {}).get("file_path"), root)
+        if not rel:
+            continue
+        name = b.get("name")
+        cb = on_write if name in _WRITE_TOOLS else on_read if name in _READ_TOOLS else None
+        if not cb:
+            continue
+        try:
+            cb(rel)
+        except Exception:  # noqa: BLE001 — progress must never break the run
+            logger.debug("progress callback raised for %s", rel, exc_info=True)
+
+
+def _stream_claude(proc, root: Path, timeout: int, should_cancel, on_read, on_write):
+    """Consume `claude --output-format stream-json` line by line.
+
+    Reads stdout (and drains stderr) on daemon threads so the main loop can poll
+    ``should_cancel`` and the wall-clock ``timeout`` between lines; emits live
+    read/write activity as tool_use events arrive; captures the final `result`
+    event as the CLI envelope. Kills the process on cancel/timeout (cancellation
+    via Popen is preserved). Returns (cli_envelope, stderr_text, error)."""
+    out_q: "queue.Queue" = queue.Queue()
+    stderr_buf = []
+
+    def _read_stdout():
+        try:
+            for line in proc.stdout:
+                out_q.put(line)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            out_q.put(None)  # EOF sentinel
+
+    def _read_stderr():
+        try:
+            for line in proc.stderr:
+                stderr_buf.append(line)
+        except Exception:  # noqa: BLE001
+            pass
+
+    t_out = threading.Thread(target=_read_stdout, daemon=True)
+    t_err = threading.Thread(target=_read_stderr, daemon=True)
+    t_out.start()
+    t_err.start()
+
+    cli, error = {}, None
+    timed_out = False
+    deadline = time.monotonic() + timeout
+    while True:
+        if should_cancel and should_cancel():
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            line = out_q.get(timeout=min(_STREAM_POLL, remaining))
+        except queue.Empty:
+            continue
+        if line is None:
+            break  # stdout EOF
+        line = line.strip()
+        if not line:
+            continue
+        ev = _parse_event(line)
+        if not ev:
+            continue
+        etype = ev.get("type")
+        if etype == "assistant":
+            _emit_tools(ev, root, on_read, on_write)
+        elif etype == "result":
+            cli = ev
+
+    if timed_out or (should_cancel and should_cancel()):
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
+    t_err.join(timeout=2)
+    stderr = "".join(stderr_buf)
+    if timed_out:
+        error = f"Claude Code timed out after {timeout}s."
+        logger.error("Claude Code run timed out (%ss)", timeout)
+    elif not cli and proc.returncode not in (0, None):
+        error = f"claude exited {proc.returncode}: {stderr.strip()[:300]}"
+    return cli, stderr, error
+
+
 # Text roles (Architect/Verifier) never edit — pure completion, no tools.
 _TEXT_DISALLOWED = ["Edit", "Write", "MultiEdit", "Bash", "WebFetch", "WebSearch", "Task", "TodoWrite"]
 
@@ -187,7 +325,8 @@ def run_claude_code_text(*, system, user, model=None, timeout=180,
 
 def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
                     timeout=_DEFAULT_TIMEOUT, max_budget_usd=_DEFAULT_BUDGET_USD,
-                    claude_bin=None, should_cancel=None, on_proc=None) -> dict:
+                    claude_bin=None, should_cancel=None, on_proc=None,
+                    on_write=None, on_read=None, stream=True) -> dict:
     """Drive the Claude Code CLI as Senior Dev; return a run_agent-shaped outcome.
 
     Args:
@@ -199,6 +338,10 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
         timeout: int — wall-clock seconds before the CLI run is aborted.
         max_budget_usd: float — hard `--max-budget-usd` spend cap.
         claude_bin: str | None — explicit binary path (default: search PATH).
+        on_write: callable(rel) | None — live callback as the agent edits a file.
+        on_read: callable(rel) | None — live callback as the agent reads a file.
+        stream: bool — use `--output-format stream-json` for live per-file progress
+            (default). False uses the single-result `json` format (no live glow).
 
     Returns:
         dict — {result, writes, rejected, protectedAttempts, stdout, stderr,
@@ -226,9 +369,13 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
             "Cannot run on file(s) with uncommitted changes in scope — commit, "
             f"stash, or review first: {', '.join(dirty_in_scope)}.")
 
+    # stream-json gives live per-file progress (the canvas glow follows the agent);
+    # json is the single-result fallback (no live glow) when stream=False.
+    out_fmt = (["--output-format", "stream-json", "--verbose"] if stream
+               else ["--output-format", "json"])
     cmd = [
         claude_bin, "-p", prompt,
-        "--output-format", "json",
+        *out_fmt,
         "--permission-mode", "acceptEdits",
         "--max-budget-usd", str(max_budget_usd),
         "--allowedTools", ",".join(_ALLOWED_TOOLS),
@@ -250,18 +397,26 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
             on_proc(proc)
         except Exception:  # noqa: BLE001
             pass
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        if proc.returncode != 0 and not (stdout or "").strip():
-            error = f"claude exited {proc.returncode}: {(stderr or '').strip()[:300]}"
-    except subprocess.TimeoutExpired:
-        proc.kill()
+
+    if stream:
+        # Read the event stream live: emit read/write glow + capture the result
+        # event. Scope is still enforced from the git dirty-set below, so even if
+        # stream parsing yields nothing the run stays correct (only glow is lost).
+        cli, stderr, error = _stream_claude(proc, root, timeout, should_cancel, on_read, on_write)
+    else:
         try:
-            stdout, stderr = proc.communicate(timeout=10)
-        except Exception:  # noqa: BLE001
-            stdout, stderr = "", ""
-        error = f"Claude Code timed out after {timeout}s."
-        logger.error("Claude Code run timed out (%ss)", timeout)
+            stdout, stderr = proc.communicate(timeout=timeout)
+            if proc.returncode != 0 and not (stdout or "").strip():
+                error = f"claude exited {proc.returncode}: {(stderr or '').strip()[:300]}"
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except Exception:  # noqa: BLE001
+                stdout, stderr = "", ""
+            error = f"Claude Code timed out after {timeout}s."
+            logger.error("Claude Code run timed out (%ss)", timeout)
+        cli = _parse_cli_json(stdout)
 
     # Cancelled mid-run? The cancel path terminated the process. Land nothing —
     # any partial in-scope edits are left uncommitted for the user to review.
@@ -269,7 +424,6 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
         logger.info("Claude Code Sr Dev: cancelled by user")
         return _failed_outcome("Cancelled by user.")
 
-    cli = _parse_cli_json(stdout)
     summary_text = (cli.get("result") or "").strip()
     cost = cli.get("total_cost_usd")
     if cli.get("is_error") and not error:

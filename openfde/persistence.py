@@ -610,7 +610,7 @@ class Persistence:
     def save_agent_settings(self, settings: dict) -> dict:
         """Persist agent role settings (raw keys live only in this file).
 
-        Logs only modes/providers — never the secret. Writing is atomic.
+        Logs only providers — never the secret. Writing is atomic.
 
         Args:
             settings: dict — settings to store (normalized before write).
@@ -620,8 +620,8 @@ class Persistence:
         """
         clean = self.sanitize_agent_settings(settings)
         self._write_json(self.agent_settings_path, clean)
-        modes = {r: f"{c['mode']}/{c['provider']}" for r, c in clean.items()}
-        logger.info("Agent settings saved (%s)", modes)
+        providers = {r: c.get("provider") for r, c in clean.items()}
+        logger.info("Agent settings saved (%s)", providers)
         return clean
 
     def save_workflow_artifact(self, workflow: dict) -> dict:

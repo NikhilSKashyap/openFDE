@@ -18,18 +18,29 @@ from pathlib import Path
 from openfde.claude_code_runner import run_claude_code
 
 # A fake `claude` CLI: writes files named in $FAKE_CLAUDE_WRITES (JSON list of
-# [relpath, content]) relative to cwd, then prints the result JSON envelope.
+# [relpath, content]) relative to cwd, then prints the result envelope. When
+# $FAKE_CLAUDE_STREAM is set it first emits stream-json `assistant` tool_use
+# events (a Read + an Edit, absolute file_path) for each written file, mimicking
+# `claude --output-format stream-json` so the live-progress parser is exercised.
 _FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
-spec = os.environ.get("FAKE_CLAUDE_WRITES", "[]")
-for rel, content in json.loads(spec):
+writes = json.loads(os.environ.get("FAKE_CLAUDE_WRITES", "[]"))
+def emit(obj): print(json.dumps(obj), flush=True)
+if os.environ.get("FAKE_CLAUDE_STREAM"):
+    for rel, _ in writes:
+        ap = os.path.abspath(rel)
+        emit({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": ap}}]}})
+        emit({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": ap}}]}})
+for rel, content in writes:
     p = Path(rel)
     if p.parent != Path("."):
         p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
-print(json.dumps({"type": "result", "is_error": False,
-                  "result": "fake edit applied", "total_cost_usd": 0.01}))
+emit({"type": "result", "is_error": False,
+      "result": "fake edit applied", "total_cost_usd": 0.01})
 """
 
 
@@ -57,6 +68,7 @@ class ClaudeCodeRunnerScopeTest(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("FAKE_CLAUDE_WRITES", None)
+        os.environ.pop("FAKE_CLAUDE_STREAM", None)
         self.tmp.cleanup()
 
     def _run(self, writes, editable, protected=None):
@@ -110,6 +122,34 @@ class ClaudeCodeRunnerScopeTest(unittest.TestCase):
         self.assertIn("already had uncommitted changes", out["result"]["reportSummary"])
         # We must not have reverted it back to HEAD ("ORIGINAL NOTE").
         self.assertNotEqual(self._read("other/note.txt"), "ORIGINAL NOTE\n")
+
+
+    # 5) stream-json mode emits live read/write progress + still enforces scope.
+    def test_stream_emits_read_and_write_progress(self):
+        os.environ["FAKE_CLAUDE_STREAM"] = "1"
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps([["ingest/reader.py", "STREAMED\n"]])
+        reads, writes = [], []
+        out = run_claude_code(
+            repo_root=self.root, prompt="do it",
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake),
+            on_read=lambda r: reads.append(r), on_write=lambda r: writes.append(r))
+        self.assertEqual(out["result"]["status"], "passed", out["result"]["reportSummary"])
+        self.assertEqual(out["writes"], ["ingest/reader.py"])
+        # The tool_use events were parsed into repo-relative progress callbacks.
+        self.assertIn("ingest/reader.py", reads)
+        self.assertIn("ingest/reader.py", writes)
+        self.assertEqual(self._read("ingest/reader.py"), "STREAMED\n")
+
+    # 6) Legacy json fallback (stream=False) still parses the single result.
+    def test_json_fallback_mode_still_works(self):
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps([["ingest/reader.py", "JSON MODE\n"]])
+        out = run_claude_code(
+            repo_root=self.root, prompt="do it",
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake),
+            stream=False)
+        self.assertEqual(out["result"]["status"], "passed", out["result"]["reportSummary"])
+        self.assertEqual(out["writes"], ["ingest/reader.py"])
+        self.assertEqual(self._read("ingest/reader.py"), "JSON MODE\n")
 
 
 if __name__ == "__main__":

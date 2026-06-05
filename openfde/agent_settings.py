@@ -25,39 +25,41 @@ logger = logging.getLogger("openfde.agent_settings")
 # ─── Vocabulary ──────────────────────────────────────────────────────────── #
 
 ROLES = ("architect", "senior_dev", "verifier")
-MODES = ("workflow", "api", "local_bridge", "disabled")
 PROVIDERS = (
-    "claude-code-workflow",
+    "codex-local",
+    "claude-code-local",
     "echo",
     "openai-compatible",
     "anthropic",
     "openrouter",
     "ollama",
-    "custom",
-    "codex-local",
-    "claude-code-local",
 )
-# Providers that will eventually shell out to a local CLI bridge — not available
-# in this step. They report supported:false from check().
-LOCAL_BRIDGE_PROVIDERS = ("codex-local", "claude-code-local")
+# Keyless local-CLI providers that drive a local coding app as a TEXT role
+# (Architect / Verifier) — Day 3B. They use the app's own login, need no API key,
+# and must never be Senior Dev (text-only, cannot edit the repo).
+LOCAL_TEXT_PROVIDERS = ("codex-local",)
+# Providers visible but not available yet (report supported:false from check()).
+UNAVAILABLE_PROVIDERS = ()
 # Providers that meaningfully accept a custom base URL.
-BASE_URL_PROVIDERS = ("openai-compatible", "custom", "ollama", "openrouter")
-# Providers that need no API key (offline / local demo).
-KEYLESS_PROVIDERS = ("echo",)
+BASE_URL_PROVIDERS = ("openai-compatible", "ollama", "openrouter")
+# Providers that need no API key (offline demo / local CLI login). The transport
+# is fully determined by the provider — there is no separate "mode" axis.
+KEYLESS_PROVIDERS = ("echo", "claude-code-local", *LOCAL_TEXT_PROVIDERS)
+
+# Old provider ids → current ids (silent migration of stored settings). The
+# "-workflow" suffix is a fossil from the removed Mode axis.
+PROVIDER_ALIASES = {"claude-code-workflow": "claude-code-local"}
 
 _ROLE_LABELS = {"architect": "Architect", "senior_dev": "Senior Dev", "verifier": "Verifier"}
 _PROVIDER_LABELS = {
-    "claude-code-workflow": "Claude Code (local CLI)",
+    "codex-local": "Codex (local CLI)",
+    "claude-code-local": "Claude Code (local CLI)",
     "echo": "Echo (offline demo)",
-    "openai-compatible": "OpenAI-compatible",
-    "anthropic": "Anthropic",
+    "openai-compatible": "OpenAI (API)",
+    "anthropic": "Anthropic (API)",
     "openrouter": "OpenRouter",
     "ollama": "Ollama",
-    "custom": "Custom (OpenAI-compatible)",
-    "codex-local": "Codex (local bridge)",
-    "claude-code-local": "Claude Code (local bridge)",
 }
-_MODE_LABELS = {"workflow": "Workflow", "api": "API", "local_bridge": "Local bridge", "disabled": "Disabled"}
 
 # Field length caps (defensive — these are user-supplied strings).
 _MAX_MODEL = 200
@@ -98,17 +100,15 @@ def normalize_role(cfg) -> dict:
         cfg: any — candidate role config.
 
     Returns:
-        dict — {mode, provider, model, baseUrl, apiKey, enabled}.
+        dict — {provider, model, baseUrl, apiKey, enabled}. (Any legacy ``mode``
+        field is ignored — transport is determined entirely by the provider.)
     """
     cfg = cfg if isinstance(cfg, dict) else {}
-    mode = cfg.get("mode")
-    if mode not in MODES:
-        mode = "workflow"
     provider = cfg.get("provider")
+    provider = PROVIDER_ALIASES.get(provider, provider)  # migrate legacy ids
     if provider not in PROVIDERS:
-        provider = "claude-code-workflow"
+        provider = "claude-code-local"
     return {
-        "mode": mode,
         "provider": provider,
         "model": _s(cfg.get("model"), _MAX_MODEL),
         "baseUrl": _s(cfg.get("baseUrl"), _MAX_BASEURL),
@@ -164,7 +164,7 @@ def merge(existing, incoming) -> dict:
         if not isinstance(inc, dict):
             out[role] = cur
             continue
-        for field in ("mode", "provider", "model", "baseUrl", "enabled"):
+        for field in ("provider", "model", "baseUrl", "enabled"):
             if field in inc:
                 cur[field] = inc[field]
         if inc.get("clearApiKey"):
@@ -192,7 +192,6 @@ def to_public(settings) -> dict:
     for role in ROLES:
         c = s[role]
         out[role] = {
-            "mode": c["mode"],
             "provider": c["provider"],
             "model": c["model"],
             "baseUrl": c["baseUrl"],
@@ -216,9 +215,10 @@ def check_role(role: str, cfg: dict) -> dict:
         dict — {role, label, supported, ok, configured, status, message}.
     """
     cfg = normalize_role(cfg)
-    mode, provider = cfg["mode"], cfg["provider"]
+    provider = cfg["provider"]
     has_key = bool(cfg["apiKey"])
     label = _ROLE_LABELS.get(role, role)
+    pl = _PROVIDER_LABELS.get(provider, provider)
 
     def result(supported, ok, configured, status, message):
         return {
@@ -226,36 +226,42 @@ def check_role(role: str, cfg: dict) -> dict:
             "configured": configured, "status": status, "message": message,
         }
 
-    # Local bridges (by mode or provider) are visible but not available yet.
-    if mode == "local_bridge" or provider in LOCAL_BRIDGE_PROVIDERS:
-        pl = _PROVIDER_LABELS.get(provider, provider)
-        return result(False, False, False, "unavailable",
-                      f"{pl} local bridge is not available yet (planned for a later step).")
+    # Validity is now a pure function of the provider (no separate "mode" axis).
 
-    if mode == "disabled" or not cfg["enabled"]:
+    # Any provider parked as not-yet-available is visible but reports unavailable.
+    if provider in UNAVAILABLE_PROVIDERS:
+        return result(False, False, False, "unavailable",
+                      f"{pl} is not available yet (planned for a later step).")
+
+    if not cfg["enabled"]:
         return result(True, True, False, "disabled", f"{label} is disabled.")
 
-    if mode == "workflow":
-        if provider != "claude-code-workflow":
+    # Keyless local-CLI text roles (Codex Local) — Architect / Verifier only.
+    if provider in LOCAL_TEXT_PROVIDERS:
+        if role == "senior_dev":
             return result(True, False, False, "error",
-                          "Workflow mode requires the claude-code-workflow provider.")
-        return result(True, True, True, "configured", "Runs via Claude Code workflow.")
+                          f"{pl} is a text-only role (Architect/Verifier). Senior Dev needs "
+                          "Claude Code, Anthropic, or Echo.")
+        return result(True, True, True, "configured",
+                      f"{pl} — local CLI text role, no API key needed.")
 
-    if mode == "api":
-        if provider == "echo":
-            return result(True, True, True, "configured",
-                          "Echo provider — offline demo, no key or model needed.")
-        if provider in ("claude-code-workflow", ""):
-            return result(True, False, False, "error",
-                          "API mode requires an API provider (Anthropic, OpenAI-compatible, …).")
-        if not cfg["model"]:
-            return result(True, False, False, "missing", "Model is required for API mode.")
-        if not has_key:
-            return result(True, False, False, "missing",
-                          "API key is required (enter one or keep the stored key).")
-        return result(True, True, True, "configured", f"{_PROVIDER_LABELS.get(provider, provider)} ready.")
+    # Claude Code (local CLI) — keyless, runs on the user's login.
+    if provider == "claude-code-local":
+        return result(True, True, True, "configured",
+                      f"{pl} — runs on your Claude login, no API key needed.")
 
-    return result(True, False, False, "error", f"Unknown mode '{mode}'.")
+    # Echo — offline deterministic demo, no key or model.
+    if provider == "echo":
+        return result(True, True, True, "configured",
+                      "Echo — offline demo, no key or model needed.")
+
+    # Everything else is a hosted API provider: needs a model and a key.
+    if not cfg["model"]:
+        return result(True, False, False, "missing", f"{pl} needs a model id.")
+    if not has_key:
+        return result(True, False, False, "missing",
+                      f"{pl} needs an API key (enter one or keep the stored key).")
+    return result(True, True, True, "configured", f"{pl} ready.")
 
 
 def check(settings, role: str = None) -> dict:
@@ -277,22 +283,24 @@ def check(settings, role: str = None) -> dict:
 # ─── UI metadata ─────────────────────────────────────────────────────────── #
 
 def options() -> dict:
-    """Return roles / modes / providers metadata for rendering the settings UI.
+    """Return roles / providers metadata for rendering the settings UI.
 
     Returns:
-        dict — {roles, modes, providers} each a list of {id, label, ...}.
+        dict — {roles, providers} each a list of {id, label, ...}. (Transport is
+        determined by the provider; there is no separate "mode" axis.)
     """
     return {
         "roles": [{"id": r, "label": _ROLE_LABELS[r]} for r in ROLES],
-        "modes": [{"id": m, "label": _MODE_LABELS[m]} for m in MODES],
         "providers": [
             {
                 "id": p, "label": _PROVIDER_LABELS[p],
-                "kind": ("local_bridge" if p in LOCAL_BRIDGE_PROVIDERS
-                         else "workflow" if p == "claude-code-workflow" else "api"),
+                # Both local-CLI providers are kind 'local'; 'textOnly' tells them
+                # apart (Codex = text-only Architect/Verifier; Claude Code can edit).
+                "kind": ("local" if p in ("codex-local", "claude-code-local") else "api"),
                 "supportsBaseUrl": p in BASE_URL_PROVIDERS,
                 "keyless": p in KEYLESS_PROVIDERS,
-                "available": p not in LOCAL_BRIDGE_PROVIDERS,
+                "textOnly": p in LOCAL_TEXT_PROVIDERS,
+                "available": p not in UNAVAILABLE_PROVIDERS,
             }
             for p in PROVIDERS
         ],

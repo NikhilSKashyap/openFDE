@@ -12,6 +12,22 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s || ''))
 const EMPTY_SET = new Set()
 
+// Tether spotlight helpers: gather a node's file paths (string or {path|name})
+// from its layout files + the underlying box's linkedFiles, and basename-match.
+const baseName = (p) => (typeof p === 'string' ? p : '').split('/').pop()
+function nodeFilePaths(node) {
+  const out = []
+  const push = (f) => {
+    if (typeof f === 'string') out.push(f)
+    else if (f && typeof f.path === 'string') out.push(f.path)
+    else if (f && typeof f.name === 'string') out.push(f.name)
+  }
+  ;(node.files || []).forEach(push)
+  ;(node.box?.linkedFiles || []).forEach(push)
+  ;(node.box?.files || []).forEach(push)
+  return out
+}
+
 export default function WhiteboardCanvas({
   activeTool, setActiveTool, state, dispatch,
   onLoadSelfMap, onGenerateFromRepo, onExecute, executing = false,
@@ -20,6 +36,8 @@ export default function WhiteboardCanvas({
   flowMode = 'focused', story = null,
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
+  // Tether spotlight (Step 37a Slice 2): light up the boxes holding a concept.
+  tetherSpotlight = null, onClearTetherSpotlight = null,
 }) {
   const svgRef = useRef(null)
   const interaction = useRef(null)
@@ -497,6 +515,31 @@ export default function WhiteboardCanvas({
     return !(n && n.expanded)
   })
 
+  // ── Tether spotlight: which visible boxes hold the selected concept ────────
+  const spotlight = useMemo(() => {
+    if (!tetherSpotlight?.files?.length || !nodes.length) return null
+    const wanted = new Set(tetherSpotlight.files.map(baseName))
+    const lit = []
+    for (const n of nodes) {
+      if (nodeFilePaths(n).some(p => wanted.has(baseName(p)))) {
+        lit.push({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h,
+                   cx: n.x + n.w / 2, cy: n.y + n.h / 2 })
+      }
+    }
+    if (!lit.length) return { lit: [], centroid: null }
+    const cx = lit.reduce((s, r) => s + r.cx, 0) / lit.length
+    const cy = lit.reduce((s, r) => s + r.cy, 0) / lit.length
+    return { lit, centroid: { x: cx, y: cy } }
+  }, [tetherSpotlight, nodes])
+
+  // Esc clears the spotlight.
+  useEffect(() => {
+    if (!tetherSpotlight) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') onClearTetherSpotlight?.() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [tetherSpotlight, onClearTetherSpotlight])
+
   return (
     <div className="wb-canvas-root">
       <div className="wb-canvas-scroll" onWheel={handleWheel}>
@@ -603,6 +646,40 @@ export default function WhiteboardCanvas({
               rx={14} fill="none" pointerEvents="none" />
           ))}
 
+          {/* Tether spotlight (Step 37a Slice 2): dim everything except the boxes
+              holding the selected concept; thread them to a labeled centroid. */}
+          {spotlight && spotlight.lit.length > 0 && (
+            <g className="tether-layer" pointerEvents="none">
+              <defs>
+                <mask id="tether-mask">
+                  <rect x="0" y="0" width={viewBounds.w} height={viewBounds.h} fill="white" />
+                  {spotlight.lit.map(r => (
+                    <rect key={`hole-${r.id}`} x={r.x - 10} y={r.y - 10}
+                      width={r.w + 20} height={r.h + 20} rx={16} fill="black" />
+                  ))}
+                </mask>
+              </defs>
+              <rect className="tether-dim" x="0" y="0" width={viewBounds.w} height={viewBounds.h}
+                fill="var(--bg)" mask="url(#tether-mask)" />
+              {spotlight.lit.map(r => (
+                <line key={`thread-${r.id}`} className="tether-thread"
+                  x1={spotlight.centroid.x} y1={spotlight.centroid.y} x2={r.cx} y2={r.cy} />
+              ))}
+              {spotlight.lit.map(r => (
+                <rect key={`lit-${r.id}`} className="tether-ring"
+                  x={r.x - 8} y={r.y - 8} width={r.w + 16} height={r.h + 16} rx={14} fill="none" />
+              ))}
+              <g className="tether-label-g"
+                transform={`translate(${spotlight.centroid.x}, ${spotlight.centroid.y})`}>
+                <rect className="tether-label-bg" x={-(tetherSpotlight.identifier.length * 4 + 16)} y={-13}
+                  width={tetherSpotlight.identifier.length * 8 + 32} height={26} rx={13} />
+                <text className="tether-label-tx" x="0" y="5" textAnchor="middle">
+                  {tetherSpotlight.identifier}
+                </text>
+              </g>
+            </g>
+          )}
+
           {rubberBand && (
             <rect x={rubberBand.x} y={rubberBand.y} width={rubberBand.w} height={rubberBand.h}
               fill="rgba(124,111,247,0.08)" stroke="var(--accent)" strokeWidth={1} strokeDasharray="4 3" pointerEvents="none" />
@@ -616,6 +693,20 @@ export default function WhiteboardCanvas({
         <button className="wb-zoom-pct" onClick={() => setScale(1)} title="Reset zoom">{Math.round(scale * 100)}%</button>
         <button onClick={() => setScale(s => clamp(+(s + 0.1).toFixed(2), 0.3, 2.5))} title="Zoom in">+</button>
       </div>
+
+      {/* Tether spotlight chip — what concept is lit, how many boxes, dismiss */}
+      {tetherSpotlight && (
+        <div className="tether-chip" onClick={() => onClearTetherSpotlight?.()} title="Clear (Esc)">
+          <span className="tether-chip-dot" />
+          <span className="tether-chip-id">{tetherSpotlight.identifier}</span>
+          <span className="tether-chip-meta">
+            {spotlight && spotlight.lit.length > 0
+              ? `${spotlight.lit.length} box${spotlight.lit.length > 1 ? 'es' : ''}`
+              : 'no boxes on this canvas'}
+          </span>
+          <span className="tether-chip-x">✕</span>
+        </div>
+      )}
 
       {isEmpty && (
         <div className="wb-empty-cta">

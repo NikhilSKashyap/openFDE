@@ -2054,6 +2054,64 @@
   background: var(--surface-2); color: var(--text-muted);
 }
 .agentset-note.warn { border: 1px solid var(--active); color: var(--text); }
+.agentset-doclink {
+  display: inline-block; margin-top: 5px; font-size: 11px;
+  color: var(--accent); text-decoration: none; opacity: 0.85;
+}
+.agentset-doclink:hover { opacity: 1; text-decoration: underline; }
+
+/* Architecture Evidence (semantic graph, Step 37a) */
+.agentset.semgraph { width: 560px; max-width: 92vw; }
+.semgraph-meta { display: flex; gap: 8px; align-items: baseline; font-size: 12px;
+  color: var(--text-muted); margin-bottom: 10px; }
+.semgraph-sha { font-family: ui-monospace, monospace; opacity: 0.7; }
+.semgraph-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+.semgraph-count { background: var(--surface-2); border-radius: 6px; padding: 8px; text-align: center; }
+.semgraph-count-n { font-size: 20px; font-weight: 700; color: var(--text); }
+.semgraph-count-l { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.semgraph-section-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-muted); margin: 12px 0 6px; }
+.semgraph-tethers { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+.semgraph-tether { display: block; width: 100%; text-align: left; border: 1px solid transparent;
+  background: var(--surface-2); border-radius: 6px; padding: 6px 8px; cursor: pointer; color: inherit; font: inherit; }
+.semgraph-tether:hover { border-color: var(--accent); background: var(--surface); }
+.semgraph-tether-go { float: right; font-size: 10px; color: var(--accent); opacity: 0; }
+.semgraph-tether:hover .semgraph-tether-go { opacity: 1; }
+.semgraph-tether-id { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; color: var(--text); }
+.semgraph-tether-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
+  margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: var(--border); color: var(--text-muted); }
+.semgraph-tether-kind.identifier { color: var(--dotted); }
+.semgraph-tether-kind.env-var { color: var(--active); }
+.semgraph-tether-kind.route { color: var(--solid); }
+.semgraph-tether-files { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
+.semgraph-tether-paths { font-size: 10px; color: var(--text-muted); margin-top: 3px; opacity: 0.8;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.semgraph-providers { display: flex; flex-wrap: wrap; gap: 6px; }
+.semgraph-prov { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: var(--surface-2); color: var(--text-muted); }
+.semgraph-prov.ok { color: var(--solid); }
+.semgraph-prov.skip { opacity: 0.55; }
+.semgraph-warnings { margin-top: 10px; }
+.semgraph-warn { font-size: 10px; color: var(--text-muted); opacity: 0.8; }
+
+/* Tether spotlight on canvas (Step 37a Slice 2) */
+.tether-dim { opacity: 0.66; transition: opacity 0.2s ease; }
+.tether-thread { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: 0.8;
+  animation: tether-dash 0.6s linear infinite; }
+@keyframes tether-dash { to { stroke-dashoffset: -9; } }
+.tether-ring { stroke: var(--accent); stroke-width: 2.5; filter: drop-shadow(0 0 6px var(--accent));
+  animation: tether-pulse 2.4s ease-in-out infinite; }
+@keyframes tether-pulse { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
+.tether-label-bg { fill: var(--accent); }
+.tether-label-tx { fill: #fff; font-size: 12px; font-weight: 700; font-family: ui-monospace, monospace; }
+.tether-chip { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 16px;
+  background: var(--surface); border: 1px solid var(--accent); cursor: pointer; z-index: 6;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
+.tether-chip-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.tether-chip-id { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; color: var(--text); }
+.tether-chip-meta { font-size: 11px; color: var(--text-muted); }
+.tether-chip-x { font-size: 11px; color: var(--text-muted); margin-left: 2px; }
+.tether-chip:hover .tether-chip-x { color: var(--text); }
 .agentset-status {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--text-muted);

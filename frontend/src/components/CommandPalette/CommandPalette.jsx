@@ -17,6 +17,7 @@ export default function CommandPalette({
   activeBackend = 'openfde-native',
   onSetBackend,
   onOpenAgentSettings,
+  onOpenSemanticGraph,
 }) {
   const [query, setQuery]           = useState('')
   const [highlighted, setHighlighted] = useState(0)
@@ -182,6 +183,12 @@ export default function CommandPalette({
       hint: 'assign providers to Architect / Senior Dev / Verifier',
       icon: <IconAgentSettings />,
       action: () => { onOpenAgentSettings?.(); onClose() },
+    },
+    {
+      id: 'semantic-graph', group: 'Settings', label: 'Architecture evidence',
+      hint: 'semantic graph: tethers, counts, provider runs',
+      icon: <IconAgentSettings />,
+      action: () => { onOpenSemanticGraph?.(); onClose() },
     },
     // Execution backend selector (Step 19)
     ...(backends || []).map(b => ({

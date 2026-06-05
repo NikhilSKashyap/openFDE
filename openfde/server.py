@@ -59,9 +59,11 @@ import aiohttp
 from aiohttp import web
 
 from openfde import agent_settings as agent_settings_mod
+from openfde import semantic_graph as semantic_graph_mod
 from openfde.agent_runner import build_system_prompt, run_agent
 from openfde.anthropic_transport import make_transport
 from openfde.claude_code_runner import cli_available as claude_cli_available, run_claude_code, run_claude_code_text
+from openfde.codex_local_runner import cli_available as codex_cli_available, run_codex_local_text
 from openfde.echo_transport import make_echo_transport
 from openfde.openai_transport import complete as llm_complete, make_transport as make_openai_transport
 from openfde.council import run_council
@@ -1020,6 +1022,46 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             result = agent_settings_mod.check(stored)
         return web.json_response({"ok": result["ok"], "roles": result["roles"]})
 
+    # ================================================================== #
+    #  REST — /api/semantic-graph  (Step 37a: Semantic Graph Adapter)    #
+    # ================================================================== #
+
+    async def get_semantic_graph(request: web.Request) -> web.Response:
+        """Return the stored semantic-graph summary (+ full graph on ?full=1).
+
+        Provider output is evidence, not truth — every artifact carries provenance.
+
+        Args:
+            request: web.Request — optional query ?full=1 for the whole graph.
+
+        Returns:
+            web.Response — {ok, exists, summary, graph?}.
+        """
+        graph = semantic_graph_mod.load_graph(path)
+        out = {"ok": True, "exists": graph is not None,
+               "summary": semantic_graph_mod.graph_summary(graph)}
+        if graph is not None and request.query.get("full"):
+            out["graph"] = graph
+        return web.json_response(out)
+
+    async def post_semantic_graph_refresh(request: web.Request) -> web.Response:
+        """Regenerate .openfde/semantic_graph.json for the watched repo.
+
+        Runs the deterministic providers (ast / tethers / risk) plus any installed
+        optional providers (code2flow / detect-secrets) off the event loop.
+
+        Returns:
+            web.Response — {ok, summary} or 500 with the error.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            graph = await loop.run_in_executor(None, lambda: semantic_graph_mod.build_graph(path))
+            await loop.run_in_executor(None, lambda: semantic_graph_mod.write_graph(path, graph))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("semantic graph refresh failed: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)[:200]}, status=500)
+        return web.json_response({"ok": True, "summary": semantic_graph_mod.graph_summary(graph)})
+
     async def post_compile_workflow(request: web.Request) -> web.Response:
         """Compile the selected scope into a workflow payload + script (preview).
 
@@ -1174,12 +1216,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
 
-        # ── Senior Dev role gate (api mode; anthropic with key, or echo) ─────
+        # ── Senior Dev role gate (native in-process agent: anthropic or echo) ─
         sd = persistence.load_agent_settings().get("senior_dev", {})
         provider = sd.get("provider")
-        if sd.get("mode") != "api":
-            return web.json_response({"ok": False, "error":
-                "Senior Dev is not in API mode. Open Agent Settings to configure it."}, status=400)
         if provider not in ("anthropic", "echo"):
             return web.json_response({"ok": False, "error":
                 f"Native agent supports the 'anthropic' or 'echo' provider (Senior Dev is '{provider}')."},
@@ -1276,24 +1315,32 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         or None to fall back to the deterministic role. Architect / Verifier only —
         Senior Dev uses the scoped agent_runner / Claude Code runner.
 
-        Providers: 'claude-code-workflow' drives the local `claude` CLI as a pure
+        Providers: 'claude-code-local' drives the local `claude` CLI as a pure
         text role (keyless — uses the user's login); 'anthropic' / OpenAI-compatible
         use the API (key + model required)."""
         prov = cfg.get("provider")
         # Claude Code (local CLI) text role — no key, runs on the user's login.
-        if prov == "claude-code-workflow":
+        if prov == "claude-code-local":
             if not claude_cli_available():
                 return None
             model = cfg.get("model") or "sonnet"
             return lambda system, user: run_claude_code_text(
                 system=system, user=user, model=model, cwd=path)
+        # Codex (local CLI) text role — Day 3B. Drives `codex exec -s read-only`,
+        # keyless (uses the local Codex login); never mutates the repo.
+        if prov == "codex-local":
+            if not codex_cli_available():
+                return None
+            model = cfg.get("model") or None
+            return lambda system, user: run_codex_local_text(
+                system=system, user=user, model=model, cwd=path)
         # API providers (Anthropic / OpenAI-compatible) — require a key + model.
-        if cfg.get("mode") != "api" or not cfg.get("apiKey") or not cfg.get("model"):
+        if not cfg.get("apiKey") or not cfg.get("model"):
             return None
         key, model, base = (cfg["apiKey"], cfg["model"], cfg.get("baseUrl", ""))
         if prov == "anthropic":
             tr = make_transport(key, base)
-        elif prov in ("openai-compatible", "openrouter", "custom", "ollama"):
+        elif prov in ("openai-compatible", "openrouter", "ollama"):
             tr = make_openai_transport(key, base)
         else:
             return None
@@ -1303,25 +1350,26 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """Pick the Senior Dev implementation backend from its role config (Step 31).
 
         Returns (backend_id, None) on success or (None, error_message). backend_id
-        is one of: 'claude_code' | 'echo' | 'anthropic'. Claude Code Workflow is
-        selected by provider 'claude-code-workflow' (it drives the local `claude`
+        is one of: 'claude_code' | 'echo' | 'anthropic'. Claude Code (local CLI) is
+        selected by provider 'claude-code-local' (it drives the local `claude`
         CLI and uses the user's existing login — no key/model required here).
         """
-        mode, provider = sd.get("mode"), sd.get("provider")
-        if provider == "claude-code-workflow":
+        provider = sd.get("provider")
+        if provider == "claude-code-local":
             if not claude_cli_available():
                 return None, ("Claude Code CLI not found on PATH. Install Claude Code "
                               "or pick another Senior Dev provider (Anthropic or Echo).")
             return "claude_code", None
-        if mode != "api":
-            return None, "Senior Dev is not in API mode. Open Agent Settings."
+        if provider == "codex-local":
+            return None, ("Codex Local is a text-only role (Architect/Verifier). Senior Dev "
+                          "needs Claude Code, Anthropic, or Echo.")
         if provider == "echo":
             return "echo", None
         if provider == "anthropic":
             if not (sd.get("model") and sd.get("apiKey")):
                 return None, "Senior Dev (Anthropic) needs a model + API key."
             return "anthropic", None
-        return None, (f"Senior Dev must be 'anthropic', 'echo', or 'claude-code-workflow' "
+        return None, (f"Senior Dev must be 'anthropic', 'echo', or 'claude-code-local' "
                       f"(is '{provider}').")
 
     def _parse_verdict(text: str, result: dict) -> dict:
@@ -1380,10 +1428,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return web.json_response({"ok": False, "error": sd_err}, status=400)
         # Human label per role's backend — surfaced on every stage so Work Review
         # shows which agent did each step (e.g. all three "Claude Code").
-        _PROV_LABEL = {"claude-code-workflow": "Claude Code (local CLI)",
-                       "anthropic": "Anthropic API", "echo": "Echo",
-                       "openai-compatible": "OpenAI-compatible", "openrouter": "OpenRouter",
-                       "ollama": "Ollama", "custom": "Custom"}
+        _PROV_LABEL = {"claude-code-local": "Claude Code (local CLI)",
+                       "codex-local": "Codex (local CLI)",
+                       "anthropic": "Anthropic (API)", "echo": "Echo",
+                       "openai-compatible": "OpenAI (API)", "openrouter": "OpenRouter",
+                       "ollama": "Ollama"}
         sd_label = {"claude_code": "Claude Code (local CLI)", "anthropic": "Anthropic API",
                     "echo": "Echo"}.get(sd_backend, sd_backend)
 
@@ -1506,7 +1555,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                                        editable=editable, protected=protected,
                                        model=(sd.get("model") or "sonnet"),
                                        should_cancel=cancel_token.is_set,
-                                       on_proc=cancel_token.set_proc)
+                                       on_proc=cancel_token.set_proc,
+                                       on_write=lambda r: emit_progress(r, "write"),
+                                       on_read=lambda r: emit_progress(r, "read"))
         else:
             if sd_backend == "echo":
                 sd_transport, sd_model = make_echo_transport(path, editable), (sd.get("model") or "echo-1")
@@ -2111,6 +2162,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/agent-settings",            get_agent_settings)
     app.router.add_put( "/api/agent-settings",            put_agent_settings)
     app.router.add_post("/api/agent-settings/check",      post_agent_settings_check)
+    app.router.add_get( "/api/semantic-graph",            get_semantic_graph)
+    app.router.add_post("/api/semantic-graph/refresh",    post_semantic_graph_refresh)
     app.router.add_post("/api/execution/compile-workflow", post_compile_workflow)
     app.router.add_post("/api/execution/run",             post_execution_run)
     app.router.add_post("/api/agent/run",                 post_agent_run)
