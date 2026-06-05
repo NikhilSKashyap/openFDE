@@ -2043,6 +2043,30 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return web.json_response({"ok": False, "error": "not found"}, status=404)
         return web.json_response(diff)
 
+    async def get_commit_impact(request: web.Request) -> web.Response:
+        """Canvas-native commit lens: which files a commit touched + which semantic
+        concepts (tethers) it affected (and which it only partially covered).
+
+        Args:
+            request: web.Request — match_info 'sha'.
+
+        Returns:
+            web.Response — {ok, sha, shortSha, summary, timestamp, files, fileCount,
+                            affectedConcepts:[{identifier, partial, untouchedFiles…}]}.
+        """
+        sha = request.match_info.get("sha", "")
+        diff = git_diff(path, sha)
+        if diff is None:
+            return web.json_response({"ok": False, "error": "not found"}, status=404)
+        files = [f["path"] for f in diff.get("files", [])]
+        graph = semantic_graph_mod.load_graph(path)
+        concepts = semantic_graph_mod.concepts_for_files(graph, files) if graph else []
+        return web.json_response({
+            "ok": True, "sha": diff["sha"], "shortSha": diff["shortSha"],
+            "summary": diff.get("summary", ""), "timestamp": diff.get("timestamp"),
+            "files": files, "fileCount": len(files), "affectedConcepts": concepts,
+        })
+
     # ================================================================== #
     #  REST — /api/report  (REPORT.md, Step 18)                         #
     # ================================================================== #
@@ -2179,6 +2203,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/git/timeline",          get_git_timeline)
     app.router.add_post("/api/git/commit",            post_git_commit)
     app.router.add_get( "/api/git/commit/{sha}/diff", get_git_diff)
+    app.router.add_get( "/api/git/commit/{sha}/impact", get_commit_impact)
     app.router.add_post("/api/report",                post_report)
     app.router.add_get( "/api/plan",                  get_plan)
     app.router.add_get( "/api/archgraph",             get_archgraph)

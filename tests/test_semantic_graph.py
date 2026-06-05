@@ -93,6 +93,23 @@ class SemanticGraphTest(unittest.TestCase):
         none = sg.tethers_partially_touched(graph, ["pkg_a.py", "pkg_b.py", "app.jsx"])
         self.assertFalse([w for w in none if w["identifier"] == "thing-one"])
 
+    # 4b) concepts_for_files maps a commit's changed files to affected tethers.
+    def test_concepts_for_files(self):
+        graph = sg.build_graph(self.root)
+        # a commit that touched only pkg_a.py affects "thing-one" partially
+        partial = sg.concepts_for_files(graph, ["pkg_a.py"])
+        hit = [c for c in partial if c["identifier"] == "thing-one"]
+        self.assertEqual(len(hit), 1)
+        self.assertTrue(hit[0]["partial"])
+        self.assertEqual(hit[0]["touched"], 1)
+        self.assertEqual(hit[0]["total"], 3)
+        self.assertIn("pkg_b.py", hit[0]["untouchedFiles"])
+        # a commit touching every file of the concept is NOT partial
+        full = sg.concepts_for_files(graph, ["pkg_a.py", "pkg_b.py", "app.jsx"])
+        fhit = [c for c in full if c["identifier"] == "thing-one"]
+        self.assertEqual(len(fhit), 1)
+        self.assertFalse(fhit[0]["partial"])
+
     # 5) summary is UI-ready (counts + top tethers + provider warnings).
     def test_graph_summary(self):
         graph = sg.build_graph(self.root)

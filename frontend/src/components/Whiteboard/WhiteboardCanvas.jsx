@@ -28,6 +28,23 @@ function nodeFilePaths(node) {
   return out
 }
 
+// Centroid label for a spotlight: concept name + occurrence count, or a commit
+// shortSha + a one-line "Changed N files · concepts: X, Y" annotation.
+function spotlightLabel(spotlight) {
+  if (!spotlight) return null
+  if (spotlight.kind === 'commit') {
+    const names = (spotlight.concepts || []).map(c => c.identifier)
+    const shown = names.slice(0, 3).join(', ')
+    const more = names.length > 3 ? ` +${names.length - 3}` : ''
+    const main = `${spotlight.label} · ${spotlight.count} file${spotlight.count === 1 ? '' : 's'}`
+    const sub = names.length ? `concepts: ${shown}${more}` : 'no tracked concepts'
+    const w = Math.max(main.length, sub.length) * 6.6 + 28
+    return { main, sub, w }
+  }
+  const main = `${spotlight.label} · ${spotlight.count} place${spotlight.count === 1 ? '' : 's'}`
+  return { main, sub: null, w: main.length * 8 + 28 }
+}
+
 export default function WhiteboardCanvas({
   activeTool, setActiveTool, state, dispatch,
   onLoadSelfMap, onGenerateFromRepo, onExecute, executing = false,
@@ -36,8 +53,9 @@ export default function WhiteboardCanvas({
   flowMode = 'focused', story = null,
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
-  // Tether spotlight (Step 37a Slice 2): light up the boxes holding a concept.
-  tetherSpotlight = null, onClearTetherSpotlight = null,
+  // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
+  // the boxes a commit touched (+ amber for partially-touched concepts).
+  spotlight = null, onClearSpotlight = null,
 }) {
   const svgRef = useRef(null)
   const interaction = useRef(null)
@@ -515,30 +533,38 @@ export default function WhiteboardCanvas({
     return !(n && n.expanded)
   })
 
-  // ── Tether spotlight: which visible boxes hold the selected concept ────────
-  const spotlight = useMemo(() => {
-    if (!tetherSpotlight?.files?.length || !nodes.length) return null
-    const wanted = new Set(tetherSpotlight.files.map(baseName))
-    const lit = []
+  // ── Spotlight geometry: which visible boxes are lit (hold the concept / were
+  //    touched by the commit) and which are amber (a tethered concept the commit
+  //    only partially covered — "you changed 1 of 4 places this lives"). ────────
+  const spot = useMemo(() => {
+    if (!spotlight?.files?.length || !nodes.length) return null
+    const litWant = new Set(spotlight.files.map(baseName))
+    const amberWant = new Set((spotlight.amberFiles || []).map(baseName))
+    const geom = (n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h,
+                           cx: n.x + n.w / 2, cy: n.y + n.h / 2 })
+    const lit = [], amber = []
     for (const n of nodes) {
-      if (nodeFilePaths(n).some(p => wanted.has(baseName(p)))) {
-        lit.push({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h,
-                   cx: n.x + n.w / 2, cy: n.y + n.h / 2 })
-      }
+      const paths = nodeFilePaths(n)
+      if (paths.some(p => litWant.has(baseName(p)))) lit.push(geom(n))
+      else if (amberWant.size && paths.some(p => amberWant.has(baseName(p)))) amber.push(geom(n))
     }
-    if (!lit.length) return { lit: [], centroid: null }
-    const cx = lit.reduce((s, r) => s + r.cx, 0) / lit.length
-    const cy = lit.reduce((s, r) => s + r.cy, 0) / lit.length
-    return { lit, centroid: { x: cx, y: cy } }
-  }, [tetherSpotlight, nodes])
+    const ref = lit.length ? lit : amber
+    if (!ref.length) return { lit: [], amber: [], centroid: null }
+    const cx = ref.reduce((s, r) => s + r.cx, 0) / ref.length
+    const cy = ref.reduce((s, r) => s + r.cy, 0) / ref.length
+    return { lit, amber, centroid: { x: cx, y: cy } }
+  }, [spotlight, nodes])
 
   // Esc clears the spotlight.
   useEffect(() => {
-    if (!tetherSpotlight) return undefined
-    const onKey = (e) => { if (e.key === 'Escape') onClearTetherSpotlight?.() }
+    if (!spotlight) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') onClearSpotlight?.() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [tetherSpotlight, onClearTetherSpotlight])
+  }, [spotlight, onClearSpotlight])
+
+  // Spotlight label lines (concept name + count, or commit + affected concepts).
+  const spotLabel = spotlightLabel(spotlight)
 
   return (
     <div className="wb-canvas-root">
@@ -646,14 +672,15 @@ export default function WhiteboardCanvas({
               rx={14} fill="none" pointerEvents="none" />
           ))}
 
-          {/* Tether spotlight (Step 37a Slice 2): dim everything except the boxes
-              holding the selected concept; thread them to a labeled centroid. */}
-          {spotlight && spotlight.lit.length > 0 && (
+          {/* Canvas spotlight (Step 37a Slice 2/3): dim everything except the boxes
+              that hold the concept / were touched by the commit; thread the lit
+              boxes to a labeled centroid; amber-ring the partially-missed ones. */}
+          {spot && (spot.lit.length > 0 || spot.amber.length > 0) && (
             <g className="tether-layer" pointerEvents="none">
               <defs>
                 <mask id="tether-mask">
                   <rect x="0" y="0" width={viewBounds.w} height={viewBounds.h} fill="white" />
-                  {spotlight.lit.map(r => (
+                  {[...spot.lit, ...spot.amber].map(r => (
                     <rect key={`hole-${r.id}`} x={r.x - 10} y={r.y - 10}
                       width={r.w + 20} height={r.h + 20} rx={16} fill="black" />
                   ))}
@@ -661,22 +688,31 @@ export default function WhiteboardCanvas({
               </defs>
               <rect className="tether-dim" x="0" y="0" width={viewBounds.w} height={viewBounds.h}
                 fill="var(--bg)" mask="url(#tether-mask)" />
-              {spotlight.lit.map(r => (
+              {spot.lit.map(r => (
                 <line key={`thread-${r.id}`} className="tether-thread"
-                  x1={spotlight.centroid.x} y1={spotlight.centroid.y} x2={r.cx} y2={r.cy} />
+                  x1={spot.centroid.x} y1={spot.centroid.y} x2={r.cx} y2={r.cy} />
               ))}
-              {spotlight.lit.map(r => (
+              {spot.amber.map(r => (
+                <rect key={`amber-${r.id}`} className="tether-ring-amber"
+                  x={r.x - 8} y={r.y - 8} width={r.w + 16} height={r.h + 16} rx={14} fill="none" />
+              ))}
+              {spot.lit.map(r => (
                 <rect key={`lit-${r.id}`} className="tether-ring"
                   x={r.x - 8} y={r.y - 8} width={r.w + 16} height={r.h + 16} rx={14} fill="none" />
               ))}
-              <g className="tether-label-g"
-                transform={`translate(${spotlight.centroid.x}, ${spotlight.centroid.y})`}>
-                <rect className="tether-label-bg" x={-(tetherSpotlight.identifier.length * 4 + 16)} y={-13}
-                  width={tetherSpotlight.identifier.length * 8 + 32} height={26} rx={13} />
-                <text className="tether-label-tx" x="0" y="5" textAnchor="middle">
-                  {tetherSpotlight.identifier}
-                </text>
-              </g>
+              {spotLabel && (
+                <g className="tether-label-g"
+                  transform={`translate(${spot.centroid.x}, ${spot.centroid.y})`}>
+                  <rect className="tether-label-bg" x={-(spotLabel.w / 2)} y={spotLabel.sub ? -22 : -13}
+                    width={spotLabel.w} height={spotLabel.sub ? 40 : 26} rx={13} />
+                  <text className="tether-label-tx" x="0" y={spotLabel.sub ? -4 : 5} textAnchor="middle">
+                    {spotLabel.main}
+                  </text>
+                  {spotLabel.sub && (
+                    <text className="tether-label-sub" x="0" y="13" textAnchor="middle">{spotLabel.sub}</text>
+                  )}
+                </g>
+              )}
             </g>
           )}
 
@@ -694,14 +730,17 @@ export default function WhiteboardCanvas({
         <button onClick={() => setScale(s => clamp(+(s + 0.1).toFixed(2), 0.3, 2.5))} title="Zoom in">+</button>
       </div>
 
-      {/* Tether spotlight chip — what concept is lit, how many boxes, dismiss */}
-      {tetherSpotlight && (
-        <div className="tether-chip" onClick={() => onClearTetherSpotlight?.()} title="Clear (Esc)">
+      {/* Spotlight chip — what's lit, how many boxes / at-risk, dismiss */}
+      {spotlight && (
+        <div className={`tether-chip kind-${spotlight.kind}`} onClick={() => onClearSpotlight?.()} title="Clear (Esc)">
           <span className="tether-chip-dot" />
-          <span className="tether-chip-id">{tetherSpotlight.identifier}</span>
+          <span className="tether-chip-id">
+            {spotlight.kind === 'commit' ? `commit ${spotlight.label}` : spotlight.label}
+          </span>
           <span className="tether-chip-meta">
-            {spotlight && spotlight.lit.length > 0
-              ? `${spotlight.lit.length} box${spotlight.lit.length > 1 ? 'es' : ''}`
+            {spot && (spot.lit.length > 0 || spot.amber.length > 0)
+              ? `${spot.lit.length} box${spot.lit.length === 1 ? '' : 'es'}` +
+                (spot.amber.length ? ` · ${spot.amber.length} at risk` : '')
               : 'no boxes on this canvas'}
           </span>
           <span className="tether-chip-x">✕</span>

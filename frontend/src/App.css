@@ -1241,7 +1241,7 @@
   min-height: 34px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
@@ -2112,6 +2112,25 @@
 .tether-chip-meta { font-size: 11px; color: var(--text-muted); }
 .tether-chip-x { font-size: 11px; color: var(--text-muted); margin-left: 2px; }
 .tether-chip:hover .tether-chip-x { color: var(--text); }
+.tether-chip.kind-commit { border-color: var(--solid); }
+.tether-chip.kind-commit .tether-chip-dot { background: var(--solid); }
+.tether-label-sub { fill: rgba(255,255,255,0.82); font-size: 9.5px; font-family: ui-monospace, monospace; }
+.tether-ring-amber { stroke: var(--active); stroke-width: 2.5; stroke-dasharray: 6 4;
+  filter: drop-shadow(0 0 5px var(--active)); animation: tether-pulse 1.8s ease-in-out infinite; }
+
+/* Commit chip rail (Step 37a Slice 3) — canvas-native lens over recent commits */
+.commit-rail { display: flex; gap: 6px; align-items: center; margin-left: 14px;
+  overflow-x: auto; max-width: 70%; scrollbar-width: none; }
+.commit-rail::-webkit-scrollbar { display: none; }
+.commit-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--surface-2); cursor: pointer; color: var(--text-muted);
+  font: inherit; max-width: 220px; transition: border-color 0.15s, color 0.15s; }
+.commit-chip:hover { border-color: var(--solid); color: var(--text); }
+.commit-chip.active { border-color: var(--solid); color: var(--text); background: var(--surface); }
+.commit-chip.busy { opacity: 0.6; }
+.commit-chip-sha { font-family: ui-monospace, monospace; font-size: 10px; color: var(--solid); }
+.commit-chip-msg { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agentset-status {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--text-muted);

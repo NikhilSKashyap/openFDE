@@ -416,6 +416,32 @@ def _norm(p):
     return s[2:] if s.startswith("./") else s
 
 
+def concepts_for_files(graph, changed_files) -> list:
+    """Tethers a set of changed files touches — for the commit spotlight.
+
+    Returns each touched concept with how much of it the change covered:
+    {identifier, kind, files, touchedFiles, untouchedFiles, touched, total,
+    partial}. ``partial`` is True when the change hit only some of the concept's
+    files (the seed of the amber "you changed 1 of 4" warning).
+    """
+    changed = {_norm(c) for c in (changed_files or [])}
+    if not changed:
+        return []
+    out = []
+    for t in (graph or {}).get("tethers", []):
+        files = set(t.get("files", []))
+        touched = files & changed
+        if touched:
+            out.append({
+                "identifier": t["identifier"], "kind": t.get("kind"),
+                "files": sorted(files), "touchedFiles": sorted(touched),
+                "untouchedFiles": sorted(files - touched),
+                "touched": len(touched), "total": len(files),
+                "partial": touched != files})
+    out.sort(key=lambda c: (-c["total"], c["identifier"]))
+    return out
+
+
 def tethers_partially_touched(graph, changed_files) -> list:
     """Warn when a change touches only SOME files of a tethered concept.
 

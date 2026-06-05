@@ -1,6 +1,7 @@
 import WhiteboardCanvas from './WhiteboardCanvas'
 import OpenPM from '../OpenPM/OpenPM'
 import Timeline from '../Timeline/Timeline'
+import CommitChipRail from './CommitChipRail'
 
 export default function Whiteboard({
   activeTool, setActiveTool,
@@ -21,8 +22,9 @@ export default function Whiteboard({
   story = null,
   runNodeStates,
   runEdgeStates,
-  tetherSpotlight = null,
-  onClearTetherSpotlight,
+  spotlight = null,
+  onClearSpotlight,
+  onSpotlightCommit,
   gitCommits,
   onSelectCommit,
   // PM props
@@ -67,8 +69,13 @@ export default function Whiteboard({
     <div className="wb-shell">
       <div className="arch-header">
         <span className="arch-header-title">openArchitect</span>
-        {/* Story is the default, selection-aware presentation. Flow modes and
-            Expand/Collapse now live in the Technical right panel (Step 28 Slice 4). */}
+        {/* Canvas-native commit lens (Step 37a Slice 3) — click a chip to see
+            what changed; never replaces the Timeline tab. */}
+        <CommitChipRail
+          commits={gitCommits}
+          activeSha={spotlight?.kind === 'commit' ? spotlight.sha : null}
+          onSpotlightCommit={onSpotlightCommit}
+        />
       </div>
       <div className="wb-body">
         <WhiteboardCanvas
@@ -90,8 +97,8 @@ export default function Whiteboard({
           story={story}
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
-          tetherSpotlight={tetherSpotlight}
-          onClearTetherSpotlight={onClearTetherSpotlight}
+          spotlight={spotlight}
+          onClearSpotlight={onClearSpotlight}
         />
       </div>
     </div>

@@ -405,6 +405,15 @@ export const getSemanticGraph = () => apiFetch('/api/semantic-graph')
 export const refreshSemanticGraph = () =>
   apiFetch('/api/semantic-graph/refresh', { method: 'POST' })
 
+/**
+ * Canvas commit lens: files a commit touched + affected semantic concepts.
+ *
+ * @param {string} sha
+ * @returns {Promise<{ok, sha, shortSha, summary, files, fileCount, affectedConcepts}|null>}
+ */
+export const getCommitImpact = (sha) =>
+  apiFetch(`/api/git/commit/${encodeURIComponent(sha)}/impact`)
+
 // ── Plan ──────────────────────────────────────────────────────────────────
 
 /**

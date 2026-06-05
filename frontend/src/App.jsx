@@ -42,6 +42,7 @@ import {
   cancelCouncilRun,
   postExplain,
   postStory,
+  getCommitImpact,
 } from './api/backend'
 import { connectWS, closeWS } from './api/ws'
 
@@ -101,8 +102,26 @@ export default function App() {
   const [agentOptions, setAgentOptions]   = useState(null)
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false)
   const [semanticGraphOpen, setSemanticGraphOpen] = useState(false)
-  // Tether spotlight: { identifier, kind, files } a concept to light up on canvas.
-  const [tetherSpotlight, setTetherSpotlight] = useState(null)
+  // Canvas spotlight — a concept (tether) or a commit to light up on the canvas.
+  // { kind:'tether'|'commit', label, count, files, amberFiles?, concepts?, summary? }
+  const [canvasSpotlight, setCanvasSpotlight] = useState(null)
+
+  // Click a commit chip → fetch its impact → spotlight touched boxes + concepts,
+  // mark partially-touched concepts' untouched boxes amber.
+  async function onSpotlightCommit(sha) {
+    const imp = await getCommitImpact(sha)
+    if (!imp?.ok) return
+    const amber = new Set()
+    for (const c of (imp.affectedConcepts || [])) {
+      if (c.partial) for (const f of c.untouchedFiles) amber.add(f)
+    }
+    setCanvasSpotlight({
+      kind: 'commit', label: imp.shortSha, summary: imp.summary,
+      count: imp.fileCount, files: imp.files,
+      amberFiles: [...amber], concepts: imp.affectedConcepts || [], sha: imp.sha,
+    })
+    setActiveView('whiteboard')
+  }
   const [leftOpen, setLeftOpen]   = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [flowMode, setFlowMode]   = useState('focused') // Story | Focused | All (Batch 5)
@@ -1246,8 +1265,9 @@ export default function App() {
               story={story}
               runNodeStates={run?.nodeStates}
               runEdgeStates={run?.edgeStates}
-              tetherSpotlight={tetherSpotlight}
-              onClearTetherSpotlight={() => setTetherSpotlight(null)}
+              spotlight={canvasSpotlight}
+              onClearSpotlight={() => setCanvasSpotlight(null)}
+              onSpotlightCommit={onSpotlightCommit}
               gitCommits={gitCommits}
               onSelectCommit={onSelectCommit}
               tasks={tasks}
@@ -1377,7 +1397,7 @@ export default function App() {
         <SemanticGraphCard
           onClose={() => setSemanticGraphOpen(false)}
           onSpotlightTether={(t) => {
-            setTetherSpotlight(t)
+            setCanvasSpotlight({ kind: 'tether', label: t.identifier, count: t.fileCount, files: t.files })
             setActiveView('whiteboard')
             setSemanticGraphOpen(false)
           }}
