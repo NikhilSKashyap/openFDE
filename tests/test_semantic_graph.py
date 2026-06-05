@@ -110,24 +110,31 @@ class SemanticGraphTest(unittest.TestCase):
         self.assertEqual(len(fhit), 1)
         self.assertFalse(fhit[0]["partial"])
 
-    # 4c) signal: kebab ids are high-signal (rename-coupled); snake_case shared
-    #     vocabulary is low-signal and must NOT raise a partial-touch alarm.
+    # 4c) signal: HIGH only for cross-layer (py+web) kebab/route ids. Snake-case
+    #     shared vocabulary AND single-layer kebab strings are LOW (no alarm).
     def test_tether_signal_precision(self):
-        # add a snake_case status value shared across two files (shared vocabulary)
+        # snake_case status value shared across files (shared vocabulary)
         (self.root / "pkg_a.py").write_text(
             (self.root / "pkg_a.py").read_text() + '\nSTATUS = "needs_approval"\n')
         (self.root / "pkg_b.py").write_text(
             (self.root / "pkg_b.py").read_text() + '\nMORE = "needs_approval"\n')
+        # a kebab id that lives ONLY in Python (e.g. a git subcommand) — not a contract
+        (self.root / "pkg_a.py").write_text(
+            (self.root / "pkg_a.py").read_text() + '\nCMD = "rev-parse"\n')
+        (self.root / "pkg_b.py").write_text(
+            (self.root / "pkg_b.py").read_text() + '\nALSO = "rev-parse"\n')
         graph = sg.build_graph(self.root)
         teth = {t["identifier"]: t for t in graph["tethers"]}
-        # kebab id "thing-one" → high; snake "needs_approval" → low
+        # "thing-one" spans pkg_a.py/pkg_b.py + app.jsx (cross-layer) → HIGH
         self.assertEqual(teth["thing-one"]["signal"], "high")
+        # snake_case → LOW; python-only kebab → LOW (cross-layer gate)
         self.assertEqual(teth["needs_approval"]["signal"], "low")
-        # partial-touch alarm fires for the high-signal one only
-        warns = sg.tethers_partially_touched(graph, ["pkg_a.py"])
-        ids = {w["identifier"] for w in warns}
+        self.assertEqual(teth["rev-parse"]["signal"], "low")
+        # partial-touch alarm fires for the cross-layer high-signal one only
+        ids = {w["identifier"] for w in sg.tethers_partially_touched(graph, ["pkg_a.py"])}
         self.assertIn("thing-one", ids)
         self.assertNotIn("needs_approval", ids)
+        self.assertNotIn("rev-parse", ids)
 
     # 5) summary is UI-ready (counts + top tethers + provider warnings).
     def test_graph_summary(self):

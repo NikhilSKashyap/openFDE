@@ -157,25 +157,44 @@ export default function App() {
     setActiveView('whiteboard')
   }
 
-  // Ask Concept — question about the active spotlight, routed Architect/Sr Dev.
-  async function onAskConcept(question) {
+  // Ask Concept — question about the active spotlight (optionally focused on one
+  // concept), routed Architect/Sr Dev.
+  async function onAskConcept(question, concept) {
     const s = canvasSpotlight
     if (!s) return null
     return askConcept(question, {
-      kind: s.kind, label: s.label, summary: s.summary || '',
+      kind: s.kind, label: s.label, summary: s.summary || '', sha: s.sha || null,
       files: s.files || [], concepts: s.concepts || [],
+      focusConcept: concept ? concept.identifier : null,
     })
   }
 
-  // Save a short Concept Card linked to the active concept/commit.
-  async function onSaveConceptCard({ title, summary }) {
+  // Highlight one concept's changed (green) + related (amber) files on the canvas.
+  function onFocusConcept(concept) {
+    setCanvasSpotlight(s => (s ? {
+      ...s,
+      focus: concept ? {
+        identifier: concept.identifier,
+        changedFiles: concept.touchedFiles || [],
+        relatedFiles: concept.untouchedFiles || [],
+        touched: concept.touched, total: concept.total,
+      } : null,
+    } : s))
+  }
+
+  // Save a short Concept Card — linked to a focused concept when present, else
+  // the whole concept/commit.
+  async function onSaveConceptCard({ title, summary, concept, meaning, whyCheck }) {
     const s = canvasSpotlight
     if (!s || !title?.trim()) return
+    const c = concept || null
     await saveConceptCard({
-      title, summary,
-      tetherId: s.kind === 'tether' ? s.label : null,
+      title, summary, meaning: meaning || '',
+      tetherId: c ? c.identifier : (s.kind === 'tether' ? s.label : null),
       commitSha: s.kind === 'commit' ? s.sha : null,
-      files: s.files || [],
+      files: c ? c.touchedFiles : (s.files || []),
+      relatedFiles: c ? c.untouchedFiles : [],
+      whyCheck: whyCheck || '',
     })
     await reloadConceptCards()
   }
@@ -1335,6 +1354,7 @@ export default function App() {
                 cards={spotlightCards}
                 onAsk={onAskConcept}
                 onSaveCard={onSaveConceptCard}
+                onFocusConcept={onFocusConcept}
                 onClose={() => setCanvasSpotlight(null)}
               />
             )}

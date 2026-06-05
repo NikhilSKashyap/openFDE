@@ -32,6 +32,12 @@ function nodeFilePaths(node) {
 // shortSha + a one-line "Changed N files · concepts: X, Y" annotation.
 function spotlightLabel(spotlight) {
   if (!spotlight) return null
+  if (spotlight.focus) {
+    const f = spotlight.focus
+    const main = f.identifier
+    const sub = `changed ${f.touched} · review ${f.total - f.touched} related`
+    return { main, sub, w: Math.max(main.length, sub.length) * 6.6 + 28 }
+  }
   if (spotlight.kind === 'commit') {
     // Primary label answers "what happened" — the commit message itself.
     const msg = spotlight.summary || spotlight.label
@@ -539,9 +545,13 @@ export default function WhiteboardCanvas({
   //    touched by the commit) and which are amber (a tethered concept the commit
   //    only partially covered — "you changed 1 of 4 places this lives"). ────────
   const spot = useMemo(() => {
-    if (!spotlight?.files?.length || !nodes.length) return null
-    const litWant = new Set(spotlight.files.map(baseName))
-    const amberWant = new Set((spotlight.amberFiles || []).map(baseName))
+    if (!spotlight || !nodes.length) return null
+    // Focused on one concept → its changed files are lit, related files amber.
+    const litFiles = spotlight.focus ? spotlight.focus.changedFiles : spotlight.files
+    const amberFiles = spotlight.focus ? spotlight.focus.relatedFiles : spotlight.amberFiles
+    if (!litFiles?.length && !amberFiles?.length) return null
+    const litWant = new Set((litFiles || []).map(baseName))
+    const amberWant = new Set((amberFiles || []).map(baseName))
     const geom = (n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h,
                            cx: n.x + n.w / 2, cy: n.y + n.h / 2 })
     const lit = [], amber = []

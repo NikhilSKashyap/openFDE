@@ -174,24 +174,30 @@ def _classify_literal(s: str):
     return None
 
 
-def _tether_signal(lit: str, kind: str) -> str:
+def _tether_signal(lit: str, kind: str, files) -> str:
     """Rename-sensitivity of a tether — drives whether a partial-touch is alarming.
 
-    HIGH = rename-coupled config/contract ids that must move together: routes, and
-    kebab-case ids (a hyphen can't be a code symbol, so a hyphenated string literal
-    shared across files is almost always a config/provider/route id — e.g.
-    ``codex-local``, ``openai-compatible``). Renaming one means renaming all.
+    HIGH = a rename-coupled config/contract id that must move together. Two gates:
+      1. *Candidate shape*: a route, or a kebab-case id (a hyphen can't be a code
+         symbol, so a hyphenated literal is a config/provider/route id, not a var).
+      2. *Cross-layer*: it appears in BOTH a Python file and a web file — a genuine
+         contract spans the boundary (defined backend, consumed frontend, e.g.
+         ``codex-local`` in agent_settings.py + AgentSettings.jsx). This filters
+         kebab noise that is *not* a shared contract — git subcommands
+         (``rev-parse``), dir names (``site-packages``), SVG marker ids
+         (``arrowhead-dotted``), tool names (``detect-secrets``) — which live on
+         only one side.
 
-    LOW = shared vocabulary: snake_case / UPPER_SNAKE values used as data in many
-    places (status enums like ``needs_approval``, action constants like
-    ``CREATE_BOX``). They legitimately appear in many files; touching one is not a
-    "missed" rename, so they stay in the graph but never trigger the amber alarm.
+    LOW = everything else: shared vocabulary (status enums like ``needs_approval``,
+    action constants like ``CREATE_BOX``) and single-layer kebab strings. Kept in
+    the graph (informative), but never trigger the amber "you missed N" alarm.
     """
-    if kind == "route":
-        return "high"
-    if kind == "identifier" and "-" in lit:
-        return "high"
-    return "low"
+    candidate = (kind == "route") or (kind == "identifier" and "-" in lit)
+    if not candidate:
+        return "low"
+    exts = {os.path.splitext(f)[1] for f in (files or [])}
+    cross_layer = (".py" in exts) and bool(exts & _WEB_EXT)
+    return "high" if cross_layer else "low"
 
 
 def tether_provider(repo_root: Path) -> dict:
@@ -234,7 +240,7 @@ def tether_provider(repo_root: Path) -> dict:
         if len(files) < 2:           # a concept lives in many files; <2 isn't a tether
             continue
         tethers.append({
-            "identifier": lit, "kind": kinds[lit], "signal": _tether_signal(lit, kinds[lit]),
+            "identifier": lit, "kind": kinds[lit], "signal": _tether_signal(lit, kinds[lit], files),
             "files": files, "fileCount": len(files), "count": len(places),
             "occurrences": [{"path": p, "line": ln} for p, ln in places[:50]],
             "reason": f"{kinds[lit]}-like string literal in {len(files)} files",
@@ -457,6 +463,7 @@ def concepts_for_files(graph, changed_files) -> list:
                 "signal": t.get("signal", "low"),
                 "files": sorted(files), "touchedFiles": sorted(touched),
                 "untouchedFiles": sorted(files - touched),
+                "occurrences": t.get("occurrences", []),  # {path, line} — where it lives
                 "touched": len(touched), "total": len(files),
                 "partial": touched != files})
     out.sort(key=lambda c: (-c["total"], c["identifier"]))

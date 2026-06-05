@@ -2163,6 +2163,54 @@
 .concept-pill.partial { color: var(--active); border: 1px solid var(--active); }
 .concept-warn { font-size: 11px; color: var(--text); background: rgba(255,204,0,0.12);
   border: 1px solid var(--active); border-radius: 6px; padding: 6px 8px; }
+.concept-meta-flag { color: var(--active); font-weight: 600; }
+/* Concept Checks — actionable cards for partially-updated concepts */
+.concept-checks { display: flex; flex-direction: column; gap: 6px; }
+.concept-checks-head { font-size: 11px; font-weight: 700; color: var(--active); }
+.concept-check-more { background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 11px; color: var(--active); opacity: 0.85; text-align: left; }
+.concept-check-more:hover { opacity: 1; }
+.ccard { border: 1px solid var(--active); border-radius: 6px; background: rgba(255,204,0,0.07);
+  overflow: hidden; }
+.ccard-head { width: 100%; display: flex; align-items: center; gap: 8px; background: none;
+  border: none; cursor: pointer; padding: 7px 9px; text-align: left; font: inherit; }
+.ccard-name { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600;
+  color: var(--text); flex: 0 0 auto; }
+.ccard-line { font-size: 10px; color: var(--text-muted); flex: 1 1 auto; }
+.ccard-chev { color: var(--active); font-size: 11px; flex: 0 0 auto; }
+.ccard-body { padding: 0 9px 9px; display: flex; flex-direction: column; gap: 8px; }
+.ccard-meaning { font-size: 11px; color: var(--text); line-height: 1.4; padding: 4px 0; }
+.ccard-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ccard-role { color: var(--text-muted); opacity: 0.8; flex: 0 0 auto; white-space: nowrap; }
+.ccard-next { display: flex; flex-direction: column; gap: 2px; }
+.ccard-next-h { font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+.ccard-next-item { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
+.ccard-group { display: flex; flex-direction: column; gap: 2px; }
+.ccard-group-h { font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.ccard-group-h.changed { color: var(--solid); }
+.ccard-group-h.related { color: var(--active); }
+.ccard-file { display: flex; align-items: center; gap: 6px; background: none; border: none;
+  padding: 1px 0; cursor: pointer; font: inherit; font-size: 11px; color: var(--text-muted);
+  font-family: ui-monospace, monospace; text-align: left; }
+.ccard-file:hover { color: var(--text); }
+.ccard-file .ccard-mark { font-family: inherit; }
+.ccard-file.ok .ccard-mark { color: var(--solid); }
+.ccard-file.warn .ccard-mark { color: var(--active); }
+.ccard-why { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+.ccard-why strong { color: var(--text); }
+.ccard-actions { display: flex; align-items: center; gap: 10px; }
+.ccard-action { padding: 5px 10px; border-radius: 6px; border: none; cursor: pointer;
+  font-size: 11px; font-weight: 600; }
+.ccard-action.primary { background: var(--accent); color: #fff; }
+.ccard-hint { font-size: 10px; color: var(--text-muted); }
+/* Touched, no action — collapsed */
+.concept-touched { display: flex; flex-direction: column; gap: 6px; }
+.concept-touched-toggle { background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font: inherit; font-size: 11px; text-align: left; padding: 0; }
+.concept-touched-toggle:hover { color: var(--text); }
+.concept-touched-pills { display: flex; flex-wrap: wrap; gap: 5px; }
+.concept-cards-head { font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-muted); }
 .concept-cards { display: flex; flex-direction: column; gap: 6px; }
 .concept-card { background: var(--surface-2); border-radius: 6px; padding: 7px 9px; border-left: 2px solid var(--accent); }
 .concept-card-title { font-size: 12px; font-weight: 600; color: var(--text); }

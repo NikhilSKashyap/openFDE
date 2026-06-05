@@ -1175,7 +1175,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "summary": (body.get("summary") or "").strip()[:2000],
             "tetherId": (body.get("tetherId") or None),
             "commitSha": (body.get("commitSha") or None),
+            "meaning": (body.get("meaning") or "").strip()[:500],
             "files": body.get("files") if isinstance(body.get("files"), list) else [],
+            "relatedFiles": body.get("relatedFiles") if isinstance(body.get("relatedFiles"), list) else [],
+            "whyCheck": (body.get("whyCheck") or "").strip()[:1000],
             "createdAt": datetime.now(timezone.utc).isoformat(),
         }
         persistence.add_concept_card(card)
