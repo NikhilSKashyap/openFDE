@@ -124,6 +124,20 @@ export default function App() {
     return () => { alive = false }
   }, [])
 
+  // Commits can land from the terminal or the council — keep the commit rail
+  // current by refetching the git timeline on window focus + a light poll while
+  // the tab is visible (not just once at startup).
+  useEffect(() => {
+    const refetch = async () => {
+      if (document.hidden) return
+      const commits = await getGitTimeline()
+      if (Array.isArray(commits)) setGitCommits(commits)
+    }
+    window.addEventListener('focus', refetch)
+    const id = setInterval(refetch, 15000)
+    return () => { window.removeEventListener('focus', refetch); clearInterval(id) }
+  }, [])
+
   // Click a commit chip → fetch its impact → spotlight touched boxes + concepts,
   // mark partially-touched concepts' untouched boxes amber.
   async function onSpotlightCommit(sha) {
