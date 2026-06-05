@@ -59,6 +59,7 @@ import aiohttp
 from aiohttp import web
 
 from openfde import agent_settings as agent_settings_mod
+from openfde import fs_watch
 from openfde import semantic_graph as semantic_graph_mod
 from openfde.agent_runner import build_system_prompt, run_agent
 from openfde.anthropic_transport import make_transport
@@ -2423,10 +2424,20 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     logger.info("Server started on port %d", port)
 
+    # ── Watch Any Agent: glow the canvas live on ANY external edit (Cursor,
+    # Claude Code, terminal, human) — suppressed while our own council run glows.
+    watch_task = asyncio.create_task(fs_watch.watch_loop(
+        path, manager, is_run_active=lambda: bool(_RUN_CONTROLS)))
+
     try:
         await asyncio.Event().wait()       # run until cancelled / KeyboardInterrupt
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
         logger.info("Server stopping")
+        watch_task.cancel()
+        try:
+            await watch_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
         await runner.cleanup()

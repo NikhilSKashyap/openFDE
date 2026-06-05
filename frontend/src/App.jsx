@@ -91,6 +91,8 @@ export default function App() {
   // run: { runId, status, scopedBoxIds, scopedArrowIds, nodeStates, edgeStates,
   //        trace: {id:[events]}, failures: {id:{...}} } | null
   const [run, setRun] = useState(null)
+  // Ambient "watch any agent" activity: boxId -> last-touched timestamp (fades).
+  const [watchActivity, setWatchActivity] = useState({})
   const runRef = useRef(null)
   // ── Git timeline + diff inspection (Step 18) ─────────────────────────────
   const [gitCommits, setGitCommits] = useState([])
@@ -322,6 +324,25 @@ export default function App() {
     return (boxesRef.current || []).find(b => (b.linkedFiles || []).includes(path)) || null
   }
 
+  // ── Watch Any Agent (Step 38): ambient glow when ANY editor (Cursor, Claude
+  // Code, terminal, human) touches a repo file — no council run. Maps the file to
+  // its module box (exact link, else basename); if it maps to nothing on the
+  // canvas there's no glow (Watch presupposes Land). Entries fade after ~2.6s.
+  function resolveWatchBox(path) {
+    const boxes = boxesRef.current || []
+    let b = boxes.find(bx => (bx.linkedFiles || []).includes(path))
+    if (!b) {
+      const base = path.split('/').pop()
+      b = boxes.find(bx => (bx.linkedFiles || []).some(f => f.split('/').pop() === base))
+    }
+    return b ? b.id : null
+  }
+  function handleFileActivity({ file }) {
+    const boxId = file && resolveWatchBox(file)
+    if (!boxId) return
+    setWatchActivity(prev => ({ ...prev, [boxId]: Date.now() }))
+  }
+
   // Architect plan arrived: pre-pulse the planned files and drill into their
   // modules so the work is visible. First file is queued as `next`.
   function handleAgentPlan({ runId, files }) {
@@ -388,12 +409,32 @@ export default function App() {
       // Live activity stream (adaptive glow): the agent's plan + per-file writes.
       else if (msg?.type === 'agent_plan') { handleAgentPlan(msg.payload || {}) }
       else if (msg?.type === 'agent_progress') { handleAgentProgress(msg.payload || {}) }
+      // Watch Any Agent: an external editor touched a repo file — ambient glow.
+      else if (msg?.type === 'file_activity') { handleFileActivity(msg.payload || {}) }
       // state_updated / tasks_updated: no-op; this client's own writes are the
       // source of truth for its local state.
     })
     return () => closeWS()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Fade ambient watch activity: prune entries older than ~2.6s.
+  useEffect(() => {
+    if (Object.keys(watchActivity).length === 0) return undefined
+    const id = setInterval(() => {
+      const now = Date.now()
+      setWatchActivity(prev => {
+        const next = {}
+        let changed = false
+        for (const [k, ts] of Object.entries(prev)) {
+          if (now - ts < 2600) next[k] = ts
+          else changed = true
+        }
+        return changed ? next : prev
+      })
+    }, 500)
+    return () => clearInterval(id)
+  }, [watchActivity])
 
   // ------------------------------------------------------------------ //
   //  Debounced canvas persistence                                        //
@@ -1334,6 +1375,7 @@ export default function App() {
               story={story}
               runNodeStates={run?.nodeStates}
               runEdgeStates={run?.edgeStates}
+              watchBoxIds={watchActivity}
               spotlight={canvasSpotlight}
               onClearSpotlight={() => setCanvasSpotlight(null)}
               onSpotlightCommit={onSpotlightCommit}

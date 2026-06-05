@@ -61,6 +61,7 @@ export default function WhiteboardCanvas({
   flowMode = 'focused', story = null,
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
+  watchBoxIds = null,
   // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
   // the boxes a commit touched (+ amber for partially-touched concepts).
   spotlight = null, onClearSpotlight = null,
@@ -541,6 +542,18 @@ export default function WhiteboardCanvas({
     return !(n && n.expanded)
   })
 
+  // ── Watch Any Agent: calm ambient ring on each box an external editor just
+  //    touched (file_activity). Keyed by box id; geometry straight from nodes. ──
+  const watchRings = useMemo(() => {
+    const ids = watchBoxIds ? Object.keys(watchBoxIds) : []
+    if (!ids.length || !nodes.length) return []
+    return ids.map(id => {
+      const n = nodes.find(nn => nn.id === id)
+      return n ? { id, geom: { x: n.x, y: n.y, w: n.w, h: n.h } } : null
+    }).filter(Boolean)
+  }, [watchBoxIds, nodes])
+  const watching = !!watchBoxIds
+
   // ── Spotlight geometry: which visible boxes are lit (hold the concept / were
   //    touched by the commit) and which are amber (a tethered concept the commit
   //    only partially covered — "you changed 1 of 4 places this lives"). ────────
@@ -684,6 +697,13 @@ export default function WhiteboardCanvas({
               rx={14} fill="none" pointerEvents="none" />
           ))}
 
+          {/* Watch Any Agent: calm ambient ring where an external editor just touched */}
+          {watchRings.map(r => (
+            <rect key={`watch-${r.id}`} className="watch-ring"
+              x={r.geom.x - 6} y={r.geom.y - 6} width={r.geom.w + 12} height={r.geom.h + 12}
+              rx={13} fill="none" pointerEvents="none" />
+          ))}
+
           {/* Canvas spotlight (Step 37a Slice 2/3): dim everything except the boxes
               that hold the concept / were touched by the commit; thread the lit
               boxes to a labeled centroid; amber-ring the partially-missed ones. */}
@@ -734,6 +754,14 @@ export default function WhiteboardCanvas({
           )}
         </svg>
       </div>
+
+      {/* Watch Any Agent: always-on indicator (live = pulsing when activity lands) */}
+      {watching && (
+        <div className={`wb-watching${watchRings.length ? ' active' : ''}`}
+          title="Watching for file edits from any agent or editor">
+          <span className="wb-watching-dot" />watching
+        </div>
+      )}
 
       {/* Zoom controls */}
       <div className="wb-zoom">

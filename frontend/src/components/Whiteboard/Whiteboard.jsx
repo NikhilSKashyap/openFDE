@@ -22,6 +22,7 @@ export default function Whiteboard({
   story = null,
   runNodeStates,
   runEdgeStates,
+  watchBoxIds = null,
   spotlight = null,
   onClearSpotlight,
   onSpotlightCommit,
@@ -97,6 +98,7 @@ export default function Whiteboard({
           story={story}
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
+          watchBoxIds={watchBoxIds}
           spotlight={spotlight}
           onClearSpotlight={onClearSpotlight}
         />

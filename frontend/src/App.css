@@ -1815,6 +1815,33 @@
   transform-box: fill-box;
   transform-origin: center;
 }
+
+/* Watch Any Agent — calm ambient ring when an external editor touches a box.
+   Deliberately peripheral (soft blue, thin, gentle): it's always-on and fires
+   while you type too, so it reassures rather than nags. */
+.watch-ring {
+  stroke: var(--dotted);
+  stroke-width: 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: drop-shadow(0 0 5px var(--dotted));
+  animation: watch-appear 0.35s ease-out, glow-pulse 2.2s ease-in-out infinite;
+}
+@keyframes watch-appear { from { opacity: 0; } to { opacity: 0.8; } }
+
+.wb-watching {
+  position: absolute; bottom: 14px; left: 14px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 11px; color: var(--text-muted); user-select: none; pointer-events: none;
+}
+.wb-watching-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.wb-watching.active { color: var(--text); border-color: var(--dotted); }
+.wb-watching.active .wb-watching-dot {
+  background: var(--dotted); box-shadow: 0 0 6px var(--dotted);
+  animation: glow-pulse 1.2s ease-in-out infinite;
+}
 .run-ring.run-planning {
   stroke: var(--active);
   stroke-dasharray: 6 5;
