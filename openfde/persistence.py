@@ -223,6 +223,7 @@ class Persistence:
         self.workflows_dir    = openfde_dir / "workflows"
         self.approvals_path   = openfde_dir / "approvals.json"
         self.agent_settings_path = openfde_dir / "agent_settings.json"
+        self.concept_cards_path = openfde_dir / "concept_cards.json"
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
@@ -482,6 +483,34 @@ class Persistence:
         runs.insert(0, run)
         self._write_json(self.runs_path, runs[:cap])
         return run
+
+    # ------------------------------------------------------------------ #
+    #  Concept cards (Step 37a — short notes on a concept/commit)          #
+    # ------------------------------------------------------------------ #
+
+    def load_concept_cards(self) -> list:
+        """Load saved concept cards (newest-first).
+
+        Returns:
+            list[dict] — cards; empty when no file exists.
+        """
+        raw = self._read_json(self.concept_cards_path, [])
+        return raw if isinstance(raw, list) else []
+
+    def add_concept_card(self, card: dict, cap: int = 200) -> dict:
+        """Prepend a concept card, keeping the most recent `cap`.
+
+        Args:
+            card: dict — {id, title, summary, tetherId?, commitSha?, files?, createdAt}.
+            cap: int — maximum number of cards to retain.
+
+        Returns:
+            dict — the stored card.
+        """
+        cards = self.load_concept_cards()
+        cards.insert(0, card)
+        self._write_json(self.concept_cards_path, cards[:cap])
+        return card
 
     def get_run(self, run_id: str) -> dict:
         """Return a single run record by id, or None.

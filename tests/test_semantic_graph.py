@@ -110,6 +110,25 @@ class SemanticGraphTest(unittest.TestCase):
         self.assertEqual(len(fhit), 1)
         self.assertFalse(fhit[0]["partial"])
 
+    # 4c) signal: kebab ids are high-signal (rename-coupled); snake_case shared
+    #     vocabulary is low-signal and must NOT raise a partial-touch alarm.
+    def test_tether_signal_precision(self):
+        # add a snake_case status value shared across two files (shared vocabulary)
+        (self.root / "pkg_a.py").write_text(
+            (self.root / "pkg_a.py").read_text() + '\nSTATUS = "needs_approval"\n')
+        (self.root / "pkg_b.py").write_text(
+            (self.root / "pkg_b.py").read_text() + '\nMORE = "needs_approval"\n')
+        graph = sg.build_graph(self.root)
+        teth = {t["identifier"]: t for t in graph["tethers"]}
+        # kebab id "thing-one" → high; snake "needs_approval" → low
+        self.assertEqual(teth["thing-one"]["signal"], "high")
+        self.assertEqual(teth["needs_approval"]["signal"], "low")
+        # partial-touch alarm fires for the high-signal one only
+        warns = sg.tethers_partially_touched(graph, ["pkg_a.py"])
+        ids = {w["identifier"] for w in warns}
+        self.assertIn("thing-one", ids)
+        self.assertNotIn("needs_approval", ids)
+
     # 5) summary is UI-ready (counts + top tethers + provider warnings).
     def test_graph_summary(self):
         graph = sg.build_graph(self.root)

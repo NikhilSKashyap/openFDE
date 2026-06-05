@@ -33,11 +33,13 @@ function nodeFilePaths(node) {
 function spotlightLabel(spotlight) {
   if (!spotlight) return null
   if (spotlight.kind === 'commit') {
-    const names = (spotlight.concepts || []).map(c => c.identifier)
-    const shown = names.slice(0, 3).join(', ')
-    const more = names.length > 3 ? ` +${names.length - 3}` : ''
-    const main = `${spotlight.label} · ${spotlight.count} file${spotlight.count === 1 ? '' : 's'}`
-    const sub = names.length ? `concepts: ${shown}${more}` : 'no tracked concepts'
+    // Primary label answers "what happened" — the commit message itself.
+    const msg = spotlight.summary || spotlight.label
+    const main = msg.length > 40 ? msg.slice(0, 39) + '…' : msg
+    const nConcepts = (spotlight.concepts || []).length
+    const parts = [spotlight.label, `${spotlight.count} file${spotlight.count === 1 ? '' : 's'}`]
+    if (nConcepts) parts.push(`${nConcepts} concept${nConcepts === 1 ? '' : 's'}`)
+    const sub = parts.join(' · ')
     const w = Math.max(main.length, sub.length) * 6.6 + 28
     return { main, sub, w }
   }

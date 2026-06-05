@@ -1062,6 +1062,125 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=500)
         return web.json_response({"ok": True, "summary": semantic_graph_mod.graph_summary(graph)})
 
+    # ================================================================== #
+    #  REST — /api/concept*  (Ask Concept + Concept Cards, Step 37a)     #
+    # ================================================================== #
+
+    _ARCH_KW = ("why", "architecture", "scope", "concept", "missed", "affected",
+                "depend", "design", "where", "purpose", "should", "risk", "boundary", "mean")
+    _SD_KW = ("code", "function", "implementation", "diff", "edited", "edit", "bug",
+              "line", "refactor", "logic", "variable", "method", "how does", "how do")
+    _ROLE_HUMAN = {"architect": "Architect", "senior_dev": "Senior Dev", "verifier": "Verifier"}
+
+    def _classify_concept_question(q: str) -> str:
+        """v1 deterministic router: architecture/why/concept → Architect; code/impl
+        → Senior Dev; ties + uncertainty → Architect (it can defer to Sr Dev later)."""
+        ql = (q or "").lower()
+        sd = sum(1 for k in _SD_KW if k in ql)
+        arch = sum(1 for k in _ARCH_KW if k in ql)
+        return "senior_dev" if sd > arch else "architect"
+
+    def _concept_prompt(question: str, ctx: dict) -> str:
+        lines = []
+        if ctx.get("kind") == "commit":
+            lines.append(f"Commit: {ctx.get('summary') or ctx.get('label')}")
+            files = ctx.get("files", [])
+            lines.append(f"Files changed ({len(files)}): {', '.join(files[:20])}")
+            cs = ctx.get("concepts", [])
+            if cs:
+                lines.append("Affected concepts: " + "; ".join(
+                    f"{c['identifier']} ({c.get('touched')}/{c.get('total')}"
+                    f"{' PARTIAL' if c.get('partial') else ''})" for c in cs[:12]))
+        else:
+            files = ctx.get("files", [])
+            lines.append(f"Concept: {ctx.get('label')} ({ctx.get('kind') or 'identifier'})")
+            lines.append(f"Appears in {len(files)} files: {', '.join(files[:20])}")
+        lines.append("")
+        lines.append(f"Question: {question}")
+        return "\n".join(lines)
+
+    def _concept_fallback(ctx: dict, question: str) -> str:
+        note = (" (No model provider configured for this role — deterministic summary "
+                "from the semantic graph. Set a provider in Agent Settings for a richer answer.)")
+        if ctx.get("kind") == "commit":
+            files, cs = ctx.get("files", []), ctx.get("concepts", [])
+            partial = [c for c in cs if c.get("partial")]
+            out = [f'This commit "{ctx.get("summary") or ctx.get("label")}" changed {len(files)} file(s).']
+            if cs:
+                out.append("It touched these concepts: " + ", ".join(c["identifier"] for c in cs[:8]) + ".")
+            if partial:
+                p = partial[0]
+                out.append(f'Heads up: "{p["identifier"]}" lives in {p.get("total")} places but this change '
+                           f'touched only {p.get("touched")} — untouched: {", ".join(p.get("untouchedFiles", [])[:4])}.')
+            return " ".join(out) + note
+        files = ctx.get("files", [])
+        return (f'"{ctx.get("label")}" is a {ctx.get("kind") or "concept"} OpenFDE tracks as a tether — '
+                f'it appears in {len(files)} file(s): {", ".join(files[:8])}.' + note)
+
+    async def post_concept_ask(request: web.Request) -> web.Response:
+        """Ask a question about the active concept/commit; route to Architect or
+        Senior Dev (deterministic v1) using their configured local/API provider,
+        else return a deterministic semantic-graph answer. Never a raw code dump."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        question = (body.get("question") or "").strip()
+        ctx = body.get("context") if isinstance(body.get("context"), dict) else {}
+        if not question:
+            return web.json_response({"ok": False, "error": "question required"}, status=400)
+
+        role = _classify_concept_question(question)
+        settings = persistence.load_agent_settings()
+        caller = _text_role(settings.get(role, {}))
+        used_role = role
+        if not caller and role != "architect":  # chosen role has no text provider → Architect
+            caller, used_role = _text_role(settings.get("architect", {})), "architect"
+
+        answer, source = "", ""
+        if caller:
+            sys_prompt = (f"You are the {_ROLE_HUMAN.get(used_role, used_role)} in OpenFDE. Answer the "
+                          "question about this concept/commit at the architecture level — concise, plain "
+                          "language, 2-5 sentences, NO code dumps.")
+            user = _concept_prompt(question, ctx)
+            try:
+                loop = asyncio.get_event_loop()
+                answer = await loop.run_in_executor(None, lambda: caller(sys_prompt, user))
+            except Exception as exc:  # noqa: BLE001
+                logger.error("concept ask failed: %s", exc)
+                answer = ""
+            prov = settings.get(used_role, {}).get("provider")
+            source = f"{_ROLE_HUMAN.get(used_role, used_role)} · {prov}"
+        if not (answer or "").strip():
+            answer, source = _concept_fallback(ctx, question), "OpenFDE · semantic graph"
+        return web.json_response({"ok": True, "answer": answer.strip(),
+                                  "role": used_role, "source": source})
+
+    async def get_concept_cards(request: web.Request) -> web.Response:
+        """Return all saved concept cards (newest-first)."""
+        return web.json_response({"ok": True, "cards": persistence.load_concept_cards()})
+
+    async def post_concept_card(request: web.Request) -> web.Response:
+        """Save a short concept card linked to a tether and/or commit + files."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        title = (body.get("title") or "").strip()
+        if not title:
+            return web.json_response({"ok": False, "error": "title required"}, status=400)
+        card = {
+            "id": "card_" + secrets.token_hex(5),
+            "title": title[:200],
+            "summary": (body.get("summary") or "").strip()[:2000],
+            "tetherId": (body.get("tetherId") or None),
+            "commitSha": (body.get("commitSha") or None),
+            "files": body.get("files") if isinstance(body.get("files"), list) else [],
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
+        persistence.add_concept_card(card)
+        return web.json_response({"ok": True, "card": card})
+
     async def post_compile_workflow(request: web.Request) -> web.Response:
         """Compile the selected scope into a workflow payload + script (preview).
 
@@ -2188,6 +2307,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/agent-settings/check",      post_agent_settings_check)
     app.router.add_get( "/api/semantic-graph",            get_semantic_graph)
     app.router.add_post("/api/semantic-graph/refresh",    post_semantic_graph_refresh)
+    app.router.add_post("/api/concept/ask",               post_concept_ask)
+    app.router.add_get( "/api/concept-cards",             get_concept_cards)
+    app.router.add_post("/api/concept-cards",             post_concept_card)
     app.router.add_post("/api/execution/compile-workflow", post_compile_workflow)
     app.router.add_post("/api/execution/run",             post_execution_run)
     app.router.add_post("/api/agent/run",                 post_agent_run)

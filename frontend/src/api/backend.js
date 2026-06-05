@@ -414,6 +414,28 @@ export const refreshSemanticGraph = () =>
 export const getCommitImpact = (sha) =>
   apiFetch(`/api/git/commit/${encodeURIComponent(sha)}/impact`)
 
+/**
+ * Ask a question about the active concept/commit; routed to Architect or Senior
+ * Dev (deterministic v1), else a deterministic semantic-graph answer.
+ *
+ * @param {string} question
+ * @param {object} context - { kind, label, summary?, files, concepts? }
+ * @returns {Promise<{ok, answer, role, source}|null>}
+ */
+export const askConcept = (question, context) =>
+  apiFetch('/api/concept/ask', { method: 'POST', body: JSON.stringify({ question, context }) })
+
+/** List saved concept cards (newest-first). @returns {Promise<{ok, cards}|null>} */
+export const getConceptCards = () => apiFetch('/api/concept-cards')
+
+/**
+ * Save a short concept card.
+ * @param {object} card - { title, summary?, tetherId?, commitSha?, files? }
+ * @returns {Promise<{ok, card}|null>}
+ */
+export const saveConceptCard = (card) =>
+  apiFetch('/api/concept-cards', { method: 'POST', body: JSON.stringify(card) })
+
 // ── Plan ──────────────────────────────────────────────────────────────────
 
 /**

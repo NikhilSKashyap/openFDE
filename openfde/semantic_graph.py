@@ -174,6 +174,26 @@ def _classify_literal(s: str):
     return None
 
 
+def _tether_signal(lit: str, kind: str) -> str:
+    """Rename-sensitivity of a tether — drives whether a partial-touch is alarming.
+
+    HIGH = rename-coupled config/contract ids that must move together: routes, and
+    kebab-case ids (a hyphen can't be a code symbol, so a hyphenated string literal
+    shared across files is almost always a config/provider/route id — e.g.
+    ``codex-local``, ``openai-compatible``). Renaming one means renaming all.
+
+    LOW = shared vocabulary: snake_case / UPPER_SNAKE values used as data in many
+    places (status enums like ``needs_approval``, action constants like
+    ``CREATE_BOX``). They legitimately appear in many files; touching one is not a
+    "missed" rename, so they stay in the graph but never trigger the amber alarm.
+    """
+    if kind == "route":
+        return "high"
+    if kind == "identifier" and "-" in lit:
+        return "high"
+    return "low"
+
+
 def tether_provider(repo_root: Path) -> dict:
     t0 = time.time()
     pv = _py_version()
@@ -214,7 +234,7 @@ def tether_provider(repo_root: Path) -> dict:
         if len(files) < 2:           # a concept lives in many files; <2 isn't a tether
             continue
         tethers.append({
-            "identifier": lit, "kind": kinds[lit],
+            "identifier": lit, "kind": kinds[lit], "signal": _tether_signal(lit, kinds[lit]),
             "files": files, "fileCount": len(files), "count": len(places),
             "occurrences": [{"path": p, "line": ln} for p, ln in places[:50]],
             "reason": f"{kinds[lit]}-like string literal in {len(files)} files",
@@ -434,6 +454,7 @@ def concepts_for_files(graph, changed_files) -> list:
         if touched:
             out.append({
                 "identifier": t["identifier"], "kind": t.get("kind"),
+                "signal": t.get("signal", "low"),
                 "files": sorted(files), "touchedFiles": sorted(touched),
                 "untouchedFiles": sorted(files - touched),
                 "touched": len(touched), "total": len(files),
@@ -443,16 +464,21 @@ def concepts_for_files(graph, changed_files) -> list:
 
 
 def tethers_partially_touched(graph, changed_files) -> list:
-    """Warn when a change touches only SOME files of a tethered concept.
+    """Warn when a change touches only SOME files of a **high-signal** tethered
+    concept (rename-coupled config/contract ids — see ``_tether_signal``).
 
-    Returns a list of {identifier, touched, total, touchedFiles, untouchedFiles,
-    message} — the seed of the Verifier's architecture-drift check.
+    Low-signal shared vocabulary (status enums, action constants) is intentionally
+    excluded: those legitimately live in many files, so a partial touch is not a
+    missed rename. Returns {identifier, touched, total, touchedFiles,
+    untouchedFiles, message} — the seed of the Verifier's architecture-drift check.
     """
     changed = {_norm(c) for c in (changed_files or [])}
     if not changed:
         return []
     out = []
     for t in (graph or {}).get("tethers", []):
+        if t.get("signal", "low") != "high":
+            continue
         files = set(t.get("files", []))
         touched = files & changed
         if touched and touched != files:

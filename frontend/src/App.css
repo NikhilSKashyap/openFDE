@@ -2118,10 +2118,16 @@
 .tether-ring-amber { stroke: var(--active); stroke-width: 2.5; stroke-dasharray: 6 4;
   filter: drop-shadow(0 0 5px var(--active)); animation: tether-pulse 1.8s ease-in-out infinite; }
 
-/* Commit chip rail (Step 37a Slice 3) — canvas-native lens over recent commits */
-.commit-rail { display: flex; gap: 6px; align-items: center; margin-left: 14px;
-  overflow-x: auto; max-width: 70%; scrollbar-width: none; }
-.commit-rail::-webkit-scrollbar { display: none; }
+/* Commit chip rail (Step 37a) — canvas-native lens over recent commits, full width */
+.commit-rail { display: flex; gap: 4px; align-items: center; margin-left: 14px; flex: 1 1 auto; min-width: 0; }
+.commit-rail-track { display: flex; gap: 6px; align-items: center; overflow-x: auto;
+  scroll-behavior: smooth; scrollbar-width: none; flex: 1 1 auto; min-width: 0; }
+.commit-rail-track::-webkit-scrollbar { display: none; }
+.commit-rail-arrow { flex: 0 0 auto; width: 20px; height: 22px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted);
+  cursor: pointer; font-size: 13px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+.commit-rail-arrow:hover { color: var(--text); border-color: var(--solid); }
+.commit-rail-arrow.hidden { visibility: hidden; pointer-events: none; }
 .commit-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
   padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border);
   background: var(--surface-2); cursor: pointer; color: var(--text-muted);
@@ -2131,6 +2137,58 @@
 .commit-chip.busy { opacity: 0.6; }
 .commit-chip-sha { font-family: ui-monospace, monospace; font-size: 10px; color: var(--solid); }
 .commit-chip-msg { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Concept panel (Step 37a) — canvas-native card for the active concept/commit */
+.panel-middle { position: relative; }
+.concept-panel { position: absolute; top: 46px; right: 14px; width: 322px;
+  max-height: calc(100% - 70px); display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.32); z-index: 7; overflow: hidden; }
+.concept-head { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.concept-head-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.concept-kind { font-size: 9px; font-weight: 700; letter-spacing: 0.06em; padding: 1px 6px;
+  border-radius: 4px; width: fit-content; }
+.concept-kind.commit { background: var(--solid); color: #fff; }
+.concept-kind.tether { background: var(--accent); color: #fff; }
+.concept-title { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3; }
+.concept-x { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px; }
+.concept-x:hover { color: var(--text); }
+.concept-body { padding: 10px 12px; overflow-y: auto; flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; }
+.concept-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.concept-sha { font-family: ui-monospace, monospace; color: var(--solid); }
+.concept-affected { display: flex; flex-wrap: wrap; gap: 5px; }
+.concept-pill { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: var(--surface-2);
+  color: var(--text-muted); font-family: ui-monospace, monospace; }
+.concept-pill.partial { color: var(--active); border: 1px solid var(--active); }
+.concept-warn { font-size: 11px; color: var(--text); background: rgba(255,204,0,0.12);
+  border: 1px solid var(--active); border-radius: 6px; padding: 6px 8px; }
+.concept-cards { display: flex; flex-direction: column; gap: 6px; }
+.concept-card { background: var(--surface-2); border-radius: 6px; padding: 7px 9px; border-left: 2px solid var(--accent); }
+.concept-card-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.concept-card-summary { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.concept-ask { display: flex; flex-direction: column; gap: 6px; }
+.concept-ask-row { display: flex; gap: 6px; }
+.concept-ask-input { flex: 1 1 auto; min-width: 0; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font: inherit; font-size: 12px; }
+.concept-ask-input:focus { outline: none; border-color: var(--accent); }
+.concept-ask-btn { padding: 6px 12px; border-radius: 6px; border: none; background: var(--accent);
+  color: #fff; cursor: pointer; font-size: 12px; font-weight: 600; }
+.concept-ask-btn:disabled { opacity: 0.5; cursor: default; }
+.concept-suggest { display: flex; flex-wrap: wrap; gap: 5px; }
+.concept-suggest-chip { font-size: 10px; padding: 3px 8px; border-radius: 10px; border: 1px solid var(--border);
+  background: none; color: var(--text-muted); cursor: pointer; }
+.concept-suggest-chip:hover { border-color: var(--accent); color: var(--text); }
+.concept-answer { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
+.concept-answer-text { font-size: 12px; color: var(--text); line-height: 1.45; white-space: pre-wrap; }
+.concept-answer-src { font-size: 10px; color: var(--text-muted); margin-top: 5px; }
+.concept-foot { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.concept-savebtn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px;
+  text-align: left; padding: 0; }
+.concept-savebtn:hover { text-decoration: underline; }
+.concept-saved { font-size: 11px; color: var(--solid); }
+.concept-saveform { display: flex; flex-direction: column; gap: 6px; }
+.concept-saveform-actions { display: flex; gap: 8px; align-items: center; }
 .agentset-status {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--text-muted);

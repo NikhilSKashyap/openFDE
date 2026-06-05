@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import './App.css'
 import Toolbar from './components/Toolbar/Toolbar'
 import FileTree from './components/FileTree/FileTree'
@@ -9,6 +9,7 @@ import { deriveMoment } from './productFlow/deriveMoment'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import AgentSettings from './components/AgentSettings/AgentSettings'
 import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
+import ConceptPanel from './components/SemanticGraph/ConceptPanel'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
@@ -40,9 +41,11 @@ import {
   postAgentRun,
   postCouncilRun,
   cancelCouncilRun,
-  postExplain,
   postStory,
   getCommitImpact,
+  askConcept,
+  getConceptCards,
+  saveConceptCard,
 } from './api/backend'
 import { connectWS, closeWS } from './api/ws'
 
@@ -106,14 +109,31 @@ export default function App() {
   // { kind:'tether'|'commit', label, count, files, amberFiles?, concepts?, summary? }
   const [canvasSpotlight, setCanvasSpotlight] = useState(null)
 
+  // Concept cards — short saved notes about a concept/commit (persisted in .openfde).
+  const [conceptCards, setConceptCards] = useState([])
+  const reloadConceptCards = useCallback(async () => {
+    const res = await getConceptCards()
+    if (res?.ok) setConceptCards(res.cards || [])
+  }, [])
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      const res = await getConceptCards()
+      if (alive && res?.ok) setConceptCards(res.cards || [])
+    })()
+    return () => { alive = false }
+  }, [])
+
   // Click a commit chip → fetch its impact → spotlight touched boxes + concepts,
   // mark partially-touched concepts' untouched boxes amber.
   async function onSpotlightCommit(sha) {
     const imp = await getCommitImpact(sha)
     if (!imp?.ok) return
+    // Amber "you missed some" only for high-signal (rename-coupled) concepts —
+    // shared vocabulary (status enums, action constants) legitimately spans files.
     const amber = new Set()
     for (const c of (imp.affectedConcepts || [])) {
-      if (c.partial) for (const f of c.untouchedFiles) amber.add(f)
+      if (c.partial && c.signal === 'high') for (const f of c.untouchedFiles) amber.add(f)
     }
     setCanvasSpotlight({
       kind: 'commit', label: imp.shortSha, summary: imp.summary,
@@ -122,6 +142,41 @@ export default function App() {
     })
     setActiveView('whiteboard')
   }
+
+  // Ask Concept — question about the active spotlight, routed Architect/Sr Dev.
+  async function onAskConcept(question) {
+    const s = canvasSpotlight
+    if (!s) return null
+    return askConcept(question, {
+      kind: s.kind, label: s.label, summary: s.summary || '',
+      files: s.files || [], concepts: s.concepts || [],
+    })
+  }
+
+  // Save a short Concept Card linked to the active concept/commit.
+  async function onSaveConceptCard({ title, summary }) {
+    const s = canvasSpotlight
+    if (!s || !title?.trim()) return
+    await saveConceptCard({
+      title, summary,
+      tetherId: s.kind === 'tether' ? s.label : null,
+      commitSha: s.kind === 'commit' ? s.sha : null,
+      files: s.files || [],
+    })
+    await reloadConceptCards()
+  }
+
+  // Cards relevant to the active spotlight (same concept, same commit, or an
+  // affected concept of the commit).
+  const spotlightCards = (() => {
+    const s = canvasSpotlight
+    if (!s) return []
+    const conceptIds = new Set([s.kind === 'tether' ? s.label : null,
+      ...((s.concepts || []).map(c => c.identifier))].filter(Boolean))
+    return conceptCards.filter(c =>
+      (s.kind === 'commit' && c.commitSha === s.sha) ||
+      (c.tetherId && conceptIds.has(c.tetherId)))
+  })()
   const [leftOpen, setLeftOpen]   = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [flowMode, setFlowMode]   = useState('focused') // Story | Focused | All (Batch 5)
@@ -472,26 +527,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowMode, storySelKey, storyArchKey])
 
-  // "Explain this" (Step 26): deterministic explanation of the selected boxes,
-  // grounded in the function-flow read model, shown in the Agent panel.
-  async function onExplain(boxIds) {
-    const ids = (boxIds && boxIds.length) ? boxIds : [...(canvasState.selectedIds ?? [])]
-    if (!backendRef.current || !ids.length) return
-    openTechnicalMode('Agent')   // surface the explanation in Technical/Agent
-    const titles = ids.map(id => canvasState.boxes.find(b => b.id === id)?.title || id)
-    const stamp = new Date().toISOString()
-    setAgentMessages(prev => [...prev, {
-      id: `explain-q-${stamp}`, role: 'user', timestamp: stamp,
-      body: `Explain: ${titles.join(', ')}`,
-    }])
-    const res = await postExplain(ids)
-    const done = new Date().toISOString()
-    setAgentMessages(prev => [...prev, {
-      id: `explain-a-${done}`, role: 'explanation', timestamp: done,
-      markdown: res?.markdown || '_Could not generate an explanation._',
-      summary: res?.summary || '',
-    }])
-  }
+  // ("Explain this" retired — replaced by canvas-native Ask Concept, Step 37a.)
 
   // Select (or clear) the inspected file/function entity. Passing a null kind
   // clears it — e.g. when a module box itself is selected.
@@ -1278,6 +1314,16 @@ export default function App() {
               setSelectedTaskId={setSelectedTaskId}
               setPanelMode={openTechnicalMode}
             />
+            {canvasSpotlight && activeView === 'whiteboard' && (
+              <ConceptPanel
+                key={`${canvasSpotlight.kind}:${canvasSpotlight.sha || canvasSpotlight.label}`}
+                spotlight={canvasSpotlight}
+                cards={spotlightCards}
+                onAsk={onAskConcept}
+                onSaveCard={onSaveConceptCard}
+                onClose={() => setCanvasSpotlight(null)}
+              />
+            )}
           </main>
           <aside className={`panel-right${rightOpen ? '' : ' collapsed'}`}>
             <button className="panel-collapse-btn right" onClick={() => setRightOpen(o => !o)}
@@ -1294,7 +1340,7 @@ export default function App() {
                 agentMessages={agentMessages}
                 approvals={approvals}
                 onExecute={backendAvailable ? onWorkExecute : null}
-                onExplain={backendAvailable ? onExplain : null}
+                onExplain={null}
                 onOpenDiff={onSelectCommit}
                 onReset={onWorkReset}
                 intent={workIntent}
@@ -1356,7 +1402,7 @@ export default function App() {
               onResolveApproval={onResolveApproval}
               agentSettings={agentSettings}
               onOpenAgentSettings={() => setAgentSettingsOpen(true)}
-              onExplain={backendAvailable ? onExplain : null}
+              onExplain={null}
               story={flowMode === 'story' ? story : null}
             />}
           </aside>
