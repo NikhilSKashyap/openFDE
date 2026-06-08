@@ -22,6 +22,41 @@ function makeDemoTasks() {
   ]
 }
 
+// A title that is operational/meta and should never be an OpenPM card's primary text —
+// mirrors the backend's is_bad_title semantics, kept tiny + focused. Used to (a) pick a
+// new card's title and (b) migrate older cards that captured raw commit text.
+const _NOISY_TITLE = new Set([
+  'yes', 'ya', 'yeah', 'ok', 'okay', 'k', 'sure', 'no', 'nope', 'done', 'here', 'prompt',
+  'change', 'update', 'fix', 'landed change', "here's the cc prompt", 'here is the cc prompt',
+])
+function isNoisyTitle(title) {
+  // Normalize smart quotes → ASCII first so a curly apostrophe ("Here's") matches like a
+  // straight one, then strip wrapping quotes/backticks and an `openfde:` prefix.
+  const s = (title || '')
+    .replace(/[‘’‛ʼ′]/g, "'").replace(/[“”„″]/g, '"')
+    .replace(/^openfde:\s*/i, '').trim().replace(/^[`"']+|[`"']+$/g, '').trim()
+  if (!s) return true
+  const low = s.toLowerCase().replace(/[.!?,:]+$/, '')
+  if (_NOISY_TITLE.has(low)) return true
+  if (/^(here'?s|here is|you are|you'?re|read the|read first|start with|important|restart the|implementing the|first,? read|the (cc|claude|sr dev|senior dev) prompt)\b/.test(low)) return true
+  if (low.includes('openfde owns version control')) return true
+  if (/^(curl|git|cd|npm|npx|node|pkill|kill|nohup|chmod|python3?|pip3?|grep|rg|sed|awk|rm|cp|mv|scp|ssh|docker|make|pytest|eslint|vite|ls|cat|tail|head|find|touch|open|export|sudo|brew)\b\s+\S*[-/]/.test(s)) return true
+  const toks = s.split(/\s+/).filter(Boolean)        // a bare file-list title
+  if (toks.length && toks.every(tok => /^[\w.@~+/-]+$/.test(tok) && (tok.includes('/') || tok.includes('.')))) return true
+  return false
+}
+// The clean primary title for a commit card: prefer the backend's displayTitle / the prompt
+// title, else the de-`openfde:`-ed commit summary, else a neutral label. Never noisy text.
+// Exported so the episode detail card (ConceptPanel) renders commit rows with the SAME clean
+// fallback as OpenPM — one frontend source of truth mirroring backend `commit_display`.
+export function cardTitleFor(c) {
+  const dt = (c.displayTitle || c.promptTitle || '').trim()
+  if (dt && !isNoisyTitle(dt)) return dt
+  const cleaned = (c.summary || '').replace(/^openfde:\s*/i, '').trim()
+  if (cleaned && !isNoisyTitle(cleaned)) return cleaned
+  return dt || 'Landed change'
+}
+
 function pmReducer(state, action) {
   switch (action.type) {
     case 'CREATE_TASK': {
@@ -31,9 +66,61 @@ function pmReducer(state, action) {
         description: action.description || '',
         linkedBoxIds: action.linkedBoxIds || [],
         column: action.column || 'todo',
-        verificationStatus: 'pending',
+        verificationStatus: action.verificationStatus || 'pending',
+        // Story binding (optional): the prompt episode + landed commit this card
+        // represents, so OpenPM mirrors the same prompt→commit story as the rail.
+        episodeId: action.episodeId || null,
+        commitSha: action.commitSha || null,
+        source: action.source || 'manual',
+        files: action.files || [],
+        promptLabel: action.promptLabel || '',
       }
       return [...state, task]
+    }
+    // Mirror landed prompt→commits into OpenPM as Done cards, grouped/labeled by their
+    // prompt. Card text uses the CLEANED episode display (never raw commit chatter like
+    // "Here's the CC prompt"). Idempotent + self-healing: new commits are added; existing
+    // cards whose title is noisy or whose tag/summary is missing are MIGRATED in place from
+    // the cleaned metadata; when nothing changes we return the SAME array reference so React
+    // never re-renders or re-persists. action.commits: [{commitSha, shortSha, summary,
+    // displayTitle, displaySummary, files, episodeId, episodeTag, promptTitle, sequence}].
+    case 'SYNC_EPISODE_COMMITS': {
+      const byCommit = new Map()
+      state.forEach((t, i) => { if (t.commitSha) byCommit.set(t.commitSha, i) })
+      let next = null
+      const clone = () => (next || (next = state.slice()))
+      const additions = []
+      for (const c of action.commits || []) {
+        if (!c.commitSha) continue
+        const title = cardTitleFor(c)
+        const desc = c.displaySummary || ''
+        if (!byCommit.has(c.commitSha)) {
+          additions.push({
+            id: makeId(), title, description: desc, linkedBoxIds: [], column: 'done',
+            verificationStatus: 'passed',   // it landed — verified by Review then Land
+            episodeId: c.episodeId || null, episodeTag: c.episodeTag || '',
+            promptTitle: c.promptTitle || '', sequence: c.sequence || 0,
+            commitSha: c.commitSha, shortSha: c.shortSha || (c.commitSha || '').slice(0, 7),
+            source: 'openfde-episode', files: c.files || [], promptLabel: c.promptLabel || '',
+          })
+          continue
+        }
+        // Migrate an existing card from cleaned metadata (heal older noisy/partial cards).
+        const idx = byCommit.get(c.commitSha)
+        const t = state[idx]
+        const newTitle = (isNoisyTitle(t.title) && title) ? title : t.title
+        const newDesc = (!t.description && desc) ? desc : t.description
+        const newTag = t.episodeTag || c.episodeTag || ''
+        const newPT = t.promptTitle || c.promptTitle || ''
+        const newSeq = t.sequence || c.sequence || 0
+        if (newTitle !== t.title || newDesc !== t.description || newTag !== t.episodeTag
+            || newPT !== t.promptTitle || newSeq !== t.sequence) {
+          clone()[idx] = { ...t, title: newTitle, description: newDesc,
+                           episodeTag: newTag, promptTitle: newPT, sequence: newSeq }
+        }
+      }
+      if (additions.length) clone().push(...additions)
+      return next || state          // same reference when nothing changed → no churn
     }
     case 'UPDATE_TASK': {
       return state.map(t => t.id === action.id ? { ...t, ...action.fields } : t)
