@@ -1,0 +1,130 @@
+"""
+Tests for openfde.episode_llm_summary — the LLM Story Summarizer (local CLI + deterministic
+fallback). The CLI is mocked via the injectable ``invoke`` — Codex/Claude need not be installed.
+"""
+
+import unittest
+
+from openfde import episode_llm_summary as ls
+
+
+def _mock(json_text):
+    """An invoke() that returns the same text for any provider."""
+    return lambda provider, system, user, timeout: json_text
+
+
+_GOOD = ('```json\n{"title":"Auto-Land Prompt Commits","summary":"Commits scoped per prompt.",'
+         '"concepts":["Auto-Land","Scoped Commits"],"decisions":["Commit per prompt"],'
+         '"deferred":["Tool-settled signal"],"abandoned":["Manual Land primary"],'
+         '"operational":false,"confidence":0.82}\n```')
+
+
+class ParseValidateTest(unittest.TestCase):
+    def test_parse_strips_fences(self):
+        obj = ls.parse_summary_json(_GOOD)
+        self.assertEqual(obj["title"], "Auto-Land Prompt Commits")
+
+    def test_parse_garbage_is_none(self):
+        self.assertIsNone(ls.parse_summary_json("the model refused, no json here"))
+        self.assertIsNone(ls.parse_summary_json(""))
+
+    def test_validate_good(self):
+        c = ls.validate(ls.parse_summary_json(_GOOD))
+        self.assertEqual(c["title"], "Auto-Land Prompt Commits")
+        self.assertEqual(c["concepts"], ["Auto-Land", "Scoped Commits"])
+        self.assertFalse(c["operational"])
+        self.assertAlmostEqual(c["confidence"], 0.82, places=2)
+
+    def test_validate_rejects_shell_filelist_generic(self):
+        self.assertIsNone(ls.validate({"title": "curl -s localhost:7441/api/x", "summary": "x"}))
+        self.assertIsNone(ls.validate({"title": "ROADMAP.md", "summary": "x"}))
+        self.assertIsNone(ls.validate({"title": "Yes", "summary": "ok"}))
+        self.assertIsNone(ls.validate({"title": "", "summary": "x"}))
+        self.assertIsNone(ls.validate({"title": "x" * 61, "summary": "x"}))
+
+    def test_validate_caps_arrays_and_summary(self):
+        c = ls.validate({"title": "Good Title Here", "summary": "y" * 400,
+                         "concepts": [f"c{i}" for i in range(20)]})
+        self.assertLessEqual(len(c["summary"]), 300)
+        self.assertEqual(len(c["concepts"]), 6)
+
+
+class SummarizeTest(unittest.TestCase):
+    def test_summarize_success(self):
+        out = ls.summarize_episode({"title": "x", "prompt": "build a thing"},
+                                   invoke=_mock(_GOOD), providers=["codex-local"])
+        self.assertEqual(out["title"], "Auto-Land Prompt Commits")
+        self.assertEqual(out["summarySource"], "codex-local")
+
+    def test_summarize_all_fail_returns_none(self):
+        out = ls.summarize_episode({"title": "x", "prompt": "p"},
+                                   invoke=_mock("garbage"), providers=["codex-local", "claude-local"])
+        self.assertIsNone(out)
+
+    def test_summarize_no_providers(self):
+        self.assertIsNone(ls.summarize_episode({"prompt": "p"}, invoke=_mock(_GOOD), providers=[]))
+
+
+class EnrichCacheTest(unittest.TestCase):
+    def test_enrich_applies_llm_and_caches(self):
+        ep = {"episodeId": "e1", "prompt": "implement story graph",
+              "title": "Implement story graph", "files": ["a.py"], "commitShas": [], "signal": "product"}
+        calls = {"n": 0}
+
+        def inv(provider, system, user, timeout):
+            calls["n"] += 1
+            self.assertIn(ls.INTERNAL_MARKER, user)         # capture-safe marker present
+            return _GOOD
+        self.assertTrue(ls.enrich(ep, invoke=inv, providers=["codex-local"]))
+        self.assertEqual(ep["title"], "Auto-Land Prompt Commits")
+        self.assertEqual(ep["summarySource"], "codex-local")
+        self.assertTrue(ep["storyFacts"]["concepts"])
+        self.assertEqual(calls["n"], 1)
+        # Second enrich: same fingerprint → NO new LLM call.
+        ls.enrich(ep, invoke=inv, providers=["codex-local"])
+        self.assertEqual(calls["n"], 1)
+
+    def test_fingerprint_change_retriggers(self):
+        ep = {"episodeId": "e2", "prompt": "p", "title": "T", "files": [], "commitShas": [], "signal": "product"}
+        n = {"c": 0}
+
+        def inv(*a):
+            n["c"] += 1
+            return _GOOD
+        ls.enrich(ep, invoke=inv, providers=["codex-local"])
+        self.assertEqual(n["c"], 1)
+        ep["commitShas"] = ["newsha"]                       # inputs changed → fingerprint changes
+        ls.enrich(ep, invoke=inv, providers=["codex-local"])
+        self.assertEqual(n["c"], 2)
+
+    def test_llm_operational_excludes_from_signal(self):
+        op = ('{"title":"Status Check","summary":"Operational.","concepts":[],"decisions":[],'
+              '"deferred":[],"abandoned":[],"operational":true,"confidence":0.6}')
+        ep = {"episodeId": "e3", "prompt": "is the server up?", "title": "Is the server up",
+              "files": [], "commitShas": [], "signal": "product"}
+        ls.enrich(ep, invoke=_mock(op), providers=["codex-local"])
+        self.assertEqual(ep["signal"], "operational")
+        self.assertTrue(ep["storyFacts"]["operational"])
+
+    def test_deterministic_when_no_providers(self):
+        ep = {"episodeId": "e4", "prompt": "Implement Prompt Story Graph v1\nDeferred: LLM summaries.",
+              "title": "Implement Prompt Story Graph", "files": [], "commitShas": [], "signal": "product"}
+        ls.enrich(ep, providers=[])                          # no LLM available
+        self.assertEqual(ep["summarySource"], "deterministic")
+        self.assertIn("LLM summaries", " ".join(ep["storyFacts"]["deferred"]))
+
+    def test_ensure_facts_persists(self):
+        import tempfile
+        from pathlib import Path
+        from openfde.persistence import Persistence
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d))
+            p.upsert_episode({"episodeId": "e", "prompt": "build x", "title": "Build x",
+                              "files": [], "commitShas": [], "signal": "product"})
+            ls.ensure_facts(p, allow_llm=False)              # deterministic only
+            self.assertTrue(p.get_episode("e").get("storyFacts"))
+            self.assertEqual(p.get_episode("e").get("summarySource"), "deterministic")
+
+
+if __name__ == "__main__":
+    unittest.main()
