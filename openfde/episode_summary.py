@@ -206,6 +206,59 @@ def commit_display(episode_title: str, episode_summary: str, commit_summary: str
     return title, summary
 
 
+def repair_episode_tasks(tasks, episodes):
+    """Heal persisted OpenPM episode-commit cards whose stored title is noisy/meta.
+
+    The durable counterpart to the reducer's `SYNC_EPISODE_COMMITS` self-heal: a card that
+    represents an episode commit (``source == "openfde-episode"`` or carrying ``episodeId`` +
+    ``commitSha``) and whose title is bad (``is_bad_title``) is rewritten from its owning
+    episode's cleaned title/summary — so stale text can't be hydrated back into the UI. Clean
+    cards and non-episode tasks are untouched; identity fields (``commitSha``/``shortSha``/
+    ``files``/``episodeId``) are preserved. Idempotent.
+
+    Args:
+        tasks: list[dict] — persisted OpenPM tasks.
+        episodes: list[dict] — episodes (to look up the owning one by id, else by commit sha).
+
+    Returns:
+        (list[dict], bool) — (possibly-repaired tasks, changed?).
+    """
+    if not isinstance(tasks, list):
+        return tasks, False
+    by_id, by_sha = {}, {}
+    for e in (episodes or []):
+        if isinstance(e, dict) and e.get("episodeId"):
+            by_id[e["episodeId"]] = e
+            for sha in (e.get("commitShas") or []):
+                by_sha[sha] = e
+    changed = False
+    out = []
+    for t in tasks:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        is_ep_card = (t.get("source") == "openfde-episode") or (t.get("episodeId") and t.get("commitSha"))
+        if not is_ep_card or not is_bad_title(t.get("title") or ""):
+            out.append(t)
+            continue
+        ep = by_id.get(t.get("episodeId")) or by_sha.get(t.get("commitSha")) or {}
+        dtitle, dsummary = commit_display(ep.get("title"), ep.get("summary"), t.get("title"))
+        nt = dict(t)
+        nt["title"] = dtitle
+        if not nt.get("description") and dsummary:
+            nt["description"] = dsummary
+        if not nt.get("episodeTag") and ep.get("tag"):
+            nt["episodeTag"] = ep["tag"]
+        if not nt.get("promptTitle") and ep.get("title"):
+            nt["promptTitle"] = ep["title"]
+        if not nt.get("sequence") and ep.get("sequence"):
+            nt["sequence"] = ep["sequence"]
+        if nt != t:
+            changed = True
+        out.append(nt)
+    return out, changed
+
+
 def _scope_names(files) -> list:
     """Up to two distinct top-level dir/module scopes from changed paths."""
     names = []
