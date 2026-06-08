@@ -175,6 +175,37 @@ def _distill_title(line: str) -> str:
     return s2 if len(s2) >= 3 else s
 
 
+def commit_display(episode_title: str, episode_summary: str, commit_summary: str) -> tuple:
+    """Clean (title, summary) for an episode's commit card — the OpenPM/evidence display.
+
+    Prefers the already-cleaned **episode** title/summary so a card reads like the prompt
+    concept (``LLM Story Summarizer``), and never the noisy raw commit subject
+    (``openfde: Here's the CC prompt``). Falls back to the de-``openfde:``-ed commit summary
+    only when it's clean; ultimately ``"Landed change"``. The commit SHA + files stay as
+    separate evidence on the card.
+
+    Args:
+        episode_title: str — the owning episode's cleaned title.
+        episode_summary: str — the owning episode's cleaned 1–2 sentence summary.
+        commit_summary: str — the raw commit subject.
+
+    Returns:
+        (str, str) — (displayTitle, displaySummary).
+    """
+    clean = re.sub(r"^openfde:\s*", "", (commit_summary or "").strip()).strip()
+    et = (episode_title or "").strip()
+    if et and not is_bad_title(et):
+        title = et
+    elif clean and not is_bad_title(clean):
+        title = clean
+    else:
+        title = "Landed change"
+    summary = (episode_summary or "").strip()
+    if not summary and clean and not is_bad_title(clean):
+        summary = clean
+    return title, summary
+
+
 def _scope_names(files) -> list:
     """Up to two distinct top-level dir/module scopes from changed paths."""
     names = []
