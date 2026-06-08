@@ -142,14 +142,26 @@ _BAD_TITLE_LEAD = re.compile(
     r"restart the|let'?s\b|i'?d switch\b|acting as)\b", re.I)
 
 
+# Smart quotes → ASCII, so matching is robust to curly apostrophes ("Here's" vs "Here's").
+_SMART_QUOTES = str.maketrans({
+    "‘": "'", "’": "'", "‛": "'", "ʼ": "'", "′": "'",
+    "“": '"', "”": '"', "„": '"', "″": '"',
+})
+
+
+def _normalize_quotes(s: str) -> str:
+    return (s or "").translate(_SMART_QUOTES)
+
+
 def is_bad_title(title: str) -> bool:
     """True when a title is operational/meta and must not become a concept or chip label.
 
     Catches bare acks ("yes"/"ok"), boilerplate ("here's the CC prompt", "read the repo",
     "you are implementing"), the machine directive, shell commands, and file-list titles
-    (``ROADMAP.md`` / ``openfde/server.py``, with or without backticks).
+    (``ROADMAP.md`` / ``openfde/server.py``, with or without backticks). Smart quotes are
+    normalized first so a curly apostrophe ("Here's") is caught the same as a straight one.
     """
-    t = (title or "").strip().strip("`\"' ").strip()
+    t = _normalize_quotes(title or "").strip().strip("`\"' ").strip()
     if len(t) < 2:
         return True
     low = t.lower().strip(" .!?,:")
