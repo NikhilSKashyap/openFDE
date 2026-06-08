@@ -161,8 +161,8 @@ export default function CommandPalette({
       action: () => { setActiveView('timeline'); onClose() },
     },
     {
-      id: 'view-pm', group: 'Technical', label: 'OpenPM (parked · technical)',
-      hint: activeView === 'pm' ? 'active' : 'task board',
+      id: 'view-pm', group: 'View', label: 'OpenPM',
+      hint: activeView === 'pm' ? 'active' : 'work items by prompt',
       icon: <IconPM />,
       action: () => { setActiveView('pm'); onClose() },
     },
