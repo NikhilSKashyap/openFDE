@@ -222,6 +222,138 @@ class TurnBoundaryLandTest(unittest.TestCase):
             self.assertEqual(p.get_episode("episode_tb")["status"], "reviewing")  # left for its own turn
 
 
+# ── Codex passive capture ───────────────────────────────────────────────
+def _cdx_meta(cwd, sid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ts="2026-06-09T00:00:00Z"):
+    return {"type": "session_meta", "timestamp": ts, "payload": {"id": sid, "cwd": cwd}}
+
+
+def _cdx_user(text, ts="2026-06-09T00:00:01Z"):
+    return {"type": "response_item", "timestamp": ts,
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": text}]}}
+
+
+class CodexParseTest(unittest.TestCase):
+    def test_accepts_user_input_text(self):
+        e = _cdx_user("refactor the parser to stream tokens")
+        self.assertTrue(pc.is_codex_human_prompt(e))
+        self.assertEqual(pc.codex_prompt_text(e), "refactor the parser to stream tokens")
+
+    def test_filters_internal_summarizer_marker(self):
+        self.assertFalse(pc.is_codex_human_prompt(
+            _cdx_user("[OpenFDE internal summarizer]\n\nSummarize this prompt: build login")))
+
+    def test_filters_injected_context_blocks(self):
+        # Codex's own AGENTS.md / environment / user-instructions injections are NOT prompts.
+        for inj in ("# AGENTS.md instructions for /Users/x/repo\n<INSTRUCTIONS>…",
+                    "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>",
+                    "<user_instructions>be concise</user_instructions>"):
+            self.assertFalse(pc.is_codex_human_prompt(_cdx_user(inj)), inj[:30])
+
+    def test_filters_non_user_and_empty(self):
+        self.assertFalse(pc.is_codex_human_prompt({"type": "response_item", "payload": {"type": "reasoning"}}))
+        self.assertFalse(pc.is_codex_human_prompt(_cdx_user("   ")))
+        self.assertFalse(pc.is_codex_human_prompt({"type": "event_msg", "payload": {"type": "user_message"}}))
+
+    def test_cwd_from_meta_and_turn_context(self):
+        self.assertEqual(pc._codex_cwd_of(_cdx_meta("/repo")), "/repo")
+        self.assertEqual(pc._codex_cwd_of({"type": "turn_context", "payload": {"cwd": "/repo2"}}), "/repo2")
+        self.assertIsNone(pc._codex_cwd_of(_cdx_user("hi")))                 # a prompt entry has no cwd
+
+    def test_session_id_from_filename(self):
+        self.assertEqual(
+            pc.codex_session_id_from_path(
+                "/x/rollout-2026-05-25T13-26-32-019e60d1-565b-7532-8ad2-94d35615a25f.jsonl"),
+            "019e60d1-565b-7532-8ad2-94d35615a25f")
+
+    def test_record_carries_kind_session_and_stable_key(self):
+        rec = pc._codex_prompt_record(_cdx_user("do x", ts="2026-06-09T00:00:09Z"),
+                                      {"sessionId": "s1", "cwd": "/repo"})
+        self.assertEqual(rec["kind"], "codex")
+        self.assertEqual(rec["sessionId"], "s1")
+        self.assertEqual(rec["cwd"], "/repo")
+        self.assertEqual(rec["key"], "codex:s1:2026-06-09T00:00:09Z")        # stable across restarts
+
+
+class CodexCaptureLoopTest(unittest.TestCase):
+    def _rollout(self, home):
+        d = pc.codex_sessions_root(home) / "2026" / "06" / "09"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "rollout-2026-06-09T00-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+
+    def _write(self, path, entries):
+        with open(path, "w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+
+    def test_forward_capture_new_codex_prompt(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo:
+            root = Path(repo).resolve(); cwd = str(root)
+            tx = self._rollout(home)
+            # Present at startup → baselined to EOF → ignored (capture-forward).
+            self._write(tx, [_cdx_meta(cwd), _cdx_user("OLD prompt before watch", "2026-06-09T00-00-00Z")])
+            p = Persistence(root / ".openfde")
+
+            async def drive():
+                task = asyncio.create_task(
+                    pc.watch_loop(root, p, _NullManager(), interval=0.05, home=home, autoland=False))
+                await asyncio.sleep(0.15)                  # baseline established
+                with open(tx, "a") as fh:
+                    fh.write(json.dumps(_cdx_user("make the button async", "2026-06-09T00-01-00Z")) + "\n")
+                    fh.write(json.dumps(_cdx_user("<environment_context>noise</environment_context>", "x")) + "\n")
+                await asyncio.sleep(0.2)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            asyncio.run(drive())
+            eps = p.load_episodes()
+            self.assertEqual(len(eps), 1)                  # new prompt only (not old, not injected)
+            self.assertEqual(eps[0]["prompt"], "make the button async")
+            self.assertEqual(eps[0]["kind"], "codex")
+            self.assertEqual(eps[0]["source"], "openfde-capture")
+            self.assertTrue((eps[0]["captureKey"] or "").startswith("codex:"))
+
+    def test_codex_prompt_then_dirty_file_attribution(self):
+        import subprocess
+        from openfde import git_timeline as gt
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as repo:
+            root = Path(repo).resolve(); cwd = str(root)
+
+            def g(*a):
+                return subprocess.run(["git", *a], cwd=str(root), capture_output=True, text=True)
+            g("init", "-q"); g("config", "user.email", "t@e.com"); g("config", "user.name", "T")
+            (root / ".gitignore").write_text("\n".join(gt._IGNORE_ENTRIES) + "\n")
+            (root / "seed.py").write_text("x\n"); g("add", "-A")
+            g("-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-q", "-m", "init")
+            tx = self._rollout(home); self._write(tx, [_cdx_meta(cwd)])
+            p = Persistence(root / ".openfde")
+
+            async def drive():
+                task = asyncio.create_task(
+                    pc.watch_loop(root, p, _NullManager(), interval=0.05, home=home, autoland=False))
+                await asyncio.sleep(0.15)
+                with open(tx, "a") as fh:                  # cwd-matched Codex prompt
+                    fh.write(json.dumps(_cdx_user("edit the feature", "2026-06-09T00-02-00Z")) + "\n")
+                await asyncio.sleep(0.15)                  # episode captured (open)
+                (root / "feature.py").write_text("feature\n")   # the edit lands in the work tree
+                await asyncio.sleep(0.3)                   # dirty-set link attaches it
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            asyncio.run(drive())
+            eps = p.load_episodes()
+            self.assertEqual(len(eps), 1)
+            self.assertEqual(eps[0]["kind"], "codex")
+            self.assertEqual(eps[0]["status"], "reviewing")           # dirty-set linked
+            self.assertIn("feature.py", eps[0]["files"])              # attributed via dirty-set
+
+
 class _NullManager:
     async def broadcast(self, msg):
         return None

@@ -99,15 +99,17 @@ key for actual code generation.
 OpenFDE doesn't just run changes — it remembers how the codebase got here.
 
 - **Prompts become episodes.** Council runs, `openfde cc` / `openfde codex`
-  wrappers, and passive Claude Code capture create prompt episodes. When the work
-  completes, OpenFDE commits **only** the files attributable to that episode
-  (never sweeping unrelated dirty changes) and links the commit back to the prompt.
-  A manual **Land** stays available as a fallback when the scope is ambiguous.
-- **Works with external agents too.** Today, OpenFDE can passively capture prompts
-  from your local Claude Code CLI by tailing its transcripts, cwd-agnostically —
-  so the story keeps building even on changes the council didn't run. Codex and
-  other agents can be captured through the OpenFDE wrappers today; passive Codex /
-  Cursor import is future work, not a current claim.
+  wrappers, and **passive Claude Code + Codex capture** create prompt episodes. When the
+  work completes, OpenFDE commits the files attributable to that episode — clustered into
+  one commit per logical change — and links the commits back to the prompt. A manual
+  **Land** stays available as a fallback when the scope is ambiguous.
+- **Passively captures Claude Code and Codex today.** OpenFDE tails both agents' session
+  transcripts as you work — no wrapper — so the story keeps building on changes the council
+  didn't run. Capture is **forward-only** (baselined at startup; it never replays history).
+  Claude Code is cwd-agnostic (its tool calls carry clean file paths); **Codex attribution
+  is dirty-set / quiet-window based** — strongest when Codex runs in the watched repo. Other
+  agents are still watched via file changes, and the wrappers remain. Historical import of
+  old Claude/Codex/Cursor logs is future work.
 - **Story tab — a product memory, not a git log.** Concepts derived from your
   prompts are grouped into what you're **building** (Active), what you **parked**
   (Deferred), and what you **dropped** (Abandoned), each linking back to its

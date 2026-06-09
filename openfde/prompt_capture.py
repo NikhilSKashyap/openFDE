@@ -1,32 +1,38 @@
 """
-openfde/prompt_capture.py — Passive Prompt Capture v1 (Claude Code).
+openfde/prompt_capture.py — Passive Prompt Capture v1 (Claude Code **and** Codex).
 
     Git tells us what landed. OpenFDE should tell us why.
 
-Tails the Claude Code session transcripts for the watched repo and turns each new
-human prompt into a durable OpenFDE **episode** — *no `openfde cc` wrapper needed*.
-You just talk to Claude Code from the repo and the prompt shows up on the OpenArchitect
-rail; edits it made stay in the work tree for OpenFDE to Review and Land.
+Tails the local agent session transcripts for the watched repo and turns each new human
+prompt into a durable OpenFDE **episode** — *no wrapper needed*. You just talk to your
+agent from the repo and the prompt shows up on the OpenArchitect rail; edits it made stay
+in the work tree for OpenFDE to Review and Land.
+
+Two agents are tailed via small **provider adapters** (``_ADAPTERS``); adding an agent is
+adding an adapter, the watch loop is shared:
+  - **Claude Code** — ``~/.claude/projects/<encoded-cwd>/*.jsonl``; a human prompt is a
+    ``{"type":"user","message":{"role":"user",...},"cwd":…,"sessionId":…}`` entry.
+  - **Codex** — ``~/.codex/sessions/**/rollout-*.jsonl`` (+ ``archived_sessions/``); a human
+    prompt is a ``{"type":"response_item","payload":{"type":"message","role":"user",
+    "content":[{"type":"input_text","text":…}]}}`` entry. The session's **cwd / id live in a
+    ``session_meta`` (and ``turn_context``) entry**, carried as per-file context. Codex's own
+    injected blocks (AGENTS.md, ``<environment_context>``, user-instructions) are filtered.
 
 Scope of v1 (honest):
-  - **Claude Code only.** Codex's on-disk session format differs — a follow-up.
-  - **Sessions whose working directory IS the watched repo.** Claude Code stores a
-    transcript dir per cwd (``~/.claude/projects/<encoded-cwd>/``); we read the dir
-    for this repo. A session launched from a *different* cwd (even with this repo
-    added via ``--add-dir``) lands in that other cwd's dir and is not captured here.
-  - **Capture-forward.** We baseline to end-of-file on startup, so we never replay a
-    repo's entire prompt history (that's the future, confidence-tagged *import*).
-  - **Heuristic file attribution.** A prompt's touched files = the work-tree changes
-    that appeared *after* the prompt (baseline diff), attributed to the newest open
-    capture episode. Good enough to review + land; not a guarantee.
-
-Transcript entry shape (Claude Code JSONL): one JSON object per line; a human prompt
-is ``{"type":"user","message":{"role":"user","content": <str|[{type:text}]>},
-"uuid":…,"sessionId":…,"cwd":…,"timestamp":…}``. Tool results, slash-command echoes,
-local-command output, meta, and sidechain entries are skipped.
+  - **Capture-forward.** We baseline every transcript to end-of-file on startup, so we never
+    replay history (that's the future, confidence-tagged *import* — for any agent).
+  - **cwd-matched is the strong path.** A session whose cwd IS the watched repo is captured
+    immediately. Claude Code is also **cwd-agnostic** (its tool_use carries clean file paths,
+    so a session rooted elsewhere is captured when it edits this repo). Codex tool events are
+    shell/``apply_patch`` (no clean ``file_path``), so Codex attribution is **dirty-set based**:
+    cwd-matched capture + the work-tree baseline diff + the quiet-window land. Honest, not
+    perfect — a Codex session rooted elsewhere isn't auto-captured in v1.
+  - **Heuristic file attribution.** A prompt's touched files = the work-tree changes that
+    appeared *after* the prompt (baseline diff), attributed to the newest open capture episode.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -63,6 +69,18 @@ _INTERNAL_MARKER = "[OpenFDE internal summarizer]"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _same_dir(a, b) -> bool:
+    """True when two paths point at the same directory — resilient to symlinks (e.g. macOS
+    ``/tmp`` → ``/private/tmp``) and trailing slashes, so a session's cwd matches the watched
+    repo even when one side is unresolved."""
+    if not a or not b:
+        return False
+    try:
+        return os.path.realpath(str(a)) == os.path.realpath(str(b))
+    except OSError:
+        return str(a) == str(b)
 
 
 def encode_repo_dir(repo_root) -> str:
@@ -182,6 +200,7 @@ def _prompt_record(entry: dict) -> dict:
         "uuid": entry.get("uuid"),
         "timestamp": entry.get("timestamp"),
         "cwd": entry.get("cwd"),
+        "kind": "claude-code",
     }
 
 
@@ -192,20 +211,176 @@ def read_new_prompts(path: Path, start_offset: int):
     return [_prompt_record(e) for e in entries if is_human_prompt(e)], off
 
 
-def make_capture_episode(repo_root, prompt: dict, files=None, status="open") -> dict:
-    """Build a capture episode (Prompt Story Rail shape) from a parsed prompt."""
+def make_capture_episode(repo_root, prompt: dict, files=None, status="open",
+                         kind="claude-code") -> dict:
+    """Build a capture episode (Prompt Story Rail shape) from a parsed prompt.
+
+    ``kind`` records which agent produced it (``claude-code`` / ``codex``).
+    """
     now = _now()
     files = sorted(files or [])
     return {
         "episodeId": "episode_" + secrets.token_hex(6),
         "createdAt": prompt.get("timestamp") or now, "updatedAt": now,
-        "prompt": prompt.get("text", ""), "kind": "claude-code",
+        "prompt": prompt.get("text", ""), "kind": kind,
         "status": ("reviewing" if files else status),
         "runIds": [], "eventIds": [], "projectEntryIds": [], "commitShas": [],
         "files": files, "summary": "", "source": "openfde-capture",
         "initialHead": _head(repo_root), "captureKey": prompt.get("key"),
         "sessionId": prompt.get("sessionId"), "sessionCwd": prompt.get("cwd"),
     }
+
+
+# ── Codex adapter ───────────────────────────────────────────────────────
+# Codex stores one JSONL "rollout" per session under ~/.codex/sessions/** (finished ones
+# move to ~/.codex/archived_sessions/). A human prompt is a ``response_item`` message with
+# role "user" + ``input_text`` content; the session's cwd/id live in a ``session_meta`` (and
+# ``turn_context``) entry, carried as per-file context. v1 attributes edits via the dirty-set
+# (Codex tool events are shell/apply_patch, with no clean ``file_path`` to parse).
+_CODEX_SKIP_STARTS = (
+    "# agents.md", "<environment_context>", "<user_instructions>",
+    "<persistent_instructions>", "<instructions>",
+)
+_CODEX_UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", re.I)
+
+
+def codex_sessions_root(home=None) -> Path:
+    """The directory holding live Codex session rollouts (``~/.codex/sessions``)."""
+    base = Path(home) if home else Path.home()
+    return base / ".codex" / "sessions"
+
+
+def codex_transcripts(home=None) -> list:
+    """Codex rollout JSONLs safe to tail — live sessions (recursive) + finished/archived."""
+    base = Path(home) if home else Path.home()
+    out = []
+    live = base / ".codex" / "sessions"
+    if live.exists():
+        out.extend(live.rglob("rollout-*.jsonl"))
+    archived = base / ".codex" / "archived_sessions"
+    if archived.exists():
+        out.extend(archived.glob("rollout-*.jsonl"))
+    return sorted(out)
+
+
+def codex_session_id_from_path(path) -> str:
+    """The session UUID embedded in a rollout filename (else the file stem)."""
+    m = _CODEX_UUID.search(str(path))
+    return m.group(1) if m else Path(path).stem
+
+
+def codex_prompt_text(entry: dict) -> str:
+    """Join the ``input_text`` blocks of a Codex ``response_item`` user message."""
+    p = entry.get("payload") if isinstance(entry, dict) else None
+    c = p.get("content") if isinstance(p, dict) else None
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(b.get("text", "") for b in c
+                         if isinstance(b, dict) and b.get("type") in ("input_text", "text"))
+    return ""
+
+
+def is_codex_human_prompt(entry: dict) -> bool:
+    """True when a Codex entry is a real human prompt — a user ``response_item`` message that
+    is NOT Codex's injected context (AGENTS.md / ``<environment_context>`` / user-instructions),
+    OpenFDE's own machine prompts, or empty."""
+    if not isinstance(entry, dict) or entry.get("type") != "response_item":
+        return False
+    p = entry.get("payload") or {}
+    if p.get("type") != "message" or p.get("role") != "user":
+        return False
+    txt = codex_prompt_text(entry).strip()
+    if not txt:
+        return False
+    if _INTERNAL_MARKER in txt or "OpenFDE owns version control" in txt:
+        return False
+    if txt.lstrip().lower().startswith(_CODEX_SKIP_STARTS):
+        return False
+    return True
+
+
+def _sha8(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _codex_cwd_of(entry: dict):
+    """The cwd carried by a Codex ``session_meta``/``turn_context`` entry (else None)."""
+    if isinstance(entry, dict) and entry.get("type") in ("session_meta", "turn_context"):
+        cwd = (entry.get("payload") or {}).get("cwd")
+        return str(Path(cwd)) if cwd else None
+    return None
+
+
+def _codex_init_ctx(path) -> dict:
+    """Per-file context for a Codex rollout: session id (from the filename) + cwd, pre-read
+    from the leading ``session_meta`` so a session already running at startup — whose meta is
+    before our baseline offset — still matches its repo."""
+    fctx = {"sessionId": codex_session_id_from_path(path), "cwd": None}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for _ in range(8):                  # session_meta is the first line
+                ln = fh.readline()
+                if not ln:
+                    break
+                try:
+                    o = json.loads(ln)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                cwd = _codex_cwd_of(o)
+                if cwd:
+                    fctx["cwd"] = cwd
+                    break
+    except OSError:
+        pass
+    return fctx
+
+
+def _codex_note(entry: dict, fctx: dict) -> None:
+    """Track a Codex session's cwd as later ``session_meta``/``turn_context`` entries arrive."""
+    cwd = _codex_cwd_of(entry)
+    if cwd:
+        fctx["cwd"] = cwd
+
+
+def _codex_prompt_record(entry: dict, fctx: dict) -> dict:
+    txt = codex_prompt_text(entry).strip()
+    ts = entry.get("timestamp")
+    sid = fctx.get("sessionId")
+    return {
+        "key": f"codex:{sid}:{ts or _sha8(txt)}", "text": txt,
+        "sessionId": sid, "uuid": ts, "timestamp": ts, "cwd": fctx.get("cwd"),
+        "kind": "codex",
+    }
+
+
+# ── Provider adapters ───────────────────────────────────────────────────
+# The watch loop tails every adapter's transcripts at once, normalizing entries to the shared
+# record shape. Adding an agent = adding an adapter (no loop changes).
+def _claude_transcripts(home=None) -> list:
+    proot = claude_projects_root(home)
+    return sorted(proot.glob("*/*.jsonl")) if proot.exists() else []
+
+
+_CLAUDE_ADAPTER = {
+    "kind": "claude-code",
+    "transcripts": _claude_transcripts,
+    "init_ctx": lambda path: {},
+    "note": lambda entry, fctx: None,
+    "is_prompt": is_human_prompt,
+    "record": lambda entry, fctx: _prompt_record(entry),
+    "edits": edit_files_under,
+}
+_CODEX_ADAPTER = {
+    "kind": "codex",
+    "transcripts": codex_transcripts,
+    "init_ctx": _codex_init_ctx,
+    "note": _codex_note,
+    "is_prompt": is_codex_human_prompt,
+    "record": _codex_prompt_record,
+    "edits": lambda entry, root: [],          # v1: dirty-set attribution, no brittle tool parse
+}
+_ADAPTERS = [_CLAUDE_ADAPTER, _CODEX_ADAPTER]
 
 
 def _git(args, root, timeout=_GIT_TIMEOUT):
@@ -241,14 +416,13 @@ async def _safe_broadcast(manager, msg):
 
 async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTERVAL,
                      home=None, on_episode=None, quiet_window=90.0, autoland=True) -> None:
-    """Poll **all** Claude Code transcripts and capture prompts relevant to this repo.
+    """Poll **all** Claude Code + Codex transcripts and capture prompts relevant to this repo.
 
-    A prompt belongs to the watched repo when EITHER the session's cwd is the repo
-    (captured immediately) OR the session edits files under the repo (captured when
-    the first such edit lands) — so capture is **cwd-agnostic**: a session rooted
-    elsewhere but editing this repo (e.g. opened on another folder with this one added)
-    is still captured. Capture-forward (baselined at startup); deduped by transcript
-    uuid; broadcasts ``episode_updated`` for live rail updates.
+    A prompt belongs to the watched repo when EITHER the session's cwd is the repo (captured
+    immediately — both agents) OR, for **Claude Code**, the session edits files under the repo
+    (cwd-agnostic, captured when the first such edit lands; Codex tool events have no clean file
+    path, so Codex relies on cwd-match + the dirty-set). Capture-forward (every transcript
+    baselined at startup); deduped by transcript key; broadcasts ``episode_updated`` live.
 
     Args:
         repo_root: Path | str — watched repository root (resolved).
@@ -260,35 +434,45 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
     """
     root = Path(repo_root)
     repo_str = str(root)
-    proot = claude_projects_root(home)
+    file_ctx = {}      # transcript path → per-file context (Codex carries cwd/sessionId here)
 
-    def _transcripts():
-        return sorted(proot.glob("*/*.jsonl")) if proot.exists() else []
+    def _sources():
+        return [(path, ad) for ad in _ADAPTERS for path in ad["transcripts"](home)]
 
-    # Capture-forward: baseline every existing transcript to its end.
+    def _ctx(path, ad):
+        key = str(path)
+        fc = file_ctx.get(key)
+        if fc is None:
+            fc = ad["init_ctx"](path)
+            file_ctx[key] = fc
+        return fc
+
+    # Capture-forward: baseline every existing transcript (Claude + Codex) to its end.
     offsets = {}
-    for f in _transcripts():
+    for path, ad in _sources():
+        _ctx(path, ad)
         try:
-            offsets[str(f)] = f.stat().st_size
+            offsets[str(path)] = path.stat().st_size
         except OSError:
             pass
     known = {e.get("captureKey") for e in persistence.load_episodes() if e.get("captureKey")}
     pending = {}       # sessionId → last human prompt not yet captured for this repo
     baselines = {}     # episodeId → dirty set at capture time (in-memory)
     last_change = {}   # episodeId → monotonic time of its last file-set change (quiet timer)
-    logger.info("Prompt capture watching %s (%d existing transcript[s], repo=%s, autoland=%s)",
-                proot, len(offsets), repo_str, autoland)
+    logger.info("Prompt capture watching Claude Code + Codex transcripts "
+                "(%d baselined, repo=%s, autoland=%s)", len(offsets), repo_str, autoland)
 
     async def _capture(rec, files):
         if not rec.get("key") or rec["key"] in known:
             return
         known.add(rec["key"])
         pending.pop(rec.get("sessionId"), None)
-        ep = make_capture_episode(root, rec, files=files)
+        ep = make_capture_episode(root, rec, files=files, kind=rec.get("kind") or "claude-code")
         persistence.upsert_episode(ep)
         baselines[ep["episodeId"]] = _dirty_set(root)
         last_change[ep["episodeId"]] = time.time()
-        logger.info("Captured prompt episode %s (cwd=%s)", ep["episodeId"], rec.get("cwd"))
+        logger.info("Captured %s prompt episode %s (cwd=%s)",
+                    rec.get("kind"), ep["episodeId"], rec.get("cwd"))
         await _safe_broadcast(manager, {"type": "episode_updated", "episode": ep})
         if on_episode:
             try:
@@ -301,31 +485,33 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
         try:
             await asyncio.sleep(interval)
             tick += 1
-            for f in _transcripts():
-                key = str(f)
+            for path, ad in _sources():
+                key = str(path)
+                fctx = _ctx(path, ad)
                 start = offsets.get(key, 0)
                 try:
-                    size = f.stat().st_size
+                    size = path.stat().st_size
                 except OSError:
                     continue
                 if size <= start:
                     offsets[key] = size           # unchanged / new-baseline / rotated
                     continue
-                entries, new_off = read_new_lines(f, start)
+                entries, new_off = read_new_lines(path, start)
                 offsets[key] = new_off
                 for e in entries:
-                    if is_human_prompt(e):
-                        rec = _prompt_record(e)
+                    ad["note"](e, fctx)           # track session cwd/id (Codex)
+                    if ad["is_prompt"](e):
+                        rec = ad["record"](e, fctx)
                         # Turn boundary: this session's previous captured prompt is complete —
                         # land its full (clustered) edit set before opening the new one.
                         await _land_active_capture(root, persistence, manager, last_change,
                                                    session_id=rec.get("sessionId"))
-                        if rec.get("cwd") == repo_str:
+                        if _same_dir(rec.get("cwd"), repo_str):
                             await _capture(rec, files=[])      # cwd-matched → now
                         else:
-                            pending[rec.get("sessionId")] = rec  # wait for a repo edit
+                            pending[rec.get("sessionId")] = rec  # wait for a repo edit (Claude)
                         continue
-                    edited = edit_files_under(e, root)         # edits under the repo?
+                    edited = ad["edits"](e, root)              # edits under the repo? (Claude)
                     if edited:
                         pend = pending.get(e.get("sessionId"))
                         if pend:
