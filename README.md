@@ -6,6 +6,10 @@ in plain English, and run an Agent Council that plans, implements, reviews the
 actual diff, commits, and records the work — inside the permission boundaries you
 set.
 
+It also **remembers**. Every prompt — whether you run the council or drive another
+agent — is captured as an *episode*, committed with its own attributed scope, and
+woven into a replayable **Story** of how the codebase came to be.
+
 ## Quick Start
 
 ```bash
@@ -39,7 +43,11 @@ http://127.0.0.1:7420
 - **Streams the agent live**: each node glows as the council reads and writes it
   (active → next → queued → done / failed), so you watch the work move through the
   canvas instead of staring at a spinner. Stop a run mid-flight at any time.
-- Records the story in Timeline and Ledger; commits successful changes locally.
+- **Watches any edit land** — yours, the council's, or another agent's — by glowing
+  the touched nodes, then surfaces **what changed** (files, affected concepts, diff)
+  once the work settles.
+- **Remembers the path**: every prompt becomes an episode, auto-committed with an
+  attributed scope and replayable as a **Story** and an **OpenPM** board (below).
 - Respects scope: **dotted = agent-editable**, **solid = locked** (protected files
   force an approval gate before anything touches them).
 
