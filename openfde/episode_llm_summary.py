@@ -333,3 +333,136 @@ def ensure_facts(persistence, *, allow_llm: bool = False, providers=None, invoke
     if changed_any:
         persistence._write_json(persistence.episodes_path, eps)
     return eps
+
+
+# ── Change clustering (multi-commit Auto-Land) ──────────────────────────────
+# Group an episode's changed files into 1–N LOGICAL commits — "prompt → episode →
+# logical changes → one commit each → one OpenPM task each". Local LLM first, with a
+# deterministic by-scope fallback that always covers every file exactly once.
+_MAX_CLUSTERS = 8
+
+_CLUSTER_SYSTEM = (
+    "You are OpenFDE's change clusterer. Given a captured coding prompt and the list of files it "
+    "changed, group those files into 1-N LOGICAL changes — each a coherent unit that should be ONE "
+    "git commit (a feature and its tests, a fix, a refactor). A logical change may span directories. "
+    "Every listed file must appear in exactly one group.\n\n"
+    "Output STRICT JSON ONLY — one object, no prose, no markdown fences:\n"
+    '{"commits":[{"title":"3-6 word Title Case concept","message":"imperative subject under 70 chars",'
+    '"files":["repo/rel/path", ...]}, ...]}\n\n'
+    "Rules:\n"
+    "- Group by INTENT, not by folder. Keep tightly-coupled files together (an impl + its test).\n"
+    "- Prefer FEWER, meaningful commits; never one-per-file unless the files are truly unrelated.\n"
+    "- title: 3-6 words, Title Case, a product concept (never a filename or 'misc').\n"
+    "- message: conventional imperative subject, no trailing period, under 70 chars.\n"
+    "- files: repo-relative, ONLY from the provided list, each file in exactly one commit.\n"
+    "Return ONLY the JSON object."
+)
+
+
+def _build_cluster_input(episode: dict, files: list, diff_stat: str = "") -> str:
+    parts = [
+        "PROMPT:\n" + (episode.get("prompt") or "")[:1500],
+        "CHANGED_FILES:\n" + "\n".join("- " + f for f in files[:60]),
+    ]
+    if diff_stat:
+        parts.append("DIFFSTAT:\n" + diff_stat[:1500])
+    return "\n\n".join(parts)
+
+
+def _commit_subject(message, title: str) -> str:
+    """A clean ``openfde: <subject>`` commit subject from a cluster message (falling back to its
+    title when the message is missing/noisy)."""
+    from openfde.episode_summary import is_bad_title
+    msg = _clean_str(message)
+    if not msg or is_bad_title(msg):
+        msg = title
+    msg = re.sub(r"^openfde:\s*", "", msg, flags=re.I).strip() or "change"
+    return ("openfde: " + msg)[:78]
+
+
+def _validate_clusters(obj, files: list):
+    """Validate an LLM cluster object against the scoped file set: every file ends up in exactly
+    one commit (leftovers → a final 'Misc Changes' commit); hallucinated/duplicate files are
+    dropped. Returns the cluster list, or None to signal the deterministic fallback."""
+    if not isinstance(obj, dict):
+        return None
+    commits = obj.get("commits")
+    if not isinstance(commits, list) or not commits:
+        return None
+    from openfde.episode_summary import is_bad_title
+    fileset, seen, out = set(files), set(), []
+    for c in commits:
+        if not isinstance(c, dict):
+            continue
+        cf = [f for f in (c.get("files") or [])
+              if isinstance(f, str) and f in fileset and f not in seen]
+        if not cf:
+            continue
+        seen.update(cf)
+        title = _clean_str(c.get("title"))
+        if not title or is_bad_title(title):
+            title = "Change"
+        out.append({"title": title[:48], "message": _commit_subject(c.get("message"), title),
+                    "files": sorted(cf)})
+    if not out:
+        return None
+    leftover = sorted(fileset - seen)
+    if leftover:
+        out.append({"title": "Misc Changes", "message": "openfde: misc changes", "files": leftover})
+    return out[:_MAX_CLUSTERS]
+
+
+def _deterministic_clusters(episode: dict, files: list) -> list:
+    """Fallback grouping: one commit per top-level scope (``openfde`` / ``frontend`` / ``tests`` …),
+    titled from the episode. Deterministic, no model, always covers every file."""
+    from openfde.episode_summary import is_bad_title
+    base = (episode.get("title") or "").strip()
+    if not base or is_bad_title(base):
+        base = "Update"
+    groups: dict = {}
+    for f in files:
+        seg = f.split("/")
+        groups.setdefault(seg[0] if len(seg) > 1 else ".", []).append(f)
+    multi = len(groups) > 1
+    out = []
+    for scope in sorted(groups):
+        label = scope if scope != "." else "root"
+        title = (f"{base} · {label}" if multi else base)[:48]
+        msg = (f"openfde: {base} ({label})" if multi else f"openfde: {base}")[:78]
+        out.append({"title": title, "message": msg, "files": sorted(groups[scope])})
+    return out[:_MAX_CLUSTERS]
+
+
+def cluster_changes(episode: dict, files, *, invoke=None, providers=None, timeout: int = 30,
+                    diff_stat: str = "") -> list:
+    """Group an episode's changed ``files`` into logical commits: ``[{title, message, files}]``.
+
+    Local LLM first (best-effort, strict JSON via the summarizer machinery), deterministic
+    by-scope fallback otherwise. Every input file appears in exactly one returned commit (capped
+    at ``_MAX_CLUSTERS``). Drives multi-commit Auto-Land — one commit (and one OpenPM task) per
+    logical change. ``providers=[]`` forces the deterministic path (the fast, no-subprocess mode
+    callers use when they can't offload the LLM).
+    """
+    files = [f for f in (files or []) if f]
+    if not files:
+        return []
+    if len(files) == 1:
+        from openfde.episode_summary import is_bad_title
+        t = (episode.get("title") or "").strip()
+        if not t or is_bad_title(t):
+            t = "Update"
+        return [{"title": t[:48], "message": _commit_subject(t, t), "files": list(files)}]
+    provs = providers if providers is not None else available_providers()
+    if provs:
+        user = INTERNAL_MARKER + "\n\n" + _build_cluster_input(episode, files, diff_stat)
+        inv = invoke or _default_invoke
+        for prov in provs:
+            try:
+                text = inv(prov, _CLUSTER_SYSTEM, user, timeout)
+            except Exception:  # noqa: BLE001 — a bad provider must not raise
+                logger.debug("clusterer provider %s raised", prov, exc_info=True)
+                text = ""
+            clusters = _validate_clusters(parse_summary_json(text), files)
+            if clusters:
+                return clusters
+    return _deterministic_clusters(episode, files)
