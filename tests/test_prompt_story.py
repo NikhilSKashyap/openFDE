@@ -107,6 +107,24 @@ class PromptStoryTest(unittest.TestCase):
         self.assertIn("Real Concept", titles)
         self.assertNotIn("Curl Thing", titles)
 
+    def test_story_facts_noisy_concepts_are_filtered(self):
+        # Existing persisted episodes can already contain local-LLM noise. The graph
+        # boundary should self-heal those without rewriting episodes.json.
+        g = build_prompt_graph([{
+            **_ep("e1", 1, "GitHub Issue Intents"),
+            "storyFacts": {
+                "concepts": ["GitHub issue intent source", "Store"],
+                "deferred": ["/ `next slice` / `next up`", "Full OAuth support"],
+                "abandoned": [],
+                "operational": False,
+            },
+        }])
+        titles = [c["title"] for c in g["concepts"]]
+        self.assertIn("GitHub issue intent source", titles)
+        self.assertIn("Full OAuth support", titles)
+        self.assertNotIn("Store", titles)
+        self.assertNotIn("/ `next slice` / `next up`", titles)
+
     def test_operational_episodes_excluded_from_concepts(self):
         # A shell/file-list chatter episode (signal=operational) must NOT become a concept.
         g = build_prompt_graph([
