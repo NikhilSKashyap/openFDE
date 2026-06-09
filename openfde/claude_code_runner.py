@@ -46,8 +46,18 @@ _DEFAULT_TIMEOUT = 600
 _DEFAULT_BUDGET_USD = 5.0
 _GIT_TIMEOUT = 30
 # Whitelisted to file work — Claude Code cannot run shell/network in this role.
+# (Bash is disallowed, so the agent physically cannot run git; the directive
+# below is belt-and-suspenders + makes the contract explicit in the transcript.)
 _ALLOWED_TOOLS = ["Read", "Edit", "Write", "MultiEdit", "Glob", "Grep"]
 _DISALLOWED_TOOLS = ["Bash", "WebFetch", "WebSearch"]
+
+# Prepended to every Senior Dev prompt: OpenFDE owns commits, the agent only edits.
+_NO_COMMIT_DIRECTIVE = (
+    "IMPORTANT — OpenFDE owns version control. You only EDIT files. Do NOT run "
+    "`git add`, `git commit`, `git push`, or stage/commit anything. Leave all "
+    "changes in the working tree exactly as edited; OpenFDE reviews them and lands "
+    "the commit. (Shell/git access is disabled in this role regardless.)\n\n"
+)
 
 
 def _norm(p: str) -> str:
@@ -374,7 +384,7 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
     out_fmt = (["--output-format", "stream-json", "--verbose"] if stream
                else ["--output-format", "json"])
     cmd = [
-        claude_bin, "-p", prompt,
+        claude_bin, "-p", _NO_COMMIT_DIRECTIVE + prompt,
         *out_fmt,
         "--permission-mode", "acceptEdits",
         "--max-budget-usd", str(max_budget_usd),
@@ -470,6 +480,67 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
         "touched": sorted({*writes, *(r["path"] for r in rejected)}),
         "costUsd": cost,
     }
+
+
+def run_claude_code_cli(*, repo_root, prompt, model=None, timeout=_DEFAULT_TIMEOUT,
+                        max_budget_usd=_DEFAULT_BUDGET_USD, claude_bin=None) -> dict:
+    """Run Claude Code **repo-wide** as an OpenFDE prompt-capture wrapper (`openfde cc`).
+
+    Unlike :func:`run_claude_code` (council Senior Dev, scoped to canvas-selected
+    editable files), this runs across the whole repo: the agent EDITS files, and the
+    no-git directive + the Bash-disallowed tool set keep it from committing. Touched
+    files are derived from the git dirty-set diff (before vs after), so OpenFDE can
+    review and land them. Never commits.
+
+    Args:
+        repo_root: Path | str — repository root (cwd + edit boundary).
+        prompt: str — the user's prompt (the no-commit directive is prepended).
+        model: str | None — model alias/id (default 'sonnet').
+        timeout: int — wall-clock seconds.
+        max_budget_usd: float — spend cap (no-op on subscription auth).
+        claude_bin: str | None — explicit binary (default: search PATH).
+
+    Returns:
+        dict — {ok: bool, touched: [str], error: str|None, summary: str, costUsd: float}.
+    """
+    root = Path(repo_root)
+    claude_bin = claude_bin or shutil.which("claude")
+    if not claude_bin:
+        return {"ok": False, "touched": [], "summary": "", "costUsd": 0.0,
+                "error": "Claude Code CLI not found on PATH. Install Claude Code."}
+
+    pre = _dirty_set(root)
+    pre_hashes = {p: _hash(root, p) for p in pre}
+
+    cmd = [
+        claude_bin, "-p", _NO_COMMIT_DIRECTIVE + (prompt or ""),
+        "--output-format", "json",
+        "--permission-mode", "acceptEdits",
+        "--max-budget-usd", str(max_budget_usd),
+        "--allowedTools", ",".join(_ALLOWED_TOOLS),
+        "--disallowedTools", ",".join(_DISALLOWED_TOOLS),
+        "--model", (model or "sonnet"),
+    ]
+    error, summary_text, cost = None, "", None
+    try:
+        proc = subprocess.run(cmd, cwd=str(root), shell=False, capture_output=True,
+                              text=True, timeout=timeout, env=_child_env())
+        cli = _parse_cli_json(proc.stdout)
+        summary_text = (cli.get("result") or "").strip() if isinstance(cli, dict) else ""
+        cost = cli.get("total_cost_usd") if isinstance(cli, dict) else None
+        if proc.returncode != 0 and not summary_text:
+            error = f"claude exited {proc.returncode}: {(proc.stderr or '').strip()[:300]}"
+    except subprocess.TimeoutExpired:
+        error = f"Claude Code timed out after {timeout}s."
+        logger.error("openfde cc: timed out (%ss)", timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = f"Claude Code failed to launch: {exc}"
+        logger.error("openfde cc: launch failed: %s", exc)
+
+    post = _dirty_set(root)
+    touched = sorted(p for p in post if p not in pre or _hash(root, p) != pre_hashes.get(p))
+    return {"ok": error is None, "touched": touched, "summary": summary_text,
+            "costUsd": cost if isinstance(cost, (int, float)) else 0.0, "error": error}
 
 
 def _cost_note(cost) -> str:

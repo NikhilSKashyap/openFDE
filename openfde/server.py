@@ -71,9 +71,12 @@ from openfde.council import run_council
 from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
 from openfde.story import build_story
+from openfde.prompt_story import build_prompt_graph
+from openfde.episode_summary import commit_display, repair_episode_tasks
+from openfde import episode_llm_summary
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
-from openfde.git_timeline import changed_paths, ensure_baseline, git_commit, git_diff, git_status, git_timeline, worktree_diff
+from openfde.git_timeline import changed_paths, commit_files, ensure_baseline, git_commit, git_diff, git_status, git_timeline, worktree_diff, worktree_impact
 from openfde.report import generate_report
 from openfde.spec import compile_spec
 from openfde.workflow_result import commit_message, source_files, tests_summary, validate_result
@@ -258,6 +261,41 @@ def _write_plan_md(persistence: Persistence, repo_root: Path) -> None:
 #  Server entry point                                                  #
 # ------------------------------------------------------------------ #
 
+async def _summarizer_loop(persistence, manager) -> None:
+    """Best-effort LLM story summarizer — upgrades ONE eligible episode per cycle.
+
+    Runs entirely off the request path: every ~25s it picks the newest episode still on a
+    deterministic summary and shells out (in a thread) to the local Codex/Claude CLI to
+    rewrite its title/summary/storyFacts. Cached per fingerprint + attempted at most once,
+    so it converges and never loops on a failing call. No-op when no local CLI is available.
+    """
+    providers = episode_llm_summary.available_providers()
+    if not providers:
+        logger.info("LLM story summarizer: no local CLI provider — deterministic summaries only.")
+        return
+    logger.info("LLM story summarizer active (providers: %s)", ", ".join(providers))
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            await asyncio.sleep(25)
+            target = next((e for e in persistence.load_episodes() if episode_llm_summary.wants_llm(e)), None)
+            if not target:
+                continue
+            tid = target["episodeId"]
+            before = (target.get("summarySource"), target.get("title"))
+            updated = await loop.run_in_executor(
+                None,
+                lambda: episode_llm_summary.ensure_facts(persistence, allow_llm=True, providers=providers, limit=1),
+            )
+            t = next((e for e in updated if e.get("episodeId") == tid), None)
+            if t and (t.get("summarySource"), t.get("title")) != before:
+                await manager.broadcast({"type": "episode_updated", "episode": t})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a bad tick must never kill the server
+            logger.debug("summarizer tick failed", exc_info=True)
+
+
 async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> None:
     """Start the OpenFDE server for the given repository path.
 
@@ -394,15 +432,22 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # ================================================================== #
 
     async def get_tasks(request: web.Request) -> web.Response:
-        """Return the persisted OpenPM task list.
+        """Return the persisted OpenPM task list, healing stale episode-commit cards.
 
-        Args:
-            request: web.Request
+        Older OpenPM cards may have captured the raw commit subject ("Here's the CC prompt")
+        as their title. We repair those **server-side** from the owning (cleaned) episode and
+        persist the fix — so it's durable and immune to frontend hydration order (the reducer
+        self-heal alone loses the race against `HYDRATE_TASKS` on reload).
 
         Returns:
-            web.Response — JSON array of task objects
+            web.Response — JSON array of task objects (repaired in place when needed).
         """
-        return web.json_response(persistence.load_tasks())
+        episodes = episode_llm_summary.ensure_facts(persistence)   # ensure clean episode titles first
+        tasks = persistence.load_tasks()
+        repaired, changed = repair_episode_tasks(tasks, episodes)
+        if changed:
+            persistence.save_tasks(repaired)
+        return web.json_response(repaired)
 
     async def put_tasks(request: web.Request) -> web.Response:
         """Persist the task list and regenerate PLAN.md.
@@ -1063,6 +1108,353 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=500)
         return web.json_response({"ok": True, "summary": semantic_graph_mod.graph_summary(graph)})
 
+    async def post_review_reassimilate(request: web.Request) -> web.Response:
+        """Incremental Re-assimilation v1 (Land · Watch · Review).
+
+        After external edits settle (Watch Any Agent), refresh OpenFDE's *understanding*
+        so Review operates on a fresh-enough architecture: re-run the ArchGraph analyzer
+        and rebuild + persist the semantic graph (concepts/tethers), so newly created
+        files/functions/modules become part of the read model and the Review Delta.
+
+        **v1 is honest about being a full recompute** (`mode: "full-recompute"`): it is
+        *triggered* by the changed files but internally re-analyzes the whole repo with
+        the existing analyzers — true partial parsing is a later optimization. It never
+        mutates saved canvas state, never stages git, and never regenerates the canvas
+        from the ArchGraph (no `/api/state/from-archgraph`). On failure it returns a
+        structured warning and the caller keeps using its current graph.
+
+        Args:
+            request: web.Request — body {files?: [repo-rel paths], reason?: str}.
+
+        Returns:
+            web.Response — {ok, files, reason, mode, archGraph, semanticSummary, warnings}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        files = [f for f in (body.get("files") or []) if isinstance(f, str)]
+        reason = body.get("reason") or "manual"
+        loop = asyncio.get_event_loop()
+        warnings: list = []
+        try:
+            graph = await loop.run_in_executor(None, lambda: analyze_repo(path))
+        except Exception as exc:  # noqa: BLE001 — keep the caller's current graph usable
+            logger.error("reassimilate: ArchGraph analysis failed: %s", exc)
+            return web.json_response(
+                {"ok": False, "files": files, "reason": reason, "mode": "full-recompute",
+                 "archGraph": None, "semanticSummary": None,
+                 "warnings": [f"archgraph analysis failed: {str(exc)[:160]}"]},
+            )
+        warnings.extend(graph.get("warnings") or [])
+        # Rebuild + persist the semantic graph so the worktree impact's concept delta
+        # picks up new tethers. A failure here is non-fatal — the ArchGraph refresh
+        # alone still improves Review; we just flag it.
+        semantic_summary = None
+        try:
+            sem = await loop.run_in_executor(None, lambda: semantic_graph_mod.build_graph(path))
+            await loop.run_in_executor(None, lambda: semantic_graph_mod.write_graph(path, sem))
+            semantic_summary = semantic_graph_mod.graph_summary(sem)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("reassimilate: semantic graph rebuild failed: %s", exc)
+            warnings.append(f"semantic graph rebuild failed: {str(exc)[:160]}")
+        return web.json_response({
+            "ok": True, "files": files, "reason": reason, "mode": "full-recompute",
+            "archGraph": graph, "semanticSummary": semantic_summary, "warnings": warnings,
+        })
+
+    # ================================================================== #
+    #  REST — /api/review/episodes  (Prompt Story Rail — OpenFDE commits)#
+    # ================================================================== #
+    #  Coding agents edit; OpenFDE watches, reviews, groups, commits, and
+    #  narrates. A prompt "episode" is the durable unit: user intent +
+    #  the runs/events it spawned + the commit(s) OpenFDE lands for it.
+
+    def _scope_hint(files: list) -> str:
+        """A concise scope label from changed paths (e.g. 'openfde', 'frontend').
+
+        Deterministic — used to give a commit subject a where-hint when the prompt
+        text is empty, and to head the encapsulating commit body. Prefers the
+        common module directory; falls back to the top-level dirs touched.
+        """
+        paths = [p for p in (files or []) if p]
+        if not paths:
+            return ""
+        # If everything shares a 2-segment prefix (a module), name it precisely.
+        segs = [p.split("/") for p in paths]
+        if len(paths) > 1 and all(len(s) >= 2 for s in segs):
+            two = {"/".join(s[:2]) for s in segs}
+            if len(two) == 1:
+                return next(iter(two))
+        tops = []
+        for s in segs:
+            t = s[0] if len(s) > 1 else s[0]
+            if t not in tops:
+                tops.append(t)
+        return ", ".join(tops[:2]) + ("…" if len(tops) > 2 else "")
+
+    def _episode_subject(ep: dict, imp: dict = None) -> str:
+        """A commit subject that encapsulates a prompt episode's work.
+
+        Deterministic (no LLM): ``openfde: <prompt first line>``. When the episode
+        carries no prompt text, fall back to a scope hint derived from the changed
+        files (``openfde: update <scope>``). Kept under a normal git subject length.
+        """
+        p = (ep.get("prompt") or "").strip().splitlines()[0] if (ep.get("prompt") or "").strip() else ""
+        if not p:
+            scope = _scope_hint((imp or {}).get("files") and [f.get("path") for f in imp["files"]] or [])
+            if scope:
+                p = f"update {scope}"
+            else:
+                p = "Manual changes" if ep.get("kind") == "manual" else "OpenFDE change"
+        return f"openfde: {p}"[:78]
+
+    def _land_body(ep: dict, imp: dict) -> str:
+        """An encapsulating commit body: the prompt's own summary + a file manifest.
+
+        One prompt may touch a file many times before Land; the single commit's body
+        records the whole reviewed set so the message stands on its own later.
+        """
+        lines: list = []
+        summary = (ep.get("summary") or "").strip()
+        if summary:
+            lines.append(summary)
+        files = [f.get("path") for f in (imp.get("files") or []) if f.get("path")]
+        if files:
+            scope = _scope_hint(files)
+            head = f"Scope: {scope}" if scope else "Scope: (repo)"
+            lines.append(f"{head} · {len(files)} file{'s' if len(files) != 1 else ''} reviewed and landed")
+            lines += [f"- {p}" for p in files[:16]]
+            if len(files) > 16:
+                lines.append(f"- … +{len(files) - 16} more")
+        return "\n".join(lines).strip()
+
+    async def get_review_episodes(request: web.Request) -> web.Response:
+        """List prompt episodes newest-first with their landed commits, plus an
+        "Outside OpenFDE" bucket for commits not linked to any episode.
+
+        Returns:
+            web.Response — {ok, episodes:[{…episode, commits, commitCount,
+                            fileCount}], outside:{…synthetic bucket}}.
+        """
+        persistence.backfill_episode_meta()                    # title/tag/seq/signal
+        episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
+        commits = git_timeline(path, limit=200)
+        by_ep: dict = {}
+        outside: list = []
+        for c in commits:
+            eid = c.get("episodeId")
+            (by_ep.setdefault(eid, []) if eid else outside).append(c)
+        known = {e.get("episodeId") for e in episodes}
+        # Enrich each episode commit with its file set (cheap name-only show) so the
+        # rail's nested commit chips and OpenPM commit tasks have files without a
+        # second fetch. Capped across the whole response so it stays a quick poll.
+        budget = 60
+        file_cache: dict = {}
+
+        def _commit_view(c: dict, ep: dict) -> dict:
+            nonlocal budget
+            sha = c.get("sha")
+            if sha and sha not in file_cache and budget > 0:
+                budget -= 1
+                file_cache[sha] = commit_files(path, sha)
+            cf = file_cache.get(sha, [])
+            # Clean display text for OpenPM / evidence cards — derived from the cleaned
+            # owning episode, never the noisy raw commit subject ("openfde: Here's the CC…").
+            dtitle, dsummary = commit_display(ep.get("title"), ep.get("summary"), c.get("summary"))
+            return {**c, "files": cf, "fileCount": len(cf),
+                    "displayTitle": dtitle, "displaySummary": dsummary}
+
+        enriched = []
+        for e in episodes:
+            ecs = [_commit_view(c, e) for c in by_ep.get(e["episodeId"], [])]
+            enriched.append({**e, "commits": ecs, "commitCount": len(ecs),
+                             "fileCount": len(e.get("files") or [])})
+        # Commits whose episode trailer references an unknown (foreign/older) id
+        # are surfaced under Outside OpenFDE too — never silently dropped.
+        foreign = [c for c in commits if c.get("episodeId") and c["episodeId"] not in known]
+        outside_commits = outside + foreign
+        outside_bucket = {
+            "episodeId": "outside", "kind": "manual", "status": "landed",
+            "prompt": "Outside OpenFDE",
+            "summary": "Commits not linked to an OpenFDE prompt (manual / foreign).",
+            "commits": outside_commits, "commitCount": len(outside_commits),
+            "files": [], "fileCount": 0,
+        }
+        return web.json_response({"ok": True, "episodes": enriched, "outside": outside_bucket})
+
+    async def get_prompt_story_graph(request: web.Request) -> web.Response:
+        """Prompt Story Graph — the conceptual narrative built from prompt episodes.
+
+        Deterministic (no LLM, no git mutation): active concepts from episode titles,
+        deferred/abandoned concepts from strong signals in episode text, each linked
+        to its episodes/commits/files. Distinct from the Timeline (events) and the
+        architecture story (code flow).
+
+        Returns:
+            web.Response — {ok, concepts[], episodes[], edges[], counts}.
+        """
+        persistence.backfill_episode_meta()
+        episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
+        return web.json_response(build_prompt_graph(episodes))
+
+    async def post_summarize_episodes(request: web.Request) -> web.Response:
+        """On-demand LLM story summary: upgrade up to ``limit`` eligible episodes (default 1)
+        using the local CLI, off the event loop. Broadcasts ``episode_updated`` for any
+        upgraded. Returns immediately with deterministic data when no provider is available.
+
+        Returns:
+            web.Response — {ok, providers, upgraded, attempted}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        limit = max(1, min(int(body.get("limit") or 1), 8))
+        providers = episode_llm_summary.available_providers()
+        if not providers:
+            return web.json_response({"ok": True, "providers": [], "upgraded": 0,
+                                      "attempted": 0, "reason": "no local CLI provider"})
+        before = {e["episodeId"]: (e.get("summarySource"), e.get("title"))
+                  for e in persistence.load_episodes()}
+        loop = asyncio.get_event_loop()
+        eps = await loop.run_in_executor(
+            None,
+            lambda: episode_llm_summary.ensure_facts(persistence, allow_llm=True,
+                                                     providers=providers, limit=limit))
+        upgraded = 0
+        for e in eps:
+            b = before.get(e["episodeId"])
+            if b and (b[0], b[1]) != (e.get("summarySource"), e.get("title")):
+                upgraded += 1
+                await manager.broadcast({"type": "episode_updated", "episode": e})
+        return web.json_response({"ok": True, "providers": providers, "upgraded": upgraded,
+                                  "attempted": limit})
+
+    async def post_review_episode_create(request: web.Request) -> web.Response:
+        """Create a prompt episode (e.g. when a prompt/run starts, or a 'Manual
+        changes' bucket for hand-edited worktree changes about to be landed).
+
+        Returns:
+            web.Response — {ok, episode}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        now = datetime.now(timezone.utc).isoformat()
+        ep = {
+            "episodeId": "episode_" + secrets.token_hex(6),
+            "createdAt": now, "updatedAt": now,
+            "prompt": (body.get("prompt") or "").strip(),
+            "kind": body.get("kind") or "manual",
+            "status": body.get("status") or "open",
+            "runIds": [r for r in (body.get("runIds") or []) if r],
+            "eventIds": [], "projectEntryIds": [], "commitShas": [],
+            "files": [], "summary": (body.get("summary") or "").strip(),
+        }
+        persistence.upsert_episode(ep)
+        await manager.broadcast({"type": "episode_updated", "episode": ep})
+        return web.json_response({"ok": True, "episode": ep})
+
+    async def post_review_episode_land(request: web.Request) -> web.Response:
+        """Land the current meaningful worktree changes through OpenFDE — the only
+        user-facing path that creates a commit.
+
+        Commits with OpenFDE trailers (Episode / Run / Project-Entry), links the
+        commit to the episode, marks it landed, and broadcasts commit_created.
+        No-ops cleanly when there are no meaningful changes. Unknown / 'manual'
+        episodeIds create a fresh "Manual changes" episode.
+
+        Returns:
+            web.Response — {ok, committed, sha?, shortSha?, reason?, episode}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        eid = request.match_info.get("episodeId", "")
+        now = datetime.now(timezone.utc).isoformat()
+        ep = persistence.get_episode(eid)
+        if ep is None:
+            # Manual / unknown id → mint a "Manual changes" episode to own the commit.
+            ep = {
+                "episodeId": "episode_" + secrets.token_hex(6),
+                "createdAt": now, "updatedAt": now,
+                "prompt": (body.get("prompt") or "Manual changes").strip(),
+                "kind": "manual", "status": "open", "runIds": [], "eventIds": [],
+                "projectEntryIds": [], "commitShas": [], "files": [], "summary": "",
+            }
+
+        # A real episode with attributed files → SCOPED Land (commit only its files,
+        # never unrelated dirty ones). The "Manual changes" bucket (no files) falls back
+        # to a whole-tree commit of the meaningful changes the user is explicitly landing.
+        from openfde import autoland
+        land = autoland.land_episode(path, persistence, ep, auto=False)
+        if not land.get("needsWholeTree"):
+            for m in land.get("broadcasts", []):
+                await manager.broadcast(m)
+            if land.get("committed"):
+                return web.json_response({"ok": True, "committed": True, "sha": land["sha"],
+                                          "shortSha": land["shortSha"], "episode": land["episode"],
+                                          "files": land.get("files", [])})
+            return web.json_response({"ok": True, "committed": False, "status": land.get("status"),
+                                      "reason": land.get("reason") or "no changes to land",
+                                      "episode": land["episode"]})
+
+        # ── Whole-tree fallback (Manual changes bucket) ──────────────────────
+        # Only land when there are real, meaningful (non-ignored) changes.
+        imp = worktree_impact(path)
+        if not imp.get("dirty"):
+            return web.json_response({"ok": True, "committed": False,
+                                      "reason": "no meaningful changes to land", "episode": ep})
+
+        trailers = {"OpenFDE-Episode": ep["episodeId"]}
+        run_id = next((r for r in reversed(ep.get("runIds") or []) if r), None)
+        if run_id:
+            trailers["OpenFDE-Run"] = run_id
+        entry_id = next((e for e in reversed(ep.get("projectEntryIds") or []) if e), None)
+        if entry_id:
+            trailers["OpenFDE-Project-Entry"] = entry_id
+
+        subject = (body.get("message") or "").strip() or _episode_subject(ep, imp)
+        commit = git_commit(path, subject, detail=_land_body(ep, imp), trailers=trailers)
+        if not commit.get("committed"):
+            return web.json_response({"ok": True, "committed": False,
+                                      "reason": commit.get("reason") or "commit produced no changes",
+                                      "episode": ep})
+
+        ep["commitShas"] = list(dict.fromkeys((ep.get("commitShas") or []) + [commit["sha"]]))
+        ep["files"] = sorted(set((ep.get("files") or []) + (commit.get("files") or [])))
+        ep["status"] = "landed"
+        ep["updatedAt"] = now
+        persistence.upsert_episode(ep)
+
+        ce = persistence.append_event({
+            "type": "commit_created",
+            "payload": {"sha": commit["sha"], "shortSha": commit["shortSha"],
+                        "summary": commit["summary"], "episodeId": ep["episodeId"],
+                        "fileCount": len(commit.get("files", [])),
+                        "detail": f"Landed {commit['shortSha']} for episode {ep['episodeId']}"},
+        })
+        await manager.broadcast({"type": "event_appended", "event": ce})
+        await manager.broadcast({"type": "episode_updated", "episode": ep})
+        # Explicit commit_created so any client can mirror the prompt→commit story
+        # into OpenPM (a Done task under this prompt) without waiting on a poll.
+        _dt, _ds = commit_display(ep.get("title"), ep.get("summary"), commit["summary"])
+        await manager.broadcast({
+            "type": "commit_created", "sha": commit["sha"], "shortSha": commit["shortSha"],
+            "summary": commit["summary"], "episodeId": ep["episodeId"],
+            "episodeTag": ep.get("tag"), "promptTitle": ep.get("title"), "sequence": ep.get("sequence"),
+            "displayTitle": _dt, "displaySummary": _ds,
+            "promptLabel": ep.get("title") or (ep.get("prompt") or ep.get("summary") or "").split("\n")[0][:48],
+            "files": commit.get("files", []),
+        })
+        return web.json_response({
+            "ok": True, "committed": True, "sha": commit["sha"], "shortSha": commit["shortSha"],
+            "episode": ep, "files": commit.get("files", []),
+        })
+
     # ================================================================== #
     #  REST — /api/concept*  (Ask Concept + Concept Cards, Step 37a)     #
     # ================================================================== #
@@ -1517,7 +1909,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     _ARCH_SYS = ("You are the Architect. Produce a short, concrete implementation brief for the "
                  "Senior Dev: what to change, the expected outcome, and how to verify it. Stay within "
-                 "the editable files. No code fences, no preamble — just the brief.")
+                 "the editable files. The Senior Dev only EDITS files — it must not run git "
+                 "add/commit/push; OpenFDE reviews the changes and lands the commit. No code fences, "
+                 "no preamble — just the brief.")
     _VER_SYS = ("You are the Verifier. Review the Senior Dev's ACTUAL DIFF against the brief — judge the "
                 "code that was written, not the self-report. Respond with "
                 'JSON ONLY: {"status":"passed|failed|needs_human","summary":"...","fixPrompt":"...",'
@@ -1775,6 +2169,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "stages": _stages_out(outcome["stages"]),
             "commit": ({"sha": payload.get("commitSha"), "committed": True}
                        if payload.get("committed") else None),
+            # Review Then Land: the agent's edits are in the work tree, owned by a
+            # prompt episode, waiting for the user to Land them (no auto-commit).
+            "episodeId": payload.get("episodeId"),
+            "awaitingReview": payload.get("awaitingReview", False),
             "approval": payload.get("approval"),
             "verifier": outcome.get("verifier"),
         })
@@ -1826,6 +2224,53 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         if wf is None:
             return web.json_response({"ok": False, "error": "not found"}, status=404)
         return web.json_response(wf)
+
+    def _episode_kind_for(artifact: dict) -> str:
+        """Map a run artifact to a prompt-episode kind (council|workflow|agent)."""
+        b = (artifact.get("backend") or "").lower()
+        k = (artifact.get("kind") or "").lower()
+        if "council" in b or "council" in k:
+            return "council"
+        if "workflow" in b or "workflow" in k:
+            return "workflow"
+        return "agent"
+
+    def _link_episode_for_run(wid: str, prompt: str, kind: str, files: list,
+                              event_ids: list, ledger_ids: list, summary: str,
+                              status: str) -> dict:
+        """Create or update the prompt episode that owns this run's changes.
+
+        Episodes are the durable "prompt turn" — the user's intent plus the runs,
+        events, and (after Land) commits it produced. Re-uses an episode already
+        linked to ``wid``; otherwise mints a new one. Never downgrades a 'landed'
+        episode. Returns the stored episode (caller broadcasts).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        ep = persistence.get_open_episode_for_run(wid)
+        if ep is None:
+            ep = {
+                "episodeId": "episode_" + secrets.token_hex(6),
+                "createdAt": now, "updatedAt": now,
+                "prompt": prompt or "", "kind": kind, "status": status,
+                "runIds": [wid], "eventIds": list(event_ids or []),
+                "projectEntryIds": list(ledger_ids or []), "commitShas": [],
+                "files": sorted(set(files or [])), "summary": summary or "",
+            }
+        else:
+            ep["updatedAt"] = now
+            if ep.get("status") != "landed":
+                ep["status"] = status
+            ep["files"] = sorted(set((ep.get("files") or []) + list(files or [])))
+            ep["eventIds"] = list(dict.fromkeys((ep.get("eventIds") or []) + list(event_ids or [])))
+            ep["projectEntryIds"] = list(dict.fromkeys((ep.get("projectEntryIds") or []) + list(ledger_ids or [])))
+            if wid not in (ep.get("runIds") or []):
+                ep.setdefault("runIds", []).append(wid)
+            if not ep.get("prompt") and prompt:
+                ep["prompt"] = prompt
+            if summary:
+                ep["summary"] = summary
+        persistence.upsert_episode(ep)
+        return ep
 
     async def reconcile_result(artifact: dict, wid: str, result: dict) -> dict:
         """Reconcile a validated result contract into OpenFDE state.
@@ -1898,30 +2343,48 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         await manager.broadcast({"type": "event_appended", "event": outcome})
         event_ids = [recv["id"], outcome["id"]]
 
-        # ── Git reconciliation ───────────────────────────────────────────────
-        # Commit only when a *reported source file* (not OpenFDE bookkeeping like
-        # project.md / PLAN.md / .openfde/) is actually dirty in the work tree.
-        # This prevents no-op commits where ledger writes are the only diff.
+        # ── Auto-Land on completion (Land · Watch · Review) ──────────────────
+        # File saves never commit. On a clean verifier pass with NO approval gate,
+        # OpenFDE auto-lands the run's files — a SCOPED commit under a durable prompt
+        # EPISODE (only the run's files; unrelated dirty files are never swept in). An
+        # approval gate leaves the edits as 'reviewing' for an explicit manual Land.
         committed, commit_sha, commit_reason = False, None, None
         reported_sources = source_files(result["filesChanged"])
         actually_changed = changed_paths(path, reported_sources)
-        if status == "passed" and not actually_changed:
-            commit_reason = "no reported source files changed on disk"
+        episode = None
         if status == "passed" and actually_changed:
-            commit = git_commit(path, commit_message(report),
-                                detail=report, trailers={"OpenFDE-Workflow": wid})
-            if commit.get("committed"):
-                committed, commit_sha = True, commit["sha"]
-                ce = persistence.append_event({
-                    "type": "commit_created",
-                    "payload": {"sha": commit["sha"], "shortSha": commit["shortSha"],
-                                "summary": commit["summary"], "fileCount": len(commit.get("files", [])),
-                                "workflowId": wid, "detail": f"Committed {commit['shortSha']}: {commit['summary']}"},
-                })
-                await manager.broadcast({"type": "event_appended", "event": ce})
-                event_ids.append(ce["id"])
-            else:
-                commit_reason = commit.get("reason") or "commit produced no changes"
+            episode = _link_episode_for_run(
+                wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
+                actually_changed, event_ids, ledger_ids, report[:200], "reviewing")
+            from openfde import autoland
+            land = autoland.land_episode(path, persistence, episode, auto=True)
+            episode = land.get("episode", episode)
+            committed = bool(land.get("committed"))
+            commit_sha = land.get("sha")
+            commit_reason = "auto-landed" if committed else (land.get("reason") or "held for manual land")
+            for m in land.get("broadcasts", []):
+                await manager.broadcast(m)
+                if m.get("type") == "event_appended" and (m.get("event") or {}).get("id"):
+                    event_ids.append(m["event"]["id"])
+        elif status == "needs_approval" and actually_changed:
+            episode = _link_episode_for_run(
+                wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
+                actually_changed, event_ids, ledger_ids, report[:200], "reviewing")
+            commit_reason = "approval required — review and Land manually"
+            rp = persistence.append_event({
+                "type": "review_pending",
+                "payload": {"runId": wid, "episodeId": episode["episodeId"],
+                            "fileCount": len(actually_changed),
+                            "detail": f"{len(actually_changed)} file(s) need approval, then Land."},
+            })
+            await manager.broadcast({"type": "event_appended", "event": rp})
+            await manager.broadcast({"type": "episode_updated", "episode": episode})
+            event_ids.append(rp["id"])
+        elif status in ("passed", "needs_approval"):
+            episode = _link_episode_for_run(
+                wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
+                [], event_ids, ledger_ids, report[:200], "open")
+            commit_reason = "no reported source files changed on disk"
 
         # ── Run record: prepared → outcome ───────────────────────────────────
         run = persistence.get_run(wid) or {"runId": wid, "scopedBoxIds": box_ids, "scopedArrowIds": []}
@@ -1977,6 +2440,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "ok": True, "status": status,
             "committed": committed, "commitSha": commit_sha, "commitReason": commit_reason,
             "sourceFilesChanged": actually_changed,
+            "episodeId": episode["episodeId"] if episode else None,
+            "awaitingReview": bool(actually_changed) and not committed,   # auto-landed → nothing to review
             "reportSummary": report, "verificationResult": result["verificationResult"],
             "testsSummary": tsumm, "fileCount": len(result["filesChanged"]),
             "approval": approval,
@@ -2190,6 +2655,37 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "files": files, "fileCount": len(files), "affectedConcepts": concepts,
         })
 
+    async def get_worktree_impact(request: web.Request) -> web.Response:
+        """Review Delta: the uncommitted working tree as an architecture delta.
+
+        The "Review" leg of Land · Watch · Review for changes that aren't committed
+        yet — whatever an external agent or the user just wrote. Mirrors
+        ``get_commit_impact`` but reads the live work tree instead of a sha, via the
+        **non-staging** ``worktree_impact`` helper (never runs ``git add``), so it is
+        safe to poll while the user edits. Concept delta + high-signal partial-tether
+        warnings come from the same semantic-graph helpers the commit lens uses.
+
+        Args:
+            request: web.Request — no params.
+
+        Returns:
+            web.Response — {ok, dirty, files:[{path,status,additions,deletions}],
+                            fileCount, shownCount, stat, patch, patchTruncated,
+                            untracked, affectedConcepts, partialConcepts, signature}.
+        """
+        imp = worktree_impact(path)
+        file_paths = [f["path"] for f in imp.get("files", [])]
+        graph = semantic_graph_mod.load_graph(path)
+        concepts = semantic_graph_mod.concepts_for_files(graph, file_paths) if graph else []
+        partial = semantic_graph_mod.tethers_partially_touched(graph, file_paths) if graph else []
+        return web.json_response({
+            "ok": True, "dirty": imp["dirty"],
+            "files": imp["files"], "fileCount": imp["fileCount"], "shownCount": imp["shownCount"],
+            "stat": imp["stat"], "patch": imp["patch"], "patchTruncated": imp["patchTruncated"],
+            "untracked": imp["untracked"], "affectedConcepts": concepts,
+            "partialConcepts": partial, "signature": imp["signature"],
+        })
+
     # ================================================================== #
     #  REST — /api/report  (REPORT.md, Step 18)                         #
     # ================================================================== #
@@ -2330,6 +2826,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/git/commit",            post_git_commit)
     app.router.add_get( "/api/git/commit/{sha}/diff", get_git_diff)
     app.router.add_get( "/api/git/commit/{sha}/impact", get_commit_impact)
+    app.router.add_get( "/api/git/worktree/impact", get_worktree_impact)
+    app.router.add_post("/api/review/reassimilate", post_review_reassimilate)
+    app.router.add_get( "/api/review/episodes", get_review_episodes)
+    app.router.add_get( "/api/story/prompt-graph", get_prompt_story_graph)
+    app.router.add_post("/api/review/episodes/summarize", post_summarize_episodes)
+    app.router.add_post("/api/review/episodes", post_review_episode_create)
+    app.router.add_post("/api/review/episodes/{episodeId}/land", post_review_episode_land)
     app.router.add_post("/api/report",                post_report)
     app.router.add_get( "/api/plan",                  get_plan)
     app.router.add_get( "/api/archgraph",             get_archgraph)
@@ -2429,15 +2932,26 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     watch_task = asyncio.create_task(fs_watch.watch_loop(
         path, manager, is_run_active=lambda: bool(_RUN_CONTROLS)))
 
+    # ── Passive Prompt Capture: tail this repo's Claude Code transcripts and turn
+    # new human prompts into prompt-story episodes (no `openfde cc` wrapper needed).
+    from openfde import prompt_capture
+    capture_task = asyncio.create_task(prompt_capture.watch_loop(path, persistence, manager))
+
+    # ── LLM Story Summarizer (best-effort): upgrade one episode's title/summary/storyFacts
+    # per cycle using the local Codex/Claude CLI — off the request path, cached per
+    # fingerprint, deterministic fallback. No-op when no local CLI provider is available.
+    summarizer_task = asyncio.create_task(_summarizer_loop(persistence, manager))
+
     try:
         await asyncio.Event().wait()       # run until cancelled / KeyboardInterrupt
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
         logger.info("Server stopping")
-        watch_task.cancel()
-        try:
-            await watch_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
+        for t in (watch_task, capture_task, summarizer_task):
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         await runner.cleanup()

@@ -224,6 +224,66 @@ def run_codex_local_text(*, system: str, user: str, model: str = None,
     return res.get("text") or ""
 
 
+# Prepended to the editing prompt: OpenFDE owns version control, Codex only edits.
+_NO_COMMIT_DIRECTIVE = (
+    "IMPORTANT — OpenFDE owns version control. EDIT files only. Do NOT run "
+    "`git add`, `git commit`, `git push`, or stage/commit. Leave all changes in the "
+    "working tree; OpenFDE reviews them and lands the commit.\n\n"
+)
+
+
+def run_codex_local_edit(*, repo_root, prompt: str, model: str = None,
+                         timeout: int = _DEFAULT_TIMEOUT, codex_bin: str = None) -> dict:
+    """Run the local Codex CLI **as an editor** (`openfde codex`) — repo-wide.
+
+    Uses Codex's ``workspace-write`` sandbox (the local CLI supports it) so Codex
+    edits files in the repo, with the no-git directive keeping it from committing.
+    Touched files come from the git dirty-set diff (before vs after). Never commits;
+    fails honestly (no fake edits) if Codex is missing or the run errors.
+
+    Args:
+        repo_root: Path | str — repository root (cwd + workspace-write boundary).
+        prompt: str — the user's prompt (no-commit directive prepended).
+        model: str | None — optional model override.
+        timeout: int — wall-clock seconds.
+        codex_bin: str | None — explicit binary (else auto-resolve).
+
+    Returns:
+        dict — {ok: bool, touched: [str], error: str|None, summary: str}.
+    """
+    resolved = resolve_codex_bin(codex_bin)
+    if not resolved:
+        return {"ok": False, "touched": [], "summary": "",
+                "error": "Codex CLI not found. Install Codex or set the codex binary on PATH."}
+    root = Path(repo_root)
+    pre_dirty = _dirty_set(root)
+
+    cmd = [resolved, "exec", "-", "-s", "workspace-write",
+           "--skip-git-repo-check", "--color", "never", "--ephemeral", "-C", str(root)]
+    if model:
+        cmd += ["-m", str(model)]
+    full_prompt = _NO_COMMIT_DIRECTIVE + (prompt or "")
+
+    error, summary = None, ""
+    try:
+        proc = subprocess.run(cmd, input=full_prompt, cwd=str(root), shell=False,
+                              capture_output=True, text=True, timeout=timeout, env=_child_env())
+        summary = (proc.stdout or "").strip()[-2000:]
+        if proc.returncode != 0:
+            detail = ((proc.stderr or "").strip() or summary or "no output")[:300]
+            error = f"Codex CLI exited {proc.returncode}: {detail}"
+    except subprocess.TimeoutExpired:
+        error = f"Codex CLI timed out after {timeout}s."
+        logger.error("openfde codex: timed out (%ss)", timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = f"Codex CLI failed to launch: {exc}"
+        logger.error("openfde codex: launch failed: %s", exc)
+
+    touched = sorted(_dirty_set(root) - pre_dirty)
+    # A clean non-zero exit with no edits is an honest failure (no faked success).
+    return {"ok": error is None, "touched": touched, "summary": summary, "error": error}
+
+
 def _child_env() -> dict:
     """Environment for the spawned `codex` process. Codex authenticates via its own
     local login (CODEX_HOME), inherited here; we never log env values."""

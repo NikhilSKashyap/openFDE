@@ -13,6 +13,7 @@ with an argument list (never a shell string). This module:
 Step 19 will reuse `git_commit()` after real agent work units.
 """
 
+import hashlib
 import logging
 import re
 import subprocess
@@ -244,8 +245,37 @@ def changed_paths(root: Path, candidates: list) -> list:
     return [c for c in candidates if _norm(c) in changed]
 
 
+# Record separator between commits in `git log` output, so multi-line commit
+# bodies (which carry trailers) don't break line-based field parsing.
+_RS = "\x1e"
+# Trailer line: "Key: value" with a Key-Cased token (e.g. OpenFDE-Episode).
+_TRAILER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*):[ \t]+(.+)$")
+
+
+def _parse_openfde_trailers(body: str) -> dict:
+    """Extract ``OpenFDE-*`` trailers from a commit body into a dict.
+
+    Args:
+        body: str — the raw commit body (everything after the subject).
+
+    Returns:
+        dict — {trailerKey: value} for keys beginning with ``OpenFDE-``.
+    """
+    out: dict = {}
+    for line in (body or "").splitlines():
+        m = _TRAILER_RE.match(line.strip())
+        if m and m.group(1).startswith("OpenFDE-"):
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
 def git_timeline(root: Path, limit: int = 100) -> list:
     """Return commit history newest-first in a frontend-friendly shape.
+
+    Each commit exposes any ``OpenFDE-*`` trailers (parsed from the body) and a
+    convenience ``episodeId`` (the ``OpenFDE-Episode`` trailer) so the Prompt
+    Story Rail can group commits under their prompt episode, and bucket the rest
+    under "Outside OpenFDE".
 
     Args:
         root: Path — repository root.
@@ -253,23 +283,31 @@ def git_timeline(root: Path, limit: int = 100) -> list:
 
     Returns:
         list[dict] — each: {"sha", "shortSha", "author", "email",
-                            "timestamp" (ISO-8601), "summary"}.
+                            "timestamp" (ISO-8601), "summary",
+                            "trailers": dict, "episodeId": str|None}.
     """
     if not is_git_repo(root):
         return []
-    fmt = _US.join(["%H", "%h", "%an", "%ae", "%aI", "%s"])
+    # %b (body) is multi-line, so delimit each commit with a record separator.
+    fmt = _US.join(["%H", "%h", "%an", "%ae", "%aI", "%s", "%b"]) + _RS
     res = _run(["git", "log", f"--max-count={int(limit)}", f"--pretty=format:{fmt}"], root)
     if res.returncode != 0:
         return []
     commits = []
-    for line in res.stdout.splitlines():
-        parts = line.split(_US)
-        if len(parts) != 6:
+    for record in res.stdout.split(_RS):
+        record = record.strip("\n")
+        if not record.strip():
             continue
-        sha, short, author, email, ts, summary = parts
+        parts = record.split(_US)
+        if len(parts) < 6:
+            continue
+        sha, short, author, email, ts, summary = parts[:6]
+        body = parts[6] if len(parts) > 6 else ""
+        trailers = _parse_openfde_trailers(body)
         commits.append({
             "sha": sha, "shortSha": short, "author": author,
             "email": email, "timestamp": ts, "summary": summary,
+            "trailers": trailers, "episodeId": trailers.get("OpenFDE-Episode"),
         })
     return commits
 
@@ -343,6 +381,38 @@ def git_diff(root: Path, sha: str, max_patch: int = _MAX_PATCH_CHARS) -> Optiona
     }
 
 
+def commit_files(root: Path, sha: str, cap: int = 80) -> list:
+    """Return the repo-relative paths a commit touched (cheap — names only).
+
+    Used to enrich the Prompt Story Rail's nested commit chips and the OpenPM
+    commit tasks with their file set *without* paying for a full patch. Capped so
+    a sprawling commit can't bloat the episodes payload.
+
+    Args:
+        root: Path — repository root.
+        sha: str — commit id (validated against a hex pattern).
+        cap: int — maximum paths returned (the rest are dropped; ``fileCount``
+            from the caller still reflects the true total when available).
+
+    Returns:
+        list[str] — changed paths (possibly capped); empty on any error.
+    """
+    if not is_git_repo(root) or not _valid_sha(sha):
+        return []
+    res = _run(["git", "show", "--no-color", "--name-only", "--format=", sha, "--"], root)
+    if res.returncode != 0:
+        return []
+    out, seen = [], set()
+    for line in res.stdout.splitlines():
+        p = _strip_path(line.strip())
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def worktree_diff(root: Path, paths=None, max_patch: int = _MAX_PATCH_CHARS) -> dict:
     """Return the *uncommitted* working-tree diff vs HEAD, optionally scoped to paths.
 
@@ -374,6 +444,122 @@ def worktree_diff(root: Path, paths=None, max_patch: int = _MAX_PATCH_CHARS) -> 
     if truncated:
         patch = patch[:max_patch] + "\n… [diff truncated]"
     return {"patch": patch, "files": changed_paths(root, sel) if sel else [], "truncated": truncated}
+
+
+def _strip_path(p: str) -> str:
+    """Normalize a porcelain/diff path: drop quotes and a leading ``./``."""
+    s = str(p or "").strip().strip('"')
+    return s[2:] if s.startswith("./") else s
+
+
+def worktree_impact(root: Path, max_patch: int = _MAX_PATCH_CHARS, max_files: int = 200) -> dict:
+    """The uncommitted working tree as a reviewable architecture delta — **non-mutating**.
+
+    This is the "Review Delta" data source: it answers *what changed since HEAD, right
+    now*, for the Review leg of Land · Watch · Review. Unlike :func:`worktree_diff`
+    (which runs ``git add -N`` so the council Verifier sees untracked files), this is
+    safe to call repeatedly while the user is editing because it **never stages**:
+
+      - tracked changes come from ``git diff HEAD`` (read-only),
+      - untracked files are *listed* via ``git status --porcelain`` (read-only) and
+        flagged status ``"?"`` with **no patch content** (emitting their diff would
+        require staging),
+      - git state is byte-identical before and after the call.
+
+    Args:
+        root: Path — repository root.
+        max_patch: int — maximum characters of tracked-change patch text.
+        max_files: int — maximum file entries returned (the rest are summarized via
+            ``fileCount`` > ``shownCount`` so the UI can say "showing X of Y").
+
+    Returns:
+        dict — {"ok", "dirty": bool,
+                "files": [{"path","status","additions","deletions"}],  # capped to max_files
+                "untracked": [str],
+                "stat": {"files","additions","deletions"},
+                "patch": str, "patchTruncated": bool,
+                "fileCount": int, "shownCount": int,
+                "signature": str}  # short hash of porcelain — cheap dirty-state key
+    """
+    empty = {
+        "ok": True, "dirty": False, "files": [], "untracked": [],
+        "stat": {"files": 0, "additions": 0, "deletions": 0},
+        "patch": "", "patchTruncated": False,
+        "fileCount": 0, "shownCount": 0, "signature": "",
+    }
+    if not is_git_repo(root):
+        return empty
+
+    # Porcelain drives both the dirty signature and untracked/tracked classification.
+    # Read-only — never stages.
+    porc = _run(["git", "status", "--porcelain", "--untracked-files=all"], root)
+    porc_out = porc.stdout or ""
+    signature = hashlib.sha1(porc_out.encode("utf-8", "replace")).hexdigest()[:16]
+
+    tracked_status: dict = {}   # path -> status char (M/A/D/R…)
+    untracked: list = []
+    for line in porc_out.splitlines():
+        if len(line) < 4:
+            continue
+        x, y, seg = line[0], line[1], line[3:]
+        if " -> " in seg:                       # rename: "old -> new"
+            seg = seg.split(" -> ", 1)[1]
+        path = _strip_path(seg)
+        if x == "?" and y == "?":
+            untracked.append(path)
+        else:
+            tracked_status[path] = (y if y != " " else x) or "M"
+
+    if not tracked_status and not untracked:
+        return {**empty, "signature": signature}
+
+    # Per-file numstat for tracked changes vs HEAD (read-only). Falls back to a
+    # HEAD-less diff for a repo with no commits yet.
+    files_by_path: dict = {}
+    add_total = del_total = 0
+    nums = _run(["git", "diff", "--numstat", "HEAD", "--"], root)
+    if nums.returncode != 0:
+        nums = _run(["git", "diff", "--numstat", "--"], root)
+    for line in nums.stdout.splitlines():
+        cols = line.split("\t")
+        if len(cols) != 3:
+            continue
+        a, d, p = cols
+        p = _strip_path(p)
+        adds = 0 if a == "-" else int(a or 0)
+        dels = 0 if d == "-" else int(d or 0)
+        add_total += adds
+        del_total += dels
+        files_by_path[p] = {"path": p, "status": tracked_status.get(p, "M"),
+                            "additions": adds, "deletions": dels}
+    # Tracked files with no numstat row (e.g. pure deletes / mode changes).
+    for p, st in tracked_status.items():
+        files_by_path.setdefault(p, {"path": p, "status": st, "additions": 0, "deletions": 0})
+    # Untracked files: listed, never staged, no diff content.
+    for p in untracked:
+        files_by_path.setdefault(p, {"path": p, "status": "?", "additions": 0, "deletions": 0})
+
+    files = sorted(files_by_path.values(), key=lambda f: f["path"])
+    file_count = len(files)
+    shown = files[:max_files]
+
+    # Capped patch — tracked changes only (untracked are never staged → no patch).
+    patch_res = _run(["git", "diff", "--patch", "--no-color", "HEAD", "--"], root)
+    if patch_res.returncode != 0:
+        patch_res = _run(["git", "diff", "--patch", "--no-color", "--"], root)
+    patch = patch_res.stdout or ""
+    patch_truncated = len(patch) > max_patch
+    if patch_truncated:
+        patch = patch[:max_patch] + "\n… [diff truncated]"
+
+    return {
+        "ok": True, "dirty": file_count > 0,
+        "files": shown, "untracked": untracked,
+        "stat": {"files": file_count, "additions": add_total, "deletions": del_total},
+        "patch": patch, "patchTruncated": patch_truncated,
+        "fileCount": file_count, "shownCount": len(shown),
+        "signature": signature,
+    }
 
 
 # ─── Commit ───────────────────────────────────────────────────────────────── #
@@ -422,4 +608,86 @@ def git_commit(root: Path, summary: str, detail: str = "", trailers: dict = None
 
     sha = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
     logger.info("Committed %s (%d file(s)): %s", sha[:7], len(staged), summary)
+    return {"committed": True, "sha": sha, "shortSha": sha[:7], "summary": summary, "files": staged, "reason": None}
+
+
+def dirty_paths(root: Path) -> set:
+    """Repo-relative paths that differ from HEAD or are untracked (uncapped, read-only).
+
+    The set used to scope an episode's auto-land: ``episode.files ∩ dirty_paths`` is the
+    subset actually committable. Never stages.
+    """
+    if not is_git_repo(root):
+        return set()
+    out = set()
+    d = _run(["git", "diff", "--name-only", "HEAD", "--"], root)
+    if d.returncode != 0:
+        d = _run(["git", "diff", "--name-only", "--"], root)
+    for ln in d.stdout.splitlines():
+        if ln.strip():
+            out.add(_strip_path(ln.strip()))
+    u = _run(["git", "ls-files", "--others", "--exclude-standard"], root)
+    for ln in u.stdout.splitlines():
+        if ln.strip():
+            out.add(_strip_path(ln.strip()))
+    return out
+
+
+def git_commit_paths(root: Path, summary: str, paths, detail: str = "", trailers: dict = None) -> dict:
+    """Commit **only** the given repo-relative paths — the scoped Auto-Land path.
+
+    Unlike :func:`git_commit` (which stages everything with ``git add -A``), this stages
+    and commits exactly ``paths`` — so an episode's auto-land can never sweep unrelated
+    dirty files into the prompt. Ignored paths (``.gitignore`` / ``.openfde``) are dropped;
+    deletions of the listed paths are included; nothing is pushed.
+
+    Args:
+        root: Path — repository root.
+        summary: str — commit subject.
+        paths: list[str] — repo-relative paths to commit (and only these).
+        detail: str — optional commit body.
+        trailers: dict | None — key→value trailers appended to the body.
+
+    Returns:
+        dict — same shape as :func:`git_commit`: {"committed","sha","shortSha","summary",
+               "files","reason"}.
+    """
+    ensure_git_repo(root)
+    paths = list(dict.fromkeys(p.strip() for p in (paths or []) if p and p.strip()))
+    if not paths:
+        return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": [], "reason": "no paths to commit"}
+
+    # Respect ignores: drop any path git would ignore (.gitignore / .openfde). check-ignore
+    # lists the ignored ones on stdout (returncode 1 simply means "none ignored").
+    chk = _run(["git", "check-ignore", "--", *paths], root)
+    ignored = {_strip_path(ln.strip()) for ln in chk.stdout.splitlines() if ln.strip()}
+    kept = [p for p in paths if p not in ignored]
+    if not kept:
+        return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": [], "reason": "all paths ignored"}
+
+    # Stage ONLY these paths (incl. deletions); never touch unrelated dirty files.
+    add = _run(["git", "add", "-A", "--", *kept], root)
+    if add.returncode != 0:
+        return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": [], "reason": "stage failed"}
+
+    staged = [p for p in _run(["git", "diff", "--cached", "--name-only", "--", *kept], root).stdout.splitlines() if p]
+    if not staged:
+        return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": [], "reason": "no changes in scoped paths"}
+
+    body = detail or ""
+    if trailers:
+        trailer_lines = "\n".join(f"{k}: {v}" for k, v in trailers.items() if v)
+        body = (body + "\n\n" + trailer_lines).strip() if body else trailer_lines
+
+    args = ["git", "-c", f"user.name={_GIT_NAME}", "-c", f"user.email={_GIT_EMAIL}", "commit", "-m", summary]
+    if body:
+        args += ["-m", body]
+    args += ["--", *kept]                       # scope the commit to these paths only
+    res = _run(args, root)
+    if res.returncode != 0:
+        logger.error("scoped git commit failed: %s", res.stderr.strip())
+        return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": staged, "reason": "commit failed"}
+
+    sha = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    logger.info("Committed %s (scoped, %d file(s)): %s", sha[:7], len(staged), summary)
     return {"committed": True, "sha": sha, "shortSha": sha[:7], "summary": summary, "files": staged, "reason": None}

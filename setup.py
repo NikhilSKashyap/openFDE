@@ -7,4 +7,4 @@ an UNKNOWN.egg-info artifact.
 
 from setuptools import setup
 
-setup(name="openfde", version="0.3.0")
+setup(name="openfde", version="0.4.0")

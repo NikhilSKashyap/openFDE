@@ -259,4 +259,82 @@ def build_prompt_graph(episodes: list) -> dict:
                 "sequence": e.get("sequence")} for e in episodes]
 
     return {"ok": True, "concepts": ordered, "episodes": ep_lite,
-            "edges": edges, "counts": counts}
+            "edges": edges, "counts": counts,
+            "storyMap": build_story_map(episodes, ordered)}
+
+
+def build_story_map(episodes: list, concepts: list) -> dict:
+    """Chronological **episode** story map for Story Tell mode.
+
+    The unit is the *episode*, not the concept. Product (non-operational) episodes form a
+    left→right spine ordered by ``sequence`` ascending; each deferred/abandoned concept hangs
+    as a branch off the episode that produced it (its latest ``episodeIds`` member that is on
+    the spine), else lands in a side ``parked`` lane. Operational/meta episodes are hidden from
+    the spine (only counted). Pure + deterministic — no measurement, no model calls — so the
+    frontend renders a fixed set of episode boxes instead of measuring 80+ concept cards.
+
+    Args:
+        episodes: list[dict] — enriched episodes (any order).
+        concepts: list[dict] — concepts from :func:`build_prompt_graph` (carry status,
+            episodeIds, episodeTags, commitCount, fileCount).
+
+    Returns:
+        dict — ``{spine[], parked[], parkedOverflow, hiddenOps}``. Each spine node carries the
+            episode's own metrics (commit / file / concept counts) plus its deferred/abandoned
+            branch lists (capped); it never embeds concept cards.
+    """
+    episodes = episodes or []
+    concepts = concepts or []
+
+    spine_eps = sorted((e for e in episodes if not is_operational_episode(e)),
+                       key=lambda e: e.get("sequence") or 0)
+    hidden_ops = sum(1 for e in episodes if is_operational_episode(e))
+    seq_of = {e.get("episodeId"): (e.get("sequence") or 0) for e in spine_eps}
+
+    def _branch(c: dict) -> dict:
+        return {"conceptId": c.get("id"), "title": c.get("title") or "",
+                "status": c.get("status"), "commitCount": c.get("commitCount") or 0,
+                "fileCount": c.get("fileCount") or 0}
+
+    active_count: dict = {}
+    slots: dict = {}             # episodeId -> {"deferred": [...], "abandoned": [...]}
+    parked: list = []
+    for c in concepts:
+        status = c.get("status")
+        eids = c.get("episodeIds") or []
+        if status in ("active", "mixed"):
+            for eid in eids:
+                if eid in seq_of:
+                    active_count[eid] = active_count.get(eid, 0) + 1
+            continue
+        if status not in ("deferred", "abandoned"):
+            continue
+        on_spine = [eid for eid in eids if eid in seq_of]
+        if on_spine:
+            host = max(on_spine, key=lambda eid: seq_of[eid])    # the latest beat that touched it
+            slots.setdefault(host, {"deferred": [], "abandoned": []})[status].append(_branch(c))
+        else:
+            parked.append({**_branch(c), "fromTag": (c.get("episodeTags") or [None])[0]})
+
+    spine = []
+    for e in spine_eps:
+        eid = e.get("episodeId")
+        slot = slots.get(eid) or {"deferred": [], "abandoned": []}
+        deferred = slot["deferred"][:_MAX_BRANCH_PER_EP]
+        abandoned = slot["abandoned"][:_MAX_BRANCH_PER_EP]
+        overflow = (len(slot["deferred"]) - len(deferred)) + (len(slot["abandoned"]) - len(abandoned))
+        commit_count = len(e.get("commitShas") or []) or len(e.get("commits") or [])
+        files = list(e.get("files") or [])
+        spine.append({
+            "episodeId": eid, "tag": e.get("tag") or "", "title": e.get("title") or "",
+            "summary": e.get("summary") or "", "sequence": e.get("sequence") or 0,
+            "status": e.get("status") or "", "commitCount": commit_count,
+            "fileCount": len(files), "conceptCount": active_count.get(eid, 0),
+            # A capped file list so clicking a beat can amber its files even before the
+            # heavier /api/review/episodes payload has loaded (self-sufficient node).
+            "files": files[:20],
+            "deferred": deferred, "abandoned": abandoned, "branchOverflow": overflow,
+        })
+
+    return {"spine": spine, "parked": parked[:_MAX_PARKED],
+            "parkedOverflow": max(0, len(parked) - _MAX_PARKED), "hiddenOps": hidden_ops}

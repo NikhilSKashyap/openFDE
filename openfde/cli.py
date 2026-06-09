@@ -1,10 +1,15 @@
-"""CLI entry point: openfde watch <path>
+"""CLI entry point: openfde watch <path> · openfde cc/codex "<prompt>"
 
 Usage:
     openfde watch /path/to/repo
     openfde watch /path/to/repo --port 8080
     openfde watch /path/to/repo --no-open
     python -m openfde watch /path/to/repo
+
+    openfde cc "make the login button async"       # Claude Code, prompt captured
+    openfde codex "tighten error handling in api"  # Codex (workspace-write)
+    # Both EDIT the repo, capture the prompt as an OpenFDE episode, and leave the
+    # changes in the work tree for OpenFDE to Review and Land (no auto-commit).
 """
 
 import argparse
@@ -47,6 +52,20 @@ def main() -> None:
         help="Do not auto-open browser tab",
     )
 
+    # ── Prompt-capture wrappers: run an external agent, capture the prompt ──────
+    #    `openfde cc "…"`  (alias: claude-code)   ·   `openfde codex "…"`
+    for name, aliases, agent in (
+        ("cc", ["claude-code"], "Claude Code"),
+        ("codex", [], "Codex"),
+    ):
+        wp = sub.add_parser(
+            name, aliases=aliases,
+            help=f"Run {agent} on a prompt; capture it as an OpenFDE prompt episode",
+        )
+        wp.add_argument("prompt", help="The prompt to run (quote it)")
+        wp.add_argument("--path", default=".", help="Repository path (default: current directory)")
+        wp.add_argument("--model", default=None, help="Optional model override")
+
     args = parser.parse_args()
 
     if args.command == "watch":
@@ -56,6 +75,15 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\n  openfde stopped.")
             sys.exit(0)
+    elif args.command in ("cc", "claude-code", "codex"):
+        from openfde.prompt_wrapper import run_prompt_wrapper
+        kind = "codex" if args.command == "codex" else "claude-code"
+        agent = "Codex" if kind == "codex" else "Claude Code"
+        print(f"openfde: running {agent} — editing only, OpenFDE will review & land. Working…")
+        out = run_prompt_wrapper(kind, args.prompt, args.path, args.model)
+        print(out["message"])
+        # Non-zero exit only when the agent truly failed with no useful change.
+        sys.exit(0 if out["episode"]["status"] in ("reviewing", "complete_no_changes") else 1)
     else:
         parser.print_help()
         sys.exit(1)

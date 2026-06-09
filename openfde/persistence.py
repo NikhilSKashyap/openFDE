@@ -224,6 +224,7 @@ class Persistence:
         self.approvals_path   = openfde_dir / "approvals.json"
         self.agent_settings_path = openfde_dir / "agent_settings.json"
         self.concept_cards_path = openfde_dir / "concept_cards.json"
+        self.episodes_path = openfde_dir / "episodes.json"
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
@@ -511,6 +512,114 @@ class Persistence:
         cards.insert(0, card)
         self._write_json(self.concept_cards_path, cards[:cap])
         return card
+
+    # ------------------------------------------------------------------ #
+    #  Prompt episodes (OpenFDE-owned commits — Land·Watch·Review)         #
+    # ------------------------------------------------------------------ #
+    #  A durable "prompt turn": the user's intent + the runs/events it
+    #  spawned + the commit(s) OpenFDE lands for it. The Prompt Story Rail
+    #  renders these newest-first; commits become evidence under a prompt.
+
+    def load_episodes(self) -> list:
+        """Load prompt episodes (newest-first).
+
+        Returns:
+            list[dict] — episode records; empty when no file exists.
+        """
+        raw = self._read_json(self.episodes_path, [])
+        return raw if isinstance(raw, list) else []
+
+    def upsert_episode(self, episode: dict, cap: int = 200) -> dict:
+        """Insert or update an episode by episodeId, keeping the most recent `cap`.
+
+        Assigns story metadata (sequence/tag/title/summary) on first write and
+        leaves it untouched thereafter, so a prompt keeps its number/label for life.
+
+        Args:
+            episode: dict — episode record; must contain 'episodeId'.
+            cap: int — maximum episodes retained.
+
+        Returns:
+            dict — the stored episode (enriched in place).
+        """
+        from openfde.episode_summary import enrich_episode
+        episodes = self.load_episodes()
+        eid = episode.get("episodeId")
+        others = [e for e in episodes if e.get("episodeId") != eid]
+        max_seq = max((e.get("sequence") or 0) for e in others) if others else 0
+        enrich_episode(episode, max_seq)            # assigns sequence/tag/title/summary if absent
+        others.insert(0, episode)
+        self._write_json(self.episodes_path, others[:cap])
+        return episode
+
+    def backfill_episode_meta(self) -> list:
+        """Lazily assign story metadata to any episode missing it; persist if changed.
+
+        Covers episodes created before the story-meta upgrade (no sequence/tag/title/
+        summary). New numbers are assigned oldest-first (by ``createdAt``) above the
+        current max, so ordering stays monotonic. Idempotent — a no-op once every
+        episode is enriched.
+
+        Returns:
+            list[dict] — episodes newest-first (enriched).
+        """
+        from openfde.episode_summary import enrich_episode
+        eps = self.load_episodes()
+        if not eps:
+            return eps
+        missing = [e for e in eps if not (e.get("sequence") and e.get("tag")
+                                          and e.get("title") and e.get("summary"))]
+        if not missing:
+            return eps
+        max_seq = max((e.get("sequence") or 0) for e in eps)
+        for e in sorted(missing, key=lambda x: x.get("createdAt") or ""):
+            max_seq = enrich_episode(e, max_seq)
+        self._write_json(self.episodes_path, eps)
+        return eps
+
+    def get_episode(self, episode_id: str) -> dict:
+        """Return a single episode by id, or None.
+
+        Args:
+            episode_id: str — episode identifier.
+
+        Returns:
+            dict | None — the episode, or None.
+        """
+        for e in self.load_episodes():
+            if e.get("episodeId") == episode_id:
+                return e
+        return None
+
+    def latest_active_episode(self) -> dict:
+        """Return the newest episode still awaiting review/land (open|reviewing).
+
+        Used by the Land flow and the prompt-capture wrappers to find the episode
+        a fresh worktree change should attach to.
+
+        Returns:
+            dict | None — the newest open/reviewing episode, or None.
+        """
+        for e in self.load_episodes():                 # newest-first
+            if e.get("status") in ("open", "reviewing"):
+                return e
+        return None
+
+    def get_open_episode_for_run(self, run_id: str) -> dict:
+        """Return the episode already linked to a run id, or None.
+
+        Args:
+            run_id: str — run identifier.
+
+        Returns:
+            dict | None — the linked episode, or None.
+        """
+        if not run_id:
+            return None
+        for e in self.load_episodes():
+            if run_id in (e.get("runIds") or []):
+                return e
+        return None
 
     def get_run(self, run_id: str) -> dict:
         """Return a single run record by id, or None.
