@@ -163,6 +163,65 @@ class CaptureLoopTest(unittest.TestCase):
             self.assertEqual(len(p.load_episodes()), 0)        # never edited our repo → ignored
 
 
+class TurnBoundaryLandTest(unittest.TestCase):
+    """The turn-boundary / idle land (`_land_active_capture`) commits a reviewing capture
+    episode's FULL dirty set, clustered into one commit per logical change."""
+
+    def _repo(self, d):
+        import subprocess
+        from openfde import git_timeline as gt
+        root = Path(d).resolve()
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(root), capture_output=True, text=True)
+        g("init", "-q"); g("config", "user.email", "t@e.com"); g("config", "user.name", "T")
+        (root / ".gitignore").write_text("\n".join(gt._IGNORE_ENTRIES) + "\n")
+        (root / "seed.py").write_text("x\n"); g("add", "-A")
+        g("-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-q", "-m", "init")
+        return root, g
+
+    def test_lands_full_set_clustered(self):
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            root, g = self._repo(d)
+            p = Persistence(root / ".openfde")
+            p.upsert_episode({"episodeId": "episode_tb", "title": "Turn Boundary", "prompt": "do it",
+                              "source": "openfde-capture", "status": "reviewing", "sessionId": "sess1",
+                              "files": ["feat.py", "frontend/ui.jsx"], "commitShas": []})
+            (root / "feat.py").write_text("feature\n")                 # scope "."
+            (root / "frontend").mkdir(); (root / "frontend" / "ui.jsx").write_text("ui\n")  # scope frontend
+            os.environ["OPENFDE_LLM_SUMMARY"] = "0"                    # deterministic — no CLI subprocess
+            try:
+                asyncio.run(pc._land_active_capture(root, p, _NullManager(), {}, session_id="sess1"))
+            finally:
+                os.environ.pop("OPENFDE_LLM_SUMMARY", None)
+            ep = p.get_episode("episode_tb")
+            self.assertEqual(ep["status"], "landed")
+            self.assertGreaterEqual(len(ep["commitShas"]), 2)         # clustered by scope
+            self.assertEqual(len(ep.get("commitMeta") or {}), len(ep["commitShas"]))
+            committed = set()
+            for sha in ep["commitShas"]:
+                committed |= set(g("show", "--name-only", "--format=", sha).stdout.split())
+            self.assertEqual(committed, {"feat.py", "frontend/ui.jsx"})  # FULL set landed
+            self.assertEqual(g("status", "--porcelain").stdout.strip(), "")
+
+    def test_respects_session_filter(self):
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            root, g = self._repo(d)
+            p = Persistence(root / ".openfde")
+            p.upsert_episode({"episodeId": "episode_tb", "title": "T", "prompt": "x",
+                              "source": "openfde-capture", "status": "reviewing", "sessionId": "sess1",
+                              "files": ["feat.py"], "commitShas": []})
+            (root / "feat.py").write_text("feature\n")
+            os.environ["OPENFDE_LLM_SUMMARY"] = "0"
+            try:                                                       # a DIFFERENT session → no land
+                asyncio.run(pc._land_active_capture(root, p, _NullManager(), {}, session_id="other"))
+            finally:
+                os.environ.pop("OPENFDE_LLM_SUMMARY", None)
+            self.assertEqual(p.get_episode("episode_tb")["status"], "reviewing")  # left for its own turn
+
+
 class _NullManager:
     async def broadcast(self, msg):
         return None

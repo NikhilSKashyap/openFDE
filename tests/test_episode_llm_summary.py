@@ -177,5 +177,56 @@ class EnrichCacheTest(unittest.TestCase):
             self.assertEqual(p.get_episode("e").get("summarySource"), "deterministic")
 
 
+class ClusterChangesTest(unittest.TestCase):
+    """Group an episode's changed files into logical commits (one commit → one OpenPM task)."""
+
+    EP = {"title": "Multi-Commit Land", "prompt": "Make each logical change its own commit."}
+
+    def test_llm_groups_files(self):
+        files = ["openfde/autoland.py", "tests/test_autoland.py", "frontend/src/App.jsx"]
+        out = ('{"commits":['
+               '{"title":"Multi Commit Land","message":"Add clustered auto-land",'
+               '"files":["openfde/autoland.py","tests/test_autoland.py"]},'
+               '{"title":"OpenPM Tasks","message":"Show one task per commit","files":["frontend/src/App.jsx"]}]}')
+        cl = ls.cluster_changes(self.EP, files, invoke=lambda *a: out, providers=["codex-local"])
+        self.assertEqual([c["title"] for c in cl], ["Multi Commit Land", "OpenPM Tasks"])
+        self.assertEqual(cl[0]["message"], "openfde: Add clustered auto-land")     # openfde: prefix
+        self.assertEqual(sorted(f for c in cl for f in c["files"]), sorted(files))  # full coverage
+
+    def test_llm_leftovers_go_to_misc(self):
+        files = ["a.py", "b.py", "c.py"]
+        out = '{"commits":[{"title":"Thing","message":"do thing","files":["a.py"]}]}'  # drops b,c
+        cl = ls.cluster_changes(self.EP, files, invoke=lambda *a: out, providers=["codex-local"])
+        self.assertEqual(sorted(f for c in cl for f in c["files"]), ["a.py", "b.py", "c.py"])
+        self.assertTrue(any(c["title"] == "Misc Changes" for c in cl))
+
+    def test_bad_json_falls_back_to_scope(self):
+        files = ["openfde/x.py", "frontend/y.jsx"]
+        cl = ls.cluster_changes(self.EP, files, invoke=lambda *a: "no json here",
+                                providers=["codex-local"])
+        self.assertEqual(len(cl), 2)                          # deterministic by scope
+        self.assertEqual(sorted(f for c in cl for f in c["files"]), sorted(files))
+
+    def test_deterministic_fallback_no_llm(self):
+        files = ["openfde/x.py", "openfde/y.py", "frontend/z.jsx", "tests/t.py"]
+        cl = ls.cluster_changes(self.EP, files, providers=[])  # force deterministic
+        scopes = {tuple(sorted({f.split("/")[0] for f in c["files"]})) for c in cl}
+        self.assertEqual(scopes, {("openfde",), ("frontend",), ("tests",)})   # one commit per scope
+        self.assertEqual(sorted(f for c in cl for f in c["files"]), sorted(files))
+
+    def test_single_file_single_commit(self):
+        cl = ls.cluster_changes(self.EP, ["openfde/x.py"], providers=[])
+        self.assertEqual(len(cl), 1)
+        self.assertEqual(cl[0]["files"], ["openfde/x.py"])
+        self.assertEqual(cl[0]["title"], "Multi-Commit Land")
+
+    def test_cap_on_cluster_count(self):
+        files = [f"openfde/f{i}.py" for i in range(20)]
+        out = '{"commits":[' + ",".join(
+            f'{{"title":"C{i}","message":"m{i}","files":["openfde/f{i}.py"]}}' for i in range(20)) + ']}'
+        cl = ls.cluster_changes(self.EP, files, invoke=lambda *a: out, providers=["codex-local"])
+        self.assertLessEqual(len(cl), 8)                      # _MAX_CLUSTERS
+
+
 if __name__ == "__main__":
     unittest.main()

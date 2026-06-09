@@ -109,6 +109,36 @@ class ScopedCommitTest(unittest.TestCase):
         self.assertEqual(res["status"], "complete_no_changes")
         self.assertFalse(res["committed"])
 
+    # 7) Clustered Auto-Land: an episode spanning two scopes lands as TWO commits, both
+    #    attributed to the episode, with a durable per-commit title (commitMeta) + one
+    #    commit_created broadcast each — i.e. one OpenPM task per logical change.
+    def test_clustered_multi_commit(self):
+        (self.root / "a.py").write_text("a-clustered\n")               # scope "." → own commit
+        (self.root / "frontend").mkdir()
+        (self.root / "frontend" / "App.jsx").write_text("ui\n")        # scope "frontend"
+        ep = self.p.upsert_episode({"episodeId": "episode_2", "title": "Clustered Land",
+                                    "prompt": "do stuff", "status": "reviewing",
+                                    "files": ["a.py", "frontend/App.jsx"], "commitShas": []})
+        res = autoland.land_episode(self.root, self.p, ep, auto=True)   # allow_llm=False → by-scope
+        self.assertTrue(res["committed"])
+        self.assertEqual(len(res["commits"]), 2)                        # one commit per scope
+        saved = self.p.get_episode("episode_2")
+        self.assertEqual(len(saved["commitShas"]), 2)
+        titles = {m["title"] for m in saved["commitMeta"].values()}     # durable per-commit titles
+        self.assertEqual(len(titles), 2)
+        cc = [m for m in res["broadcasts"] if m["type"] == "commit_created"]
+        self.assertEqual(len(cc), 2)                                    # → two OpenPM cards
+        self.assertTrue(all(m.get("displayTitle") for m in cc))
+        committed = set()
+        for sha in saved["commitShas"]:
+            committed |= set(self._g("show", "--name-only", "--format=", sha).stdout.split())
+        self.assertEqual(committed, {"a.py", "frontend/App.jsx"})       # every file landed
+        self.assertEqual(self._porcelain(), "")                         # nothing left dirty
+        # each commit carries the episode trailer.
+        for sha in saved["commitShas"]:
+            self.assertIn("OpenFDE-Episode: episode_2",
+                          self._g("log", "-1", "--pretty=%B", sha).stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
