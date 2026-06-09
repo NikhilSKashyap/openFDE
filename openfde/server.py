@@ -73,6 +73,7 @@ from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
 from openfde.episode_summary import commit_display, repair_episode_tasks
+from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import episode_llm_summary
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
@@ -467,6 +468,71 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         _write_plan_md(persistence, path)
         await manager.broadcast({"type": "tasks_updated"})
         return web.json_response({"ok": True})
+
+    # ================================================================== #
+    #  REST — /api/issues/github  (durable intent v1)                     #
+    # ================================================================== #
+    # A GitHub Issue is intent BEFORE the episode: importing one creates an
+    # OpenPM To Do card carrying `intentSource` — it becomes Story memory only
+    # when an episode/commit lands. v1 rides the local `gh` CLI (no OAuth).
+
+    async def get_github_issues(request: web.Request) -> web.Response:
+        """List open GitHub issues for this repo via `gh issue list`.
+
+        Returns:
+            web.Response — {ok, issues: [normalized intents]} — or {ok: false,
+                error} when gh is missing/unauthenticated (soft failure: the UI
+                shows the message; nothing breaks without gh).
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            issues = await loop.run_in_executor(None, lambda: gh_issue_list(str(path)))
+            return web.json_response({"ok": True, "issues": issues})
+        except FileNotFoundError:
+            return web.json_response({"ok": False, "error": "gh CLI not installed"})
+        except Exception as exc:  # noqa: BLE001 — gh/auth/JSON problems are soft here
+            return web.json_response({"ok": False, "error": str(exc)[:300]})
+
+    async def post_github_issue_import(request: web.Request) -> web.Response:
+        """Import one GitHub issue as a durable-intent OpenPM card (idempotent).
+
+        Body: {issueNumber: 42} → fetched via `gh issue view`, or
+              {issue: {...raw issue JSON...}} → normalized directly (no gh needed).
+
+        Side effects: upserts the OpenPM card (To Do; board state preserved on
+        re-import), writes tasks.json, broadcasts tasks_updated.
+
+        Returns:
+            web.Response — {ok, task, created} | {ok: false, error} (400 for a
+                malformed payload, 502 when gh itself fails).
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        try:
+            if isinstance(body.get("issue"), dict):
+                intent = normalize_issue(body["issue"])
+            elif body.get("issueNumber") is not None:
+                num = int(body["issueNumber"])
+                loop = asyncio.get_event_loop()
+                intent = await loop.run_in_executor(
+                    None, lambda: gh_issue_view(num, str(path)))
+            else:
+                return web.json_response(
+                    {"ok": False, "error": "provide issueNumber or issue"}, status=400)
+        except ValueError as exc:                       # malformed payload/number
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except FileNotFoundError:
+            return web.json_response(
+                {"ok": False, "error": "gh CLI not installed"}, status=502)
+        except Exception as exc:  # noqa: BLE001 — gh exec/auth/JSON failure
+            return web.json_response({"ok": False, "error": str(exc)[:300]}, status=502)
+        tasks = persistence.load_tasks()
+        tasks, task, created = upsert_intent_task(tasks, intent)
+        persistence.save_tasks(tasks)
+        await manager.broadcast({"type": "tasks_updated"})
+        return web.json_response({"ok": True, "task": task, "created": created})
 
     # ================================================================== #
     #  REST — /api/events                                                 #
@@ -1359,6 +1425,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "eventIds": [], "projectEntryIds": [], "commitShas": [],
             "files": [], "summary": (body.get("summary") or "").strip(),
         }
+        # Durable intent this work serves (e.g. a GitHub issue card): carried on the
+        # episode so commits/Story can trace back to the issue. Optional, shape-checked
+        # only loosely — the issue import path produces it, manual callers may omit it.
+        if isinstance(body.get("intentSource"), dict):
+            ep["intentSource"] = body["intentSource"]
         persistence.upsert_episode(ep)
         await manager.broadcast({"type": "episode_updated", "episode": ep})
         return web.json_response({"ok": True, "episode": ep})
@@ -2794,6 +2865,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_put( "/api/state",                 put_state)
     app.router.add_get( "/api/tasks",                 get_tasks)
     app.router.add_put( "/api/tasks",                 put_tasks)
+    app.router.add_get( "/api/issues/github/list",    get_github_issues)
+    app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_get( "/api/events",                get_events)
     app.router.add_post("/api/events",                post_event)
     app.router.add_get( "/api/project",               get_project)

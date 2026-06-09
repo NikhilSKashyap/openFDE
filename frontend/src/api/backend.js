@@ -97,6 +97,24 @@ export const getTasks = () => apiFetch('/api/tasks')
 export const putTasks = (tasks) =>
   apiFetch('/api/tasks', { method: 'PUT', body: JSON.stringify(tasks) })
 
+// ── GitHub issue intents (durable intent v1 — local gh CLI) ───────────────
+
+/**
+ * List open GitHub issues for this repo (via `gh` on the backend).
+ *
+ * @returns {Promise<{ok: boolean, issues?: Array, error?: string}|null>}
+ */
+export const listGithubIssues = () => apiFetch('/api/issues/github/list')
+
+/**
+ * Import one GitHub issue as a durable-intent OpenPM card (idempotent).
+ *
+ * @param {{issueNumber?: number, issue?: Object}} payload
+ * @returns {Promise<{ok: boolean, task?: Object, created?: boolean, error?: string}|null>}
+ */
+export const importGithubIssue = (payload) =>
+  apiFetch('/api/issues/github/import', { method: 'POST', body: JSON.stringify(payload) })
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 /**

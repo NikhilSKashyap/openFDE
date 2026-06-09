@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { getTasks, importGithubIssue } from '../../api/backend'
 
 const COLS = [
   { id: 'todo',    label: 'To Do' },
@@ -48,6 +49,25 @@ export default function OpenPM({
   // clusters a prompt's commits since they share its sequence); 'tag' = by prompt
   // tag oldest-first (chronological). Kanban columns + gates are unchanged.
   const [sortMode, setSortMode]       = useState('story')
+  // GitHub issue import (durable intent v1): issue # → To Do card with intentSource.
+  const [issueOpen, setIssueOpen]     = useState(false)
+  const [issueVal, setIssueVal]       = useState('')
+  const [issueBusy, setIssueBusy]     = useState(false)
+  const [issueErr, setIssueErr]       = useState('')
+
+  async function doImportIssue() {
+    const num = parseInt((issueVal || '').replace(/[^0-9]/g, ''), 10)
+    if (!num) { setIssueErr('issue # required'); return }
+    setIssueBusy(true); setIssueErr('')
+    const res = await importGithubIssue({ issueNumber: num })
+    setIssueBusy(false)
+    if (!res?.ok) { setIssueErr(res?.error || 'import failed'); return }
+    // Hydrate from the backend (it persisted the upsert) so this board re-renders
+    // with the card; the PUT round-trip then no-ops server-side (unchanged list).
+    const saved = await getTasks()
+    if (Array.isArray(saved)) pmDispatch({ type: 'HYDRATE_TASKS', tasks: saved })
+    setIssueVal(''); setIssueOpen(false)
+  }
 
   function orderTasks(list) {
     const arr = [...list]
@@ -173,6 +193,55 @@ export default function OpenPM({
           </button>
         )}
         <div style={{ flex: 1 }} />
+        {/* GitHub issue → durable intent: issue # becomes a To Do card (gh CLI). */}
+        {issueOpen ? (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <input
+              autoFocus
+              placeholder="#42"
+              value={issueVal}
+              onChange={e => { setIssueVal(e.target.value); setIssueErr('') }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') doImportIssue()
+                if (e.key === 'Escape') { setIssueOpen(false); setIssueVal(''); setIssueErr('') }
+              }}
+              style={{
+                width: 52, fontSize: 11, fontFamily: 'inherit', color: 'var(--text)',
+                background: 'var(--surface-2)', border: '1px solid rgba(74,158,255,0.4)',
+                borderRadius: 99, padding: '1px 8px', outline: 'none',
+              }}
+            />
+            <button
+              onClick={doImportIssue}
+              disabled={issueBusy}
+              style={{
+                padding: '1px 8px', borderRadius: 99, cursor: issueBusy ? 'wait' : 'pointer',
+                fontFamily: 'inherit', fontSize: 10, color: 'var(--dotted)',
+                background: 'rgba(74,158,255,0.10)', border: '1px solid rgba(74,158,255,0.35)',
+              }}
+            >
+              {issueBusy ? 'Importing…' : 'Import'}
+            </button>
+            {issueErr && (
+              <span title={issueErr} style={{ fontSize: 10, color: 'var(--violation)', maxWidth: 180,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {issueErr}
+              </span>
+            )}
+          </span>
+        ) : (
+          <button
+            onClick={() => setIssueOpen(true)}
+            title="Import a GitHub issue as planned work (uses the local gh CLI)"
+            style={{
+              padding: '1px 8px', borderRadius: 99, cursor: 'pointer', fontFamily: 'inherit',
+              fontSize: 10, color: 'var(--dotted)', background: 'transparent',
+              border: '1px solid var(--border)',
+            }}
+          >
+            ⊕ Issue
+          </button>
+        )}
         {/* Story / Tag ordering — clusters a prompt's work items together. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
           <span style={{ textTransform: 'uppercase', letterSpacing: '0.4px' }}>Sort</span>
@@ -316,6 +385,39 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
         userSelect: 'none',
       }}
     >
+      {/* Durable intent — the GitHub issue this card came from. The badge links to
+          the issue; closed state and labels stay visible (intent is preserved,
+          never auto-deleted). Intent precedes the episode, so it renders first. */}
+      {task.intentSource?.provider === 'github' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4, flexWrap: 'wrap' }}>
+          <a
+            href={task.intentSource.url || undefined}
+            target="_blank" rel="noreferrer"
+            onClick={e => e.stopPropagation()}
+            title={`GitHub issue #${task.intentSource.issueNumber} · ${task.intentSource.state}`
+                   + `${task.intentSource.labels?.length ? ' · ' + task.intentSource.labels.join(', ') : ''}`
+                   + (task.intentSource.url ? ' — open on GitHub' : '')}
+            style={{
+              flexShrink: 0, fontSize: 9, fontWeight: 700, fontFamily: 'ui-monospace, monospace',
+              color: 'var(--dotted)', background: 'rgba(74,158,255,0.10)',
+              border: '1px solid rgba(74,158,255,0.3)', borderRadius: 5, padding: '0 5px',
+              letterSpacing: '0.3px', textDecoration: 'none', cursor: task.intentSource.url ? 'pointer' : 'default',
+            }}
+          >
+            #{task.intentSource.issueNumber}
+          </a>
+          <span style={{ fontSize: 9, color: 'var(--dotted)', fontWeight: 600, opacity: 0.9 }}>
+            github issue{task.intentSource.state === 'CLOSED' ? ' · closed' : ''}
+          </span>
+          {(task.intentSource.labels || []).slice(0, 3).map(l => (
+            <span key={l} style={{
+              fontSize: 9, color: 'var(--text-muted)',
+              border: '1px solid var(--border)', borderRadius: 5, padding: '0 4px',
+            }}>{l}</span>
+          ))}
+        </div>
+      )}
+
       {/* Prompt tag — the chapter this card belongs to (e.g. "P12 · Polish prompt
           story"). Cards from one prompt repeat the same tag, which groups them. */}
       {(task.episodeTag || task.promptLabel) && (
