@@ -3,16 +3,26 @@ openfde/prompt_story.py — Prompt Story Graph v1 (deterministic, no LLM).
 
 *Prompts become episodes. Episodes together become the story.* This derives a small
 **product memory graph** from prompt episodes — distinct from ``story.py`` (which
-narrates how a *code scope* flows). It answers: what are we building (active
-concepts), which ideas were parked (deferred), which were tried and dropped
-(abandoned), and which prompts/commits/files support each.
+narrates how a *code scope* flows). It answers: what are we building right now
+(**now**), what's queued (**next**), what's merely interesting (**watch**), which
+ideas were parked (**deferred**, with an optional revisit *trigger*), which were
+tried and dropped (**abandoned**), and which prompts/commits/files support each.
+
+Concepts carry two layers: the broad ``status`` (active/mixed/deferred/abandoned —
+the stable contract older consumers read) and the Step-48 ``lifecycle`` lane the UI
+renders (now/next/watch/deferred/abandoned). Both stay **derived at request time**
+from episodes/storyFacts — no concepts.json, no manual lifecycle editing yet.
 
 Deterministic heuristics only — no model calls, no network, no git mutation:
   - **active** concepts come from episode *titles* (already clean 3–6 word phrases),
-    merged by slug and carrying their episodeIds / tags / commits / files;
+    merged by slug and carrying their episodeIds / tags / commits / files; the latest
+    product episode's titles are lifecycle **now**, older ones **next**;
   - **deferred** / **abandoned** concepts are short phrases extracted from episode
     text on *strong* signals only ("deferred", "out of scope", "superseded",
-    "reverted", a line-initial "Remove …", …), capped per-episode to limit noise.
+    "reverted", a line-initial "Remove …", …), capped per-episode to limit noise;
+  - **next** ("Next:", "next slice", "next up") and **watch** ("Watch:", "maybe",
+    "consider", …) are weaker, explicitly-worded signals; a deferred unit with
+    revisit language ("until X lands", "once Y ships") yields the concept's trigger.
 
 The point is a useful story scaffold, not perfect NLP. A future slice can replace
 the extractor with a local-CLI summarizer (deterministic stays the fallback).
@@ -368,9 +378,9 @@ def build_story_map(episodes: list, concepts: list) -> dict:
     """Chronological **episode** story map for Story Tell mode.
 
     The unit is the *episode*, not the concept. Product (non-operational) episodes form a
-    left→right spine ordered by ``sequence`` ascending; each deferred/abandoned concept hangs
-    as a branch off the episode that produced it (its latest ``episodeIds`` member that is on
-    the spine), else lands in a side ``parked`` lane. Operational/meta episodes are hidden from
+    left→right spine ordered by ``sequence`` ascending; each deferred/watch/abandoned concept
+    hangs as a branch off the episode that produced it (its latest ``episodeIds`` member that is
+    on the spine), else lands in a side ``parked`` lane. Operational/meta episodes are hidden from
     the spine (only counted). Pure + deterministic — no measurement, no model calls — so the
     frontend renders a fixed set of episode boxes instead of measuring 80+ concept cards.
 
@@ -381,8 +391,8 @@ def build_story_map(episodes: list, concepts: list) -> dict:
 
     Returns:
         dict — ``{spine[], parked[], parkedOverflow, hiddenOps}``. Each spine node carries the
-            episode's own metrics (commit / file / concept counts) plus its deferred/abandoned
-            branch lists (capped); it never embeds concept cards.
+            episode's own metrics (commit / file / concept counts) plus its deferred/watch/
+            abandoned branch lists (capped); it never embeds concept cards.
     """
     episodes = episodes or []
     concepts = concepts or []
@@ -394,11 +404,14 @@ def build_story_map(episodes: list, concepts: list) -> dict:
 
     def _branch(c: dict) -> dict:
         return {"conceptId": c.get("id"), "title": c.get("title") or "",
-                "status": c.get("status"), "commitCount": c.get("commitCount") or 0,
+                "status": c.get("status"),
+                "lifecycle": c.get("lifecycle") or c.get("status"),
+                "trigger": c.get("trigger") or None,
+                "commitCount": c.get("commitCount") or 0,
                 "fileCount": c.get("fileCount") or 0}
 
     active_count: dict = {}
-    slots: dict = {}             # episodeId -> {"deferred": [...], "abandoned": [...]}
+    slots: dict = {}             # episodeId -> {"deferred": [...], "abandoned": [...], "watch": [...]}
     parked: list = []
     for c in concepts:
         status = c.get("status")
@@ -410,20 +423,27 @@ def build_story_map(episodes: list, concepts: list) -> dict:
             continue
         if status not in ("deferred", "abandoned"):
             continue
+        # Branch lane comes from the lifecycle (watch is a deferred-status concept that
+        # was only ever a weak-interest mention); plain status is the legacy fallback.
+        lane = status if status == "abandoned" else \
+            ("watch" if (c.get("lifecycle") or status) == "watch" else "deferred")
         on_spine = [eid for eid in eids if eid in seq_of]
         if on_spine:
             host = max(on_spine, key=lambda eid: seq_of[eid])    # the latest beat that touched it
-            slots.setdefault(host, {"deferred": [], "abandoned": []})[status].append(_branch(c))
+            slots.setdefault(host, {"deferred": [], "abandoned": [], "watch": []})[lane].append(_branch(c))
         else:
             parked.append({**_branch(c), "fromTag": (c.get("episodeTags") or [None])[0]})
 
     spine = []
     for e in spine_eps:
         eid = e.get("episodeId")
-        slot = slots.get(eid) or {"deferred": [], "abandoned": []}
+        slot = slots.get(eid) or {"deferred": [], "abandoned": [], "watch": []}
         deferred = slot["deferred"][:_MAX_BRANCH_PER_EP]
         abandoned = slot["abandoned"][:_MAX_BRANCH_PER_EP]
-        overflow = (len(slot["deferred"]) - len(deferred)) + (len(slot["abandoned"]) - len(abandoned))
+        watch = slot["watch"][:_MAX_BRANCH_PER_EP]
+        overflow = ((len(slot["deferred"]) - len(deferred))
+                    + (len(slot["abandoned"]) - len(abandoned))
+                    + (len(slot["watch"]) - len(watch)))
         commit_count = len(e.get("commitShas") or []) or len(e.get("commits") or [])
         files = list(e.get("files") or [])
         spine.append({
@@ -434,7 +454,8 @@ def build_story_map(episodes: list, concepts: list) -> dict:
             # A capped file list so clicking a beat can amber its files even before the
             # heavier /api/review/episodes payload has loaded (self-sufficient node).
             "files": files[:20],
-            "deferred": deferred, "abandoned": abandoned, "branchOverflow": overflow,
+            "deferred": deferred, "abandoned": abandoned, "watch": watch,
+            "branchOverflow": overflow,
         })
 
     return {"spine": spine, "parked": parked[:_MAX_PARKED],

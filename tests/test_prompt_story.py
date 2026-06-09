@@ -1,6 +1,7 @@
 """
 Tests for openfde.prompt_story.build_prompt_graph — the deterministic Prompt Story
-Graph v1 (active / deferred / abandoned concepts derived from prompt episodes).
+Graph (broad active / deferred / abandoned status, plus the Step-48 lifecycle lanes
+now / next / watch / deferred / abandoned derived from prompt episodes).
 """
 
 import unittest
@@ -203,6 +204,99 @@ class StoryMapTest(unittest.TestCase):
         self.assertEqual(sm["spine"], [])
         self.assertEqual(sm["parked"], [])
         self.assertEqual(sm["hiddenOps"], 0)
+
+    def test_watch_branch_hangs_off_its_episode(self):
+        # A watch concept branches off its beat in its own lane, not as deferred.
+        g = build_prompt_graph([
+            _ep("e2", 2, "Later Beat"),
+            _ep("e1", 1, "Story Rail", prompt="Watch: tag filters for the rail."),
+        ])
+        p1 = next(n for n in g["storyMap"]["spine"] if n["tag"] == "P1")
+        self.assertEqual(len(p1["watch"]), 1)
+        self.assertEqual(p1["watch"][0]["lifecycle"], "watch")
+        self.assertIn("tag filters", p1["watch"][0]["title"].lower())
+        self.assertEqual(p1["deferred"], [])
+
+
+class LifecycleTest(unittest.TestCase):
+    """Step 48 — the now / next / watch / deferred / abandoned lanes over broad status."""
+
+    def test_latest_episode_concepts_are_now_older_are_next(self):
+        g = build_prompt_graph([
+            _ep("e2", 2, "Story Lifecycle Lanes"),
+            _ep("e1", 1, "Passive Codex Capture"),
+        ])
+        by_title = {c["title"]: c for c in g["concepts"]}
+        self.assertEqual(by_title["Story Lifecycle Lanes"]["lifecycle"], "now")
+        self.assertEqual(by_title["Passive Codex Capture"]["lifecycle"], "next")
+        # broad status stays "active" for both (compat) and the lane counts are returned
+        self.assertEqual(by_title["Story Lifecycle Lanes"]["status"], "active")
+        self.assertEqual(by_title["Passive Codex Capture"]["status"], "active")
+        self.assertEqual(g["lifecycleCounts"]["now"], 1)
+        self.assertEqual(g["lifecycleCounts"]["next"], 1)
+
+    def test_explicit_next_signal_queues_concept(self):
+        g = build_prompt_graph([
+            _ep("e2", 2, "Story Lifecycle Lanes", prompt="Next: GitHub Issues sync."),
+            _ep("e1", 1, "Passive Codex Capture"),
+        ])
+        nxt = next(c for c in g["concepts"] if "github issues" in c["title"].lower())
+        # queued even though the mention came from the latest beat
+        self.assertEqual(nxt["lifecycle"], "next")
+        self.assertEqual(nxt["status"], "active")     # broad class: committed direction
+        self.assertTrue(any(e["label"] == "queues" for e in g["edges"]))
+
+    def test_watch_signals_make_watch_concepts(self):
+        g = build_prompt_graph([
+            _ep("e1", 1, "Story Lifecycle Lanes",
+                prompt="Watch: tag filters for the rail.\nMaybe a heatmap view for hotspots."),
+        ])
+        watch = [c for c in g["concepts"] if c["lifecycle"] == "watch"]
+        titles = " | ".join(c["title"].lower() for c in watch)
+        self.assertIn("tag filters", titles)
+        self.assertIn("heatmap view", titles)
+        for c in watch:
+            self.assertEqual(c["status"], "deferred")  # broad class stays in the old set
+        self.assertEqual(g["lifecycleCounts"]["watch"], 2)
+
+    def test_deferred_concept_carries_revisit_trigger(self):
+        g = build_prompt_graph([
+            _ep("e1", 1, "Capture Hardening",
+                prompt="Deferred: historical import until passive Codex capture lands."),
+        ])
+        d = next(c for c in g["concepts"] if c["lifecycle"] == "deferred")
+        self.assertEqual(d["title"], "Historical import")
+        self.assertEqual(d["trigger"], "until passive Codex capture lands")
+
+    def test_trigger_language_before_the_signal(self):
+        g = build_prompt_graph([
+            _ep("e1", 1, "Capture Hardening",
+                prompt="Once passive capture lands, defer historical import."),
+        ])
+        d = next(c for c in g["concepts"] if c["lifecycle"] == "deferred")
+        self.assertEqual(d["trigger"], "Once passive capture lands")
+        self.assertIn("historical import", d["title"].lower())
+
+    def test_watched_then_built_is_not_watch(self):
+        # Weak interest in P1, then actually built as P2's title → the build wins.
+        g = build_prompt_graph([
+            _ep("e2", 2, "Tag Filters"),
+            _ep("e1", 1, "Story Rail", prompt="Maybe tag filters."),
+        ])
+        c = next(c for c in g["concepts"] if c["title"].lower() == "tag filters")
+        self.assertEqual(c["lifecycle"], "now")
+
+    def test_operational_latest_does_not_own_now(self):
+        # The newest episode is operational → "now" falls to the latest PRODUCT beat.
+        g = build_prompt_graph([
+            {**_ep("e3", 3, "Curl Status", prompt="curl -s x"), "signal": "operational"},
+            _ep("e2", 2, "Real Feature"),
+            _ep("e1", 1, "Older Feature"),
+        ])
+        by_title = {c["title"]: c for c in g["concepts"]}
+        self.assertNotIn("Curl Status", by_title)
+        self.assertEqual(by_title["Real Feature"]["lifecycle"], "now")
+        self.assertEqual(by_title["Older Feature"]["lifecycle"], "next")
 
 
 if __name__ == "__main__":

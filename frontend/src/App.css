@@ -1260,11 +1260,13 @@
 }
 .tellmap-branch::before { content: ""; position: absolute; left: -7px; top: 12px; width: 7px; height: 1px; background: var(--border); }
 .tellmap-branch.deferred { border: 1px dashed var(--active); background: color-mix(in srgb, var(--active) 7%, transparent); }
+.tellmap-branch.watch { border: 1px dashed var(--dotted); background: color-mix(in srgb, var(--dotted) 6%, transparent); }
 .tellmap-branch.abandoned { border: 1px solid color-mix(in srgb, var(--violation) 55%, var(--border)); background: color-mix(in srgb, var(--violation) 6%, transparent); opacity: 0.85; }
 .tellmap-branch.parked { margin-left: 0; width: 168px; }
 .tellmap-branch.parked::before { display: none; }
 .tellmap-branch-kind { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
 .tellmap-branch.deferred .tellmap-branch-kind { color: var(--active); }
+.tellmap-branch.watch .tellmap-branch-kind { color: var(--dotted); }
 .tellmap-branch.abandoned .tellmap-branch-kind { color: var(--violation); }
 .tellmap-branch-title { font-size: 10px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tellmap-branch.abandoned .tellmap-branch-title { text-decoration: line-through; color: var(--text-muted); }

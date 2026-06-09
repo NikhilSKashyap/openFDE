@@ -5,8 +5,12 @@ import { getPromptGraph } from '../../api/backend'
  * Story view — the conceptual narrative built from prompt episodes.
  *
  * Two modes share one header:
- *   • Tell OFF — the **concept columns** (Active / Deferred / Abandoned): a product
- *     memory of what we're building, each card linking back to its prompts/commits/files.
+ *   • Tell OFF — the **lifecycle columns** (Now / Next / Watch / Deferred / Abandoned,
+ *     Step 48): a product memory with decision lifecycle — what we're building right
+ *     now, what's queued, what's merely interesting, what's parked (with its revisit
+ *     trigger), and what no longer fits. Each card links back to its prompts/commits/
+ *     files. Lanes filter on the backend-derived `concept.lifecycle` (broad `status`
+ *     stays the legacy fallback).
  *   • Tell ON  — the **chronological episode story map** (`StoryTellMap`): product
  *     episodes as canvas-like boxes left→right by sequence, with deferred/abandoned
  *     ideas branching below the episode that produced them. The unit is the *episode*,
@@ -20,13 +24,16 @@ import { getPromptGraph } from '../../api/backend'
  * @param {Function} props.setActiveView      - (view) => void
  */
 const LANES = [
-  { key: 'active',    label: 'Active',    statuses: ['active', 'mixed'],
-    hint: 'What we are building' },
-  { key: 'deferred',  label: 'Deferred',  statuses: ['deferred'],
-    hint: 'Parked for later' },
-  { key: 'abandoned', label: 'Abandoned', statuses: ['abandoned'],
-    hint: 'Tried and dropped' },
+  { key: 'now',       label: 'Now',       hint: 'Active build direction' },
+  { key: 'next',      label: 'Next',      hint: 'Next 1–3 slices' },
+  { key: 'watch',     label: 'Watch',     hint: 'Interesting, not committed' },
+  { key: 'deferred',  label: 'Deferred',  hint: 'Waiting on a trigger' },
+  { key: 'abandoned', label: 'Abandoned', hint: 'No longer fits' },
 ]
+
+// Older payloads may lack `lifecycle` — fall back from the broad status.
+const LEGACY_LIFECYCLE = { active: 'next', mixed: 'next', deferred: 'deferred', abandoned: 'abandoned' }
+const lifecycleOf = c => c.lifecycle || LEGACY_LIFECYCLE[c.status] || 'next'
 
 export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCommit, onSelectConcept, setActiveView }) {
   const [graph, setGraph]     = useState(null)
@@ -49,6 +56,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
 
   const concepts = graph?.concepts || []
   const epById = Object.fromEntries(episodes.map(e => [e.episodeId, e]))
+  const lanes = LANES.map(l => ({ ...l, items: concepts.filter(c => lifecycleOf(c) === l.key) }))
 
   function pick(c) {
     const next = selectedId === c.id ? null : c.id
@@ -71,7 +79,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
         <div style={{ flex: 1 }} />
         {graph?.counts && !tellMode && (
           <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-            {graph.counts.active || 0} active · {graph.counts.deferred || 0} deferred · {graph.counts.abandoned || 0} abandoned
+            {lanes.map(l => `${l.items.length} ${l.key}`).join(' · ')}
           </span>
         )}
         {concepts.length > 0 && (
@@ -103,6 +111,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
           <LegendSwatch color="var(--accent)"    label="episode" />
           <LegendSwatch color="var(--accent)"    filled label="now" />
           <LegendSwatch color="var(--active)"    dashed label="deferred" />
+          <LegendSwatch color="var(--dotted)"    dashed label="watch" />
           <LegendSwatch color="var(--violation)" label="abandoned" />
           <span style={{ opacity: 0.7 }}>· left → right by sequence · click a beat to open it</span>
         </div>
@@ -113,16 +122,16 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
       ) : concepts.length === 0 ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12, lineHeight: 1.5 }}>
           No concepts yet. Prompt episodes (captured from any agent, or landed through OpenFDE)
-          become the story — their titles are the active concepts, and ideas you defer or drop
-          show up in the other lanes.
+          become the story — the latest beat's titles are what you're building <b>now</b>, queued
+          ideas land in <b>next</b>, and ideas you watch, defer, or drop fill the other lanes.
         </div>
       ) : tellMode ? (
         <StoryTellMap graph={graph} epById={epById}
                       onSpotlightEpisode={onSpotlightEpisode} setActiveView={setActiveView} />
       ) : (
         <div style={{ display: 'flex', gap: 8, flex: 1, overflow: 'hidden', minHeight: 0 }}>
-          {LANES.map(lane => {
-            const items = concepts.filter(c => lane.statuses.includes(c.status))
+          {lanes.map(lane => {
+            const items = lane.items
             return (
               <Lane key={lane.key} lane={lane} count={items.length}>
                 {items.map(c => (
@@ -185,9 +194,10 @@ function StoryTellMap({ graph, epById, onSpotlightEpisode, setActiveView }) {
               <EpisodeBox node={n} isNow={i === last} onClick={() => open(n)} />
               {i < last && <SpineArrow />}
             </div>
-            {(n.deferred.length > 0 || n.abandoned.length > 0 || n.branchOverflow > 0) && (
+            {(n.deferred.length > 0 || n.abandoned.length > 0 || (n.watch || []).length > 0 || n.branchOverflow > 0) && (
               <div className="tellmap-branches">
                 {n.deferred.map(b => <BranchBox key={b.conceptId} branch={b} kind="deferred" />)}
+                {(n.watch || []).map(b => <BranchBox key={b.conceptId} branch={b} kind="watch" />)}
                 {n.abandoned.map(b => <BranchBox key={b.conceptId} branch={b} kind="abandoned" />)}
                 {n.branchOverflow > 0 && <div className="tellmap-branch-more">+{n.branchOverflow} more</div>}
               </div>
@@ -202,7 +212,8 @@ function StoryTellMap({ graph, epById, onSpotlightEpisode, setActiveView }) {
           <div className="tellmap-parked-row">
             {map.parked.map(b => (
               <BranchBox key={b.conceptId} branch={b} parked
-                         kind={b.status === 'abandoned' ? 'abandoned' : 'deferred'} />
+                         kind={b.lifecycle === 'watch' ? 'watch'
+                           : b.status === 'abandoned' ? 'abandoned' : 'deferred'} />
             ))}
             {map.parkedOverflow > 0 && <div className="tellmap-branch-more">+{map.parkedOverflow} more</div>}
           </div>
@@ -238,10 +249,12 @@ function EpisodeBox({ node, isNow, onClick }) {
 }
 
 function BranchBox({ branch, kind, parked }) {
+  const kindLabel = kind === 'abandoned' ? '✕ dropped' : kind === 'watch' ? 'watch' : 'deferred'
   return (
-    <div className={`tellmap-branch ${kind}${parked ? ' parked' : ''}`} title={branch.title}>
+    <div className={`tellmap-branch ${kind}${parked ? ' parked' : ''}`}
+         title={branch.trigger ? `${branch.title} — revisit ${branch.trigger}` : branch.title}>
       <span className="tellmap-branch-kind">
-        {kind === 'abandoned' ? '✕ dropped' : 'deferred'}
+        {kindLabel}
         {parked && branch.fromTag ? ` · ${branch.fromTag}` : ''}
       </span>
       <span className="tellmap-branch-title">{branch.title}</span>
@@ -273,8 +286,11 @@ function LegendSwatch({ color, dashed, filled, label }) {
   )
 }
 
-// ── Lane column (Tell OFF — unchanged) ──────────────────────────────────
-const LANE_COLOR = { active: 'var(--solid)', deferred: 'var(--active)', abandoned: 'var(--text-muted)' }
+// ── Lane column (Tell OFF) ──────────────────────────────────────────────
+const LANE_COLOR = {
+  now: 'var(--solid)', next: 'var(--accent)', watch: 'var(--dotted)',
+  deferred: 'var(--active)', abandoned: 'var(--text-muted)',
+}
 
 function Lane({ lane, count, children }) {
   return (
@@ -302,10 +318,10 @@ function Lane({ lane, count, children }) {
   )
 }
 
-// ── Concept card (Tell OFF — unchanged) ─────────────────────────────────
+// ── Concept card (Tell OFF) ─────────────────────────────────────────────
 function ConceptCard({ concept, laneKey, expanded, episodesById, onPick, onEpisode, onCommit, onShowCanvas }) {
   const c = concept
-  const muted     = laneKey === 'deferred'
+  const muted     = laneKey === 'deferred' || laneKey === 'watch'   // parked lanes: dashed
   const abandoned = laneKey === 'abandoned'
   const accent = LANE_COLOR[laneKey]
 
@@ -336,6 +352,14 @@ function ConceptCard({ concept, laneKey, expanded, episodesById, onPick, onEpiso
         <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, marginBottom: 5,
           ...(expanded ? {} : { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) }}>
           {c.summary}
+        </div>
+      )}
+
+      {/* Deferred revisit trigger — "Trigger: after passive Codex capture lands" */}
+      {c.trigger && (
+        <div title={`Revisit ${c.trigger}`} style={{ fontSize: 10, color: 'var(--active)', lineHeight: 1.35, marginBottom: 5,
+          ...(expanded ? {} : { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) }}>
+          <span style={{ fontWeight: 700 }}>Trigger:</span> {c.trigger}
         </div>
       )}
 

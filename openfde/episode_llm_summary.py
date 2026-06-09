@@ -227,8 +227,13 @@ def deterministic_story_facts(episode: dict) -> dict:
     from openfde.prompt_story import _signals
     operational = bool(episode.get("signal") == "operational" or is_operational(episode.get("prompt") or ""))
     deferred, abandoned = [], []
-    for phrase, st in _signals(episode):
-        (abandoned if st == "abandoned" else deferred).append(phrase)
+    # storyFacts carry only the strong lanes; next/watch (and the deferred revisit
+    # trigger) are re-derived from the raw text by build_prompt_graph at read time.
+    for phrase, kind, _trigger in _signals(episode):
+        if kind == "abandoned":
+            abandoned.append(phrase)
+        elif kind == "deferred":
+            deferred.append(phrase)
     title = (episode.get("title") or "").strip()
     return {
         "concepts": [] if operational else ([title] if title else []),
