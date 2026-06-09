@@ -134,6 +134,10 @@ _GENERIC_TITLE = {
     "yes", "ya", "yeah", "ok", "okay", "k", "sure", "no", "nope", "done", "thanks",
     "here", "prompt", "change", "update", "fix", "this", "that", "it", "n/a", "none",
     "stuff", "thing", "things", "the prompt", "the cc prompt", "wip", "todo", "test",
+    # Markdown code-fence openers: a prompt starting "```text" must not become a
+    # title called "text" (the backtick strip in is_bad_title leaves the language token).
+    "text", "bash", "python", "json", "diff", "shell", "sh", "console", "code",
+    "markdown", "md", "yaml", "html", "css", "js", "jsx", "ts", "tsx",
 }
 # Leading boilerplate/operational phrasings a title must not start with.
 _BAD_TITLE_LEAD = re.compile(

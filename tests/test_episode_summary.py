@@ -100,6 +100,16 @@ class BadTitleTest(unittest.TestCase):
         self.assertTrue(es.is_bad_title("Here’s the CC prompt"))   # curly '
         self.assertTrue(es.is_bad_title("Here's the CC prompt"))       # straight ' (preserved)
         self.assertTrue(es.is_bad_title("You’re implementing the slice"))
+
+    def test_is_bad_title_catches_code_fence_openers(self):
+        # A prompt starting with a markdown fence ("```text") produced a commit/card
+        # literally titled "text" (observed live, commit 0f7a653) — fence language
+        # tokens are never titles, with or without the backticks.
+        for t in ["```text", "```bash", "```", "text", "Text", "json", "`python`"]:
+            self.assertTrue(es.is_bad_title(t), t)
+        # …but real multi-word titles that merely CONTAIN such a word stay valid.
+        for t in ["Text rendering pipeline", "JSON schema validation", "Bash wrapper capture"]:
+            self.assertFalse(es.is_bad_title(t), t)
         self.assertFalse(es.is_bad_title("LLM Story Summarizer"))      # clean unaffected
 
     def test_distill_strips_implement_and_version(self):
