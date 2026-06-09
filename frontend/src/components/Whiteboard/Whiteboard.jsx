@@ -1,6 +1,7 @@
 import WhiteboardCanvas from './WhiteboardCanvas'
 import OpenPM from '../OpenPM/OpenPM'
 import Timeline from '../Timeline/Timeline'
+import Story from '../Story/Story'
 import CommitChipRail from './CommitChipRail'
 
 export default function Whiteboard({
@@ -23,11 +24,26 @@ export default function Whiteboard({
   runNodeStates,
   runEdgeStates,
   watchBoxIds = null,
+  liveFollow = true,
+  onToggleLiveFollow,
   spotlight = null,
   onClearSpotlight,
   onSpotlightCommit,
   gitCommits,
   onSelectCommit,
+  worktreeDirty = false,
+  worktreeCount = 0,
+  onReviewChanges,
+  reviewActive = false,
+  episodes = [],
+  outsideBucket = null,
+  onSpotlightEpisode,
+  activeEpisodeId = null,
+  onSpotlightOutside,
+  outsideActive = false,
+  // Story props
+  onSelectConcept,
+  highlightTags = null,
   // PM props
   tasks, pmDispatch,
   designEvents, onTaskEvent,
@@ -62,6 +78,21 @@ export default function Whiteboard({
         selectedTaskId={selectedTaskId}
         setSelectedTaskId={setSelectedTaskId}
         onTaskEvent={onTaskEvent}
+        onSpotlightCommit={onSpotlightCommit}
+        highlightTags={highlightTags}
+        onClearHighlight={onSelectConcept ? () => onSelectConcept(null) : null}
+      />
+    )
+  }
+
+  if (activeView === 'story') {
+    return (
+      <Story
+        episodes={episodes}
+        onSpotlightEpisode={onSpotlightEpisode}
+        onSpotlightCommit={onSpotlightCommit}
+        onSelectConcept={onSelectConcept}
+        setActiveView={setActiveView}
       />
     )
   }
@@ -73,9 +104,16 @@ export default function Whiteboard({
         {/* Canvas-native commit lens (Step 37a Slice 3) — click a chip to see
             what changed; never replaces the Timeline tab. */}
         <CommitChipRail
-          commits={gitCommits}
-          activeSha={spotlight?.kind === 'commit' ? spotlight.sha : null}
-          onSpotlightCommit={onSpotlightCommit}
+          worktreeDirty={worktreeDirty}
+          worktreeCount={worktreeCount}
+          onReviewChanges={onReviewChanges}
+          reviewActive={reviewActive}
+          episodes={episodes}
+          outsideBucket={outsideBucket}
+          onSpotlightEpisode={onSpotlightEpisode}
+          activeEpisodeId={activeEpisodeId}
+          onSpotlightOutside={onSpotlightOutside}
+          outsideActive={outsideActive}
         />
       </div>
       <div className="wb-body">
@@ -99,6 +137,8 @@ export default function Whiteboard({
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
           watchBoxIds={watchBoxIds}
+          liveFollow={liveFollow}
+          onToggleLiveFollow={onToggleLiveFollow}
           spotlight={spotlight}
           onClearSpotlight={onClearSpotlight}
         />

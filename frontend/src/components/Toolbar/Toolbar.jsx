@@ -1,4 +1,4 @@
-export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onOpenCommandPalette, onHome }) {
+export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onExpandAll, onCollapseAll, onOpenCommandPalette, onHome }) {
   const tools = [
     { id: 'select', label: 'Select', icon: <IconCursor /> },
     { id: 'dotted', label: 'Dotted box', icon: <IconDottedBox /> },
@@ -42,6 +42,18 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
         <span>Lock</span>
       </button>
 
+      {/* Expand / collapse all modules */}
+      <button className="btn" title="Expand all modules"
+        onClick={() => { onExpandAll?.(); setActiveView('whiteboard') }}>
+        <IconExpandAll />
+        <span>Expand</span>
+      </button>
+      <button className="btn" title="Collapse all modules"
+        onClick={() => { onCollapseAll?.(); setActiveView('whiteboard') }}>
+        <IconCollapseAll />
+        <span>Collapse</span>
+      </button>
+
       <div className="toolbar-spacer" />
 
       {/* View switchers */}
@@ -55,6 +67,22 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
           <span>Canvas</span>
         </button>
         <button
+          className={`btn${activeView === 'pm' ? ' view-active' : ''}`}
+          onClick={() => setActiveView('pm')}
+          title="OpenPM — work items grouped by prompt"
+        >
+          <IconOpenPM />
+          <span>OpenPM</span>
+        </button>
+        <button
+          className={`btn${activeView === 'story' ? ' view-active' : ''}`}
+          onClick={() => setActiveView('story')}
+          title="Story — the conceptual narrative built from prompts"
+        >
+          <IconStory />
+          <span>Story</span>
+        </button>
+        <button
           className={`btn${activeView === 'timeline' ? ' view-active' : ''}`}
           onClick={() => setActiveView('timeline')}
           title="Timeline"
@@ -62,9 +90,6 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
           <IconTimeline />
           <span>Timeline</span>
         </button>
-        {/* OpenPM parked from the primary toolbar (Step 28 Slice 5) — still
-            reachable via the command palette ("OpenPM · technical") and
-            activeView==='pm' remains supported. */}
       </div>
 
       <div className="toolbar-sep" />
@@ -128,11 +153,50 @@ function IconLock() {
   )
 }
 
+function IconExpandAll() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <path d="M6.5 2v9M2 6.5h9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+      <path d="M4.2 3.6L6.5 2l2.3 1.6M4.2 9.4L6.5 11l2.3-1.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+function IconCollapseAll() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <path d="M2 6.5h9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+      <path d="M4.4 3.1L6.5 4.9 8.6 3.1M4.4 9.9L6.5 8.1 8.6 9.9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
 function IconWhiteboard() {
   return (
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
       <rect x="1.5" y="2.5" width="10" height="8" rx="1" stroke="currentColor" strokeWidth="1.3"/>
       <line x1="1.5" y1="5" x2="11.5" y2="5" stroke="currentColor" strokeWidth="1"/>
+    </svg>
+  )
+}
+
+function IconOpenPM() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <rect x="1.5" y="1.5" width="3" height="10" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="5.5" y="1.5" width="3" height="7" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="9.5" y="1.5" width="2" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+    </svg>
+  )
+}
+
+function IconStory() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <circle cx="3" cy="3.2" r="1.6" stroke="currentColor" strokeWidth="1.2"/>
+      <circle cx="10" cy="4.2" r="1.6" stroke="currentColor" strokeWidth="1.2"/>
+      <circle cx="5.5" cy="10" r="1.6" stroke="currentColor" strokeWidth="1.2"/>
+      <path d="M4.3 4.1l4.4 0.8M4.1 4.6l1.1 4M8.9 5.6l-2.9 3.4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
     </svg>
   )
 }

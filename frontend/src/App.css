@@ -1208,6 +1208,74 @@
 @keyframes story-tell-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .story-tell-dot.on { animation: story-tell-breathe 1.6s ease-in-out infinite; }
 
+/* Story Tell map (Tell ON) — chronological episode boxes, left→right by sequence, with
+   deferred/abandoned ideas branching under their episode. Pure CSS flow; nothing measured. */
+.tellmap { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px 10px; }
+.tellmap-spine { display: flex; align-items: flex-start; gap: 0; min-width: min-content; }
+.tellmap-col { display: flex; flex-direction: column; flex-shrink: 0; }
+.tellmap-eprow { display: flex; align-items: center; }   /* the spine arrow auto-centers on the box */
+
+.tellmap-box {
+  width: 176px; height: 96px; box-sizing: border-box; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--surface-2); border: 1.5px solid var(--accent);
+  border-radius: var(--radius-sm); padding: 7px 9px; cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;
+}
+.tellmap-box:hover { background: var(--surface); box-shadow: 0 0 0 3px rgba(124, 111, 247, 0.10); }
+.tellmap-box.now { background: rgba(124, 111, 247, 0.10); box-shadow: 0 0 14px rgba(124, 111, 247, 0.18); }
+.tellmap-box-head { display: flex; align-items: center; gap: 6px; }
+.tellmap-tag {
+  font-family: ui-monospace, monospace; font-size: 9px; font-weight: 700; color: var(--accent);
+  background: rgba(124, 111, 247, 0.12); border: 1px solid rgba(124, 111, 247, 0.3);
+  border-radius: 5px; padding: 0 4px; flex-shrink: 0;
+}
+.tellmap-title {
+  font-size: 12px; font-weight: 600; color: var(--text); line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tellmap-now-pill {
+  margin-left: auto; flex-shrink: 0; font-size: 8px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--accent); background: rgba(124, 111, 247, 0.14);
+  border-radius: 4px; padding: 0 4px;
+}
+.tellmap-summary {
+  flex: 1; min-height: 0; font-size: 10.5px; color: var(--text-muted); line-height: 1.35;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.tellmap-foot { display: flex; gap: 5px; align-items: center; }
+.tellmap-chip {
+  font-size: 9px; font-family: ui-monospace, monospace; color: var(--text-muted);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px;
+}
+.tellmap-arrow { flex-shrink: 0; width: 30px; display: flex; align-items: center; justify-content: center; }
+
+/* Branches hanging under an episode: a vertical stem with a tick to each idea box. */
+.tellmap-branches { position: relative; width: 176px; display: flex; flex-direction: column; gap: 4px; padding: 6px 0 0 14px; }
+.tellmap-branches::before { content: ""; position: absolute; left: 5px; top: 0; bottom: 9px; width: 1px; background: var(--border); }
+.tellmap-branch {
+  position: relative; margin-left: 6px; box-sizing: border-box;
+  border-radius: 6px; padding: 4px 7px; cursor: default;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.tellmap-branch::before { content: ""; position: absolute; left: -7px; top: 12px; width: 7px; height: 1px; background: var(--border); }
+.tellmap-branch.deferred { border: 1px dashed var(--active); background: color-mix(in srgb, var(--active) 7%, transparent); }
+.tellmap-branch.abandoned { border: 1px solid color-mix(in srgb, var(--violation) 55%, var(--border)); background: color-mix(in srgb, var(--violation) 6%, transparent); opacity: 0.85; }
+.tellmap-branch.parked { margin-left: 0; width: 168px; }
+.tellmap-branch.parked::before { display: none; }
+.tellmap-branch-kind { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+.tellmap-branch.deferred .tellmap-branch-kind { color: var(--active); }
+.tellmap-branch.abandoned .tellmap-branch-kind { color: var(--violation); }
+.tellmap-branch-title { font-size: 10px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tellmap-branch.abandoned .tellmap-branch-title { text-decoration: line-through; color: var(--text-muted); }
+.tellmap-branch-more { font-size: 9px; color: var(--text-muted); font-style: italic; margin-left: 6px; }
+
+/* Side "parked" lane (source prompt unknown) + the hidden-operational note. */
+.tellmap-parked { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.tellmap-parked-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 6px; }
+.tellmap-parked-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+.tellmap-ops-note { margin-top: 12px; font-size: 10px; color: var(--text-muted); opacity: 0.7; font-style: italic; }
+
 .spec-code {
   font-family: ui-monospace, monospace;
   font-size: 10px;

@@ -415,6 +415,67 @@ export const getCommitImpact = (sha) =>
   apiFetch(`/api/git/commit/${encodeURIComponent(sha)}/impact`)
 
 /**
+ * Review Delta: the uncommitted working tree as an architecture delta. Non-mutating
+ * (never stages) — safe to poll. Drives the "Review changes" affordance.
+ *
+ * @returns {Promise<{ok, dirty, files:Array, fileCount, shownCount, stat, patch,
+ *   patchTruncated, untracked:string[], affectedConcepts:Array, partialConcepts:Array,
+ *   signature:string}|null>}
+ */
+export const getWorktreeImpact = () => apiFetch('/api/git/worktree/impact')
+
+/**
+ * Incremental Re-assimilation: after external edits settle, refresh OpenFDE's
+ * understanding (ArchGraph + semantic graph) so Review/Land reflect new files.
+ * v1 recomputes fully internally but is triggered by the changed files. Never
+ * mutates canvas state or git.
+ *
+ * @param {string[]} files - changed repo-relative paths (advisory in v1).
+ * @param {string} reason - e.g. 'file_activity'.
+ * @returns {Promise<{ok, files, reason, mode, archGraph, semanticSummary, warnings}|null>}
+ */
+export const reassimilateReview = (files = [], reason = 'file_activity') =>
+  apiFetch('/api/review/reassimilate', { method: 'POST', body: JSON.stringify({ files, reason }) })
+
+/**
+ * Prompt episodes for the Story Rail (OpenFDE-owned commits). Returns episodes
+ * newest-first with their landed commits + an "Outside OpenFDE" bucket.
+ * @returns {Promise<{ok, episodes:Array, outside:Object}|null>}
+ */
+export const getReviewEpisodes = () => apiFetch('/api/review/episodes')
+
+/** Create a prompt episode (e.g. a "Manual changes" bucket). @returns {Promise<Object|null>} */
+export const createEpisode = (payload = {}) =>
+  apiFetch('/api/review/episodes', { method: 'POST', body: JSON.stringify(payload) })
+
+/**
+ * Prompt Story Graph — the conceptual narrative derived from prompt episodes:
+ * active / deferred / abandoned concepts, each linked to its episodes, commits,
+ * and files. Deterministic backend (no LLM). Distinct from the Timeline.
+ * @returns {Promise<{ok, concepts:Array, episodes:Array, edges:Array, counts:Object}|null>}
+ */
+export const getPromptGraph = () => apiFetch('/api/story/prompt-graph')
+
+/**
+ * On-demand LLM story summary — upgrade up to `limit` episodes' titles/summaries via the
+ * local Codex/Claude CLI (best-effort; deterministic when no provider). The background
+ * summarizer also runs automatically, pushing `episode_updated` over WS.
+ * @returns {Promise<{ok, providers:Array, upgraded:number}|null>}
+ */
+export const summarizeEpisodes = (limit = 1) =>
+  apiFetch('/api/review/episodes/summarize', { method: 'POST', body: JSON.stringify({ limit }) })
+
+/**
+ * Land the current meaningful worktree changes through OpenFDE — the only
+ * user-facing path that creates a commit (with OpenFDE-Episode trailers).
+ * Pass episodeId "manual" to mint a Manual changes episode.
+ * @returns {Promise<{ok, committed, sha?, shortSha?, reason?, episode}|null>}
+ */
+export const landEpisode = (episodeId, payload = {}) =>
+  apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/land`,
+    { method: 'POST', body: JSON.stringify(payload) })
+
+/**
  * Ask a question about the active concept/commit; routed to Architect or Senior
  * Dev (deterministic v1), else a deterministic semantic-graph answer.
  *

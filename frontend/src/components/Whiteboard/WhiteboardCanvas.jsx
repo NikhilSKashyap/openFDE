@@ -6,6 +6,7 @@ import { getPortPos, bezierPath, getBezierMidpoint } from './arrowUtils'
 import PendingArrow from './PendingArrow'
 import { DEFAULT_W, DEFAULT_H } from '../../store/canvasState'
 import { computeArchLayout, computeFlowArrows } from './archLayout'
+import { computeArchLayoutElk } from './elkArchLayout'
 import { computeStoryLayout } from './storyLayout'
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
@@ -38,12 +39,26 @@ function spotlightLabel(spotlight) {
     const sub = `changed ${f.touched} · review ${f.total - f.touched} related`
     return { main, sub, w: Math.max(main.length, sub.length) * 6.6 + 28 }
   }
-  if (spotlight.kind === 'commit') {
-    // Primary label answers "what happened" — the commit message itself.
+  if (spotlight.kind === 'episode') {
+    // Prompt episode: the user's intent leads; edited files are amber underneath.
+    const msg = spotlight.label || spotlight.summary || 'Prompt'
+    const main = msg.length > 44 ? msg.slice(0, 43) + '…' : msg
+    const nFiles = (spotlight.amberFiles || spotlight.files || []).length
+    const nCommits = (spotlight.commits || []).length
+    const parts = [`${nFiles} file${nFiles === 1 ? '' : 's'}`]
+    if (nCommits) parts.push(`${nCommits} commit${nCommits === 1 ? '' : 's'}`)
+    if (spotlight.status) parts.unshift(spotlight.status)
+    const sub = parts.join(' · ')
+    const w = Math.max(main.length, sub.length) * 6.6 + 28
+    return { main, sub, w }
+  }
+  if (spotlight.kind === 'commit' || spotlight.kind === 'worktree') {
+    // Primary label answers "what happened" — the commit/change summary.
     const msg = spotlight.summary || spotlight.label
     const main = msg.length > 40 ? msg.slice(0, 39) + '…' : msg
     const nConcepts = (spotlight.concepts || []).length
-    const parts = [spotlight.label, `${spotlight.count} file${spotlight.count === 1 ? '' : 's'}`]
+    const lead = spotlight.kind === 'worktree' ? 'uncommitted' : spotlight.label
+    const parts = [lead, `${spotlight.count} file${spotlight.count === 1 ? '' : 's'}`]
     if (nConcepts) parts.push(`${nConcepts} concept${nConcepts === 1 ? '' : 's'}`)
     const sub = parts.join(' · ')
     const w = Math.max(main.length, sub.length) * 6.6 + 28
@@ -62,11 +77,15 @@ export default function WhiteboardCanvas({
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
   watchBoxIds = null,
+  // Live follow (Step 40): center the camera on the file an agent is editing.
+  liveFollow = true, onToggleLiveFollow = null,
   // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
   // the boxes a commit touched (+ amber for partially-touched concepts).
   spotlight = null, onClearSpotlight = null,
 }) {
   const svgRef = useRef(null)
+  const scrollRef = useRef(null)          // .wb-canvas-scroll — Live-follow camera pans this
+  const followRef = useRef({ id: null, timer: null })
   const interaction = useRef(null)
   const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
@@ -82,10 +101,45 @@ export default function WhiteboardCanvas({
   // Memoised so transient state (hover, zoom, rubber-band) doesn't re-run the
   // layout — important since hover updates happen on pointer move.
   const expanded = expandedIds instanceof Set ? expandedIds : EMPTY_SET
-  const layout = useMemo(
+  // Dagre lays out files/functions synchronously — this is the instant first
+  // paint and the fallback if ELK hasn't resolved yet or fails. It is NOT shown
+  // once ELK is ready; it only seeds the canvas so there's never a blank frame.
+  const dagreLayout = useMemo(
     () => computeArchLayout(boxes, archGraph, expanded),
     [boxes, archGraph, expanded],
   )
+
+  // ── ELK is the layout the user sees: layered placement + orthogonal edge ──
+  // routing on intra-module file→file edges. ELK has no sync API, so we compute
+  // it in an effect and key each result to a cheap synchronous signature of the
+  // layout inputs (geometry + expansion — NOT hover/selection, so those never
+  // trigger a relayout). We only *use* an ELK result whose signature still
+  // matches the current inputs; otherwise (mid-compute, after an expand/drag, or
+  // on failure) we render the Dagre seed. Stable: instant paint, no stale-async
+  // overwrite, Dagre as the crash fallback.
+  const layoutSig = useMemo(() => (
+    (archGraph ? `${archGraph.files?.length || 0}:${archGraph.flows?.length || 0}` : 'none') + '|' +
+    boxes.map(b => `${b.id}@${Math.round(b.x)},${Math.round(b.y)},${b.w},${b.h}`).join(';') + '|' +
+    [...expanded].sort().join(',')
+  ), [boxes, archGraph, expanded])
+
+  const [elkState, setElkState] = useState(null)   // { sig, layout|null }
+  useEffect(() => {
+    let alive = true
+    computeArchLayoutElk(boxes, archGraph, expanded)
+      .then(l => { if (alive) setElkState({ sig: layoutSig, layout: l }) })
+      .catch(err => {
+        if (alive) {
+          console.warn('[openfde] ELK layout failed — using the Dagre seed.', err)
+          setElkState({ sig: layoutSig, layout: null })
+        }
+      })
+    return () => { alive = false }
+  }, [layoutSig, boxes, archGraph, expanded])
+
+  const elkReady = elkState && elkState.sig === layoutSig && elkState.layout
+  const layout = elkReady ? elkState.layout : dagreLayout
+  const routedEdges = elkReady ? (layout.routedEdges || null) : null
   const { nodes, effectiveBoxes, bounds } = layout
   const archSelId = archSel?.data?.id ?? null
 
@@ -111,6 +165,20 @@ export default function WhiteboardCanvas({
     () => computeFlowArrows(archGraph, layout, { mode: flowMode, focusId, storyFlowIds: storyData.ids, flowIdToStep: storyData.map }),
     [archGraph, layout, flowMode, focusId, storyData],
   )
+
+  // Routed mode: replace the bezier/arc geometry of any flow arrow ELK actually
+  // routed (intra-module file→file edges) with ELK's orthogonal polyline, keeping
+  // the arrow's label / focus / opacity logic. Flow arrows ELK could not route
+  // (cross-module, function-level, same-file arcs) keep their existing geometry.
+  const renderFlowArrows = useMemo(() => {
+    if (!routedEdges || !routedEdges.length) return flowArrows
+    const byPair = new Map()
+    for (const e of routedEdges) byPair.set(`${e.fromId}>${e.toId}`, e.points)
+    return flowArrows.map(f => {
+      const pts = byPair.get(`${f.fromId}>${f.toId}`)
+      return pts ? { ...f, routedPoints: pts } : f
+    })
+  }, [flowArrows, routedEdges])
 
   // Story mode staged layout (Batch 5b): when a story is available, render it as
   // left-to-right phases instead of the nested file stack.
@@ -154,6 +222,26 @@ export default function WhiteboardCanvas({
     window.addEventListener('keydown', onEscape)
     return () => window.removeEventListener('keydown', onEscape)
   }, [pendingArrow])
+
+  // Delete / Backspace removes the current selection (arrows + boxes). Guarded so
+  // it never fires while editing a label/title or typing in any input.
+  useEffect(() => {
+    function onDelete(e) {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return
+      if (editingBoxId || editOverlay) return
+      const el = document.activeElement
+      const tag = el && el.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return
+      const arrowIds = [...(selectedArrowIds || [])]
+      const boxIds = [...(selectedIds || [])]
+      if (!arrowIds.length && !boxIds.length) return
+      e.preventDefault()
+      arrowIds.forEach(id => dispatch({ type: 'DELETE_ARROW', id }))
+      if (boxIds.length) dispatch({ type: 'DELETE_BOXES', ids: boxIds })
+    }
+    window.addEventListener('keydown', onDelete)
+    return () => window.removeEventListener('keydown', onDelete)
+  }, [selectedArrowIds, selectedIds, editingBoxId, editOverlay, dispatch])
 
   // Pointer → canvas coords. Robust to zoom + scroll: the SVG viewBox maps
   // bounds → element box, so we scale the screen delta by bounds/elementSize.
@@ -547,12 +635,44 @@ export default function WhiteboardCanvas({
   const watchRings = useMemo(() => {
     const ids = watchBoxIds ? Object.keys(watchBoxIds) : []
     if (!ids.length || !nodes.length) return []
-    return ids.map(id => {
-      const n = nodes.find(nn => nn.id === id)
-      return n ? { id, geom: { x: n.x, y: n.y, w: n.w, h: n.h } } : null
-    }).filter(Boolean)
-  }, [watchBoxIds, nodes])
+    // watchBoxIds: fileNodeId (box:file:<path>) -> 'active'|'trail'. computeRunRings
+    // resolves each to the lowest VISIBLE node — the file box when its module is
+    // expanded, the module box when collapsed — so the glow is file-level on auto-
+    // expand and module-level otherwise.
+    const states = {}
+    for (const [id, tier] of ids.map(id => [id, watchBoxIds[id]])) {
+      states[id] = tier === 'trail' ? 'wtrail' : 'wactive'
+    }
+    return computeRunRings(states, nodes, layout)
+  }, [watchBoxIds, nodes, layout])
   const watching = !!watchBoxIds
+
+  // ── Live follow: pan the camera to center the file an agent is actively editing
+  //    (the 'wactive' ring). Only re-centers when the active node CHANGES — so it
+  //    follows the agent file-to-file but never fights the user's own scroll while
+  //    they linger on one file. Debounced so a burst of saves doesn't jitter. The
+  //    Watch glow is independent of this — turning follow off never stops the glow.
+  useEffect(() => {
+    const f = followRef.current
+    if (!liveFollow) { f.id = null; return undefined }
+    const active = watchRings.find(r => r.status === 'wactive')
+    const el = scrollRef.current
+    if (!active || !el) return undefined
+    if (f.id === active.id) return undefined          // already centered on this file
+    clearTimeout(f.timer)
+    const g = active.geom
+    f.timer = setTimeout(() => {
+      f.id = active.id
+      const cx = (g.x + g.w / 2) * scale
+      const cy = (g.y + g.h / 2) * scale
+      el.scrollTo({
+        left: Math.max(0, cx - el.clientWidth / 2),
+        top: Math.max(0, cy - el.clientHeight / 2),
+        behavior: 'smooth',
+      })
+    }, 240)
+    return () => clearTimeout(f.timer)
+  }, [liveFollow, watchRings, scale])
 
   // ── Spotlight geometry: which visible boxes are lit (hold the concept / were
   //    touched by the commit) and which are amber (a tethered concept the commit
@@ -593,7 +713,7 @@ export default function WhiteboardCanvas({
 
   return (
     <div className="wb-canvas-root">
-      <div className="wb-canvas-scroll" onWheel={handleWheel}>
+      <div className="wb-canvas-scroll" ref={scrollRef} onWheel={handleWheel}>
         <svg
           ref={svgRef}
           width={viewBounds.w * scale}
@@ -674,7 +794,7 @@ export default function WhiteboardCanvas({
                   in-file call-arc lanes are visible; non-interactive so they never
                   intercept port clicks. */}
               <g pointerEvents="none">
-                {flowArrows.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
+                {renderFlowArrows.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
               </g>
 
               {/* Story-mode step badges (Batch 5) — numbered, non-interactive. */}
@@ -697,9 +817,10 @@ export default function WhiteboardCanvas({
               rx={14} fill="none" pointerEvents="none" />
           ))}
 
-          {/* Watch Any Agent: calm ambient ring where an external editor just touched */}
+          {/* Watch Any Agent: holds while the agent works — bright on the live box,
+              calmer trail on boxes touched earlier this session. */}
           {watchRings.map(r => (
-            <rect key={`watch-${r.id}`} className="watch-ring"
+            <rect key={`watch-${r.id}`} className={`watch-ring ${r.status === 'wactive' ? 'active' : 'trail'}`}
               x={r.geom.x - 6} y={r.geom.y - 6} width={r.geom.w + 12} height={r.geom.h + 12}
               rx={13} fill="none" pointerEvents="none" />
           ))}
@@ -755,12 +876,19 @@ export default function WhiteboardCanvas({
         </svg>
       </div>
 
-      {/* Watch Any Agent: always-on indicator (live = pulsing when activity lands) */}
+      {/* Live: always-on Watch indicator (pulses when activity lands) that doubles
+          as the follow-camera toggle. Click to start/stop the canvas following the
+          file an agent is editing — the glow stays on either way. */}
       {watching && (
-        <div className={`wb-watching${watchRings.length ? ' active' : ''}`}
-          title="Watching for file edits from any agent or editor">
-          <span className="wb-watching-dot" />watching
-        </div>
+        <button
+          className={`wb-watching wb-live${watchRings.length ? ' active' : ''}${liveFollow ? ' following' : ''}`}
+          onClick={() => onToggleLiveFollow?.()}
+          title={liveFollow
+            ? 'Live follow ON — the canvas centers the file being edited. Click to stop following (edits still glow).'
+            : 'Live follow OFF — edits still glow, camera stays put. Click to follow the active file.'}>
+          <span className="wb-watching-dot" />
+          Live{liveFollow ? ' · following' : ''}
+        </button>
       )}
 
       {/* Zoom controls */}
@@ -775,7 +903,10 @@ export default function WhiteboardCanvas({
         <div className={`tether-chip kind-${spotlight.kind}`} onClick={() => onClearSpotlight?.()} title="Clear (Esc)">
           <span className="tether-chip-dot" />
           <span className="tether-chip-id">
-            {spotlight.kind === 'commit' ? `commit ${spotlight.label}` : spotlight.label}
+            {spotlight.kind === 'commit' ? `commit ${spotlight.label}`
+              : spotlight.kind === 'worktree' ? 'uncommitted changes'
+              : spotlight.kind === 'episode' ? `prompt · ${spotlight.label}`
+              : spotlight.label}
           </span>
           <span className="tether-chip-meta">
             {spot && (spot.lit.length > 0 || spot.amber.length > 0)
@@ -876,9 +1007,35 @@ function arcGeometry(from, to, side) {
   return { d, mid }
 }
 
+// Point at half the total length of a polyline — keeps the edge label on the
+// path (between corners) rather than snapping it to a bend.
+function polylineMidpoint(pts) {
+  let total = 0
+  for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)
+  let acc = 0
+  const half = total / 2
+  for (let i = 1; i < pts.length; i++) {
+    const seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)
+    if (acc + seg >= half) {
+      const t = seg ? (half - acc) / seg : 0
+      return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t }
+    }
+    acc += seg
+  }
+  const m = pts[Math.floor(pts.length / 2)]
+  return { x: m.x, y: m.y }
+}
+
 function FlowArrow({ flow }) {
-  let d, mid
-  if (flow.route === 'arc-right') {
+  let d, mid, routed = false
+  if (flow.routedPoints && flow.routedPoints.length >= 2) {
+    // ELK-routed orthogonal polyline (Routed mode). Label sits at the geometric
+    // mid-length point so it lands on the path, not on a corner.
+    const pts = flow.routedPoints
+    d = pts.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    mid = polylineMidpoint(pts)
+    routed = true
+  } else if (flow.route === 'arc-right') {
     ({ d, mid } = arcGeometry(flow.from, flow.to, 'right'))
   } else if (flow.route === 'arc-left') {
     ({ d, mid } = arcGeometry(flow.from, flow.to, 'left'))
@@ -904,7 +1061,8 @@ function FlowArrow({ flow }) {
   return (
     <g className="flow-arrow">
       <path d={d} fill="none" stroke="var(--accent)" strokeWidth={width} strokeOpacity={opacity}
-        strokeDasharray="3 3" markerEnd="url(#arrowhead-flow)" />
+        strokeDasharray={routed ? 'none' : '3 3'} strokeLinejoin="round"
+        markerEnd="url(#arrowhead-flow)" />
       {labelText && (
         <g pointerEvents="none">
           <rect x={mid.x - labelW / 2} y={mid.y - 7} width={labelW} height={14} rx={7}
@@ -1094,7 +1252,7 @@ function compactSig(fn) {
  * screen, otherwise the nearest visible parent (function → file → module).
  * When several scoped ids resolve to the same target, the highest-severity
  * status wins (failed > running > planning/active > passed). */
-const _RUN_SEV = { done: 0, passed: 0, queued: 1, planning: 1, read: 2, next: 3, running: 4, active: 5, failed: 6 }
+const _RUN_SEV = { done: 0, passed: 0, queued: 1, planning: 1, read: 2, next: 3, running: 4, active: 5, failed: 6, wtrail: 1, wactive: 5 }
 
 function computeRunRings(nodeStates, nodes, layout) {
   const ids = Object.keys(nodeStates)

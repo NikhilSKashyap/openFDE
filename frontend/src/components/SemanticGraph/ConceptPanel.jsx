@@ -1,5 +1,22 @@
 import { useState } from 'react'
 import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
+import { cardTitleFor as commitDisplayTitle } from '../../store/pmState'
+
+// Friendly labels for the normalized episode lifecycle states (Auto-Land).
+const EP_STATUS_LABEL = {
+  open: 'open', reviewing: 'reviewing', auto_landing: 'auto-landing…',
+  landed: 'landed', failed: 'failed', needs_manual_land: 'needs manual land',
+  complete_no_changes: 'no changes',
+}
+
+// Minimal unified-diff line tinting for the patch summary preview.
+function patchLineClass(ln) {
+  if (ln.startsWith('+') && !ln.startsWith('+++')) return 'cpatch-add'
+  if (ln.startsWith('-') && !ln.startsWith('---')) return 'cpatch-del'
+  if (ln.startsWith('@@')) return 'cpatch-hunk'
+  if (ln.startsWith('diff ') || ln.startsWith('index ') || ln.startsWith('+++') || ln.startsWith('---')) return 'cpatch-meta'
+  return 'cpatch-ctx'
+}
 
 /**
  * Concept panel (Step 37a) — canvas-native card for the active concept/commit.
@@ -15,8 +32,16 @@ import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
  * @param {Function} props.onFocusConcept - (concept|null) => void  (highlight on canvas)
  * @param {Function} props.onClose
  */
-export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard, onFocusConcept, onClose }) {
+export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard, onFocusConcept, onClose, onLand, landing = false, onSpotlightCommit }) {
   const isCommit = spotlight.kind === 'commit'
+  const isWorktree = spotlight.kind === 'worktree'
+  const isEpisode = spotlight.kind === 'episode'
+  const isOutside = spotlight.kind === 'outside'
+  const isStoryConcept = spotlight.kind === 'storyConcept'   // a Story-view concept
+  // Commit, worktree, prompt-episode, Outside bucket, and a Story concept are all
+  // "a change to review" — same card shell (files + concept checks + commits),
+  // differing in label, source, and which sections show.
+  const isChange = isCommit || isWorktree || isEpisode || isOutside || isStoryConcept
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState(null)
   const [asking, setAsking] = useState(false)
@@ -24,7 +49,7 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   const [showTouched, setShowTouched] = useState(false)
   const [showAllCheck, setShowAllCheck] = useState(false)
   const [expandedId, setExpandedId] = useState(null)
-  const [title, setTitle] = useState(() => (isCommit ? (spotlight.summary || spotlight.label) : spotlight.label))
+  const [title, setTitle] = useState(() => (isChange ? (spotlight.summary || spotlight.label) : spotlight.label))
   const [summary, setSummary] = useState('')
   const [saved, setSaved] = useState(false)
 
@@ -69,26 +94,61 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
 
   function copyPath(p) { try { navigator.clipboard?.writeText(p) } catch { /* ignore */ } }
 
-  const suggestions = isCommit
+  const suggestions = isChange
     ? ['What happened here?', 'Why did these files change?', 'Was anything missed?']
     : ['What does this concept do?', 'Where does it live?', 'Why does it matter?']
+
+  const kindLabel = isEpisode ? (spotlight.tag || 'PROMPT') : isOutside ? 'OUTSIDE'
+    : isStoryConcept ? 'CONCEPT' : isWorktree ? 'CHANGES' : isCommit ? 'COMMIT' : 'CONCEPT'
+  // Compact "+adds −dels" line for a change spotlight (from worktree/commit stat).
+  const stat = spotlight.stat || null
+  const [showPatch, setShowPatch] = useState(false)
+  const [showFiles, setShowFiles] = useState(false)
+  const [showPrompt, setShowPrompt] = useState(false)
+  const episodeCommits = spotlight.commits || []
+  // Auto-Land: OpenFDE commits on completion. The manual Land button stays only as a
+  // fallback while the episode is still reviewing or was held back (needs_manual_land).
+  const canLand = onLand && (isWorktree
+    || (isEpisode && (spotlight.status === 'reviewing' || spotlight.status === 'needs_manual_land')))
+  // Per-file entries (path + status). Ensures new/untracked files that have no
+  // canvas box and no concept are still listed — file-level impact, never dropped.
+  const fileEntries = spotlight.fileEntries
+    || (spotlight.files || []).map(p => ({ path: p, status: '' }))
 
   return (
     <div className="concept-panel" onPointerDown={e => e.stopPropagation()}>
       <header className="concept-head">
         <div className="concept-head-main">
-          <span className={`concept-kind ${spotlight.kind}`}>{isCommit ? 'COMMIT' : 'CONCEPT'}</span>
-          <span className="concept-title">{isCommit ? spotlight.summary || spotlight.label : spotlight.label}</span>
+          <span className={`concept-kind ${spotlight.kind}`}>{kindLabel}</span>
+          <span className="concept-title">{spotlight.title || (isChange ? spotlight.summary || spotlight.label : spotlight.label)}</span>
         </div>
         <button className="concept-x" onClick={onClose} aria-label="Close">✕</button>
       </header>
 
       <div className="concept-body">
         <div className="concept-meta">
-          {isCommit ? (
+          {(isEpisode || isOutside || isStoryConcept) ? (
             <>
-              <span className="concept-sha">{spotlight.label}</span>
+              {spotlight.status && (
+                <span className={`concept-ep-status st-${spotlight.status}`}>
+                  {EP_STATUS_LABEL[spotlight.status] || spotlight.status}
+                </span>
+              )}
+              {isEpisode && spotlight.summarySource && spotlight.summarySource !== 'deterministic' && (
+                <span className="concept-ai-badge" title={`Title & summary by ${spotlight.summarySource}`}>✦ ai</span>
+              )}
+              {episodeCommits.length > 0 && <span>{episodeCommits.length} commit{episodeCommits.length === 1 ? '' : 's'}</span>}
+              {(isEpisode || isStoryConcept) && <span>· {spotlight.count} file{spotlight.count === 1 ? '' : 's'}</span>}
+              {isStoryConcept && (spotlight.tags || []).length > 0 && <span>· {spotlight.tags.join(', ')}</span>}
+              {isEpisode && episodeCommits.length === 0 && spotlight.status === 'reviewing' && (
+                <span className="concept-meta-flag">· awaiting Land</span>
+              )}
+            </>
+          ) : isChange ? (
+            <>
+              <span className="concept-sha">{isWorktree ? 'uncommitted' : spotlight.label}</span>
               <span>{spotlight.count} file{spotlight.count === 1 ? '' : 's'}</span>
+              {stat && <span>· +{stat.additions} −{stat.deletions}</span>}
               <span className={review.length ? 'concept-meta-flag' : ''}>
                 · {review.length ? `${review.length} may need review` : 'looks consistent'}
               </span>
@@ -97,6 +157,101 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
             <span>Appears in {(spotlight.files || []).length} files · {spotlight.count} places</span>
           )}
         </div>
+
+        {/* Episode / concept summary. (The full original prompt — below — is shown
+            for episodes only; the prompt is preserved verbatim, summary is the gloss.) */}
+        {(isEpisode || isStoryConcept) && spotlight.summary && (
+          <div className="concept-ep-summary">{spotlight.summary}</div>
+        )}
+        {isEpisode && spotlight.prompt && (
+          <div className="concept-ep-prompt">
+            <button className="concept-files-toggle" onClick={() => setShowPrompt(s => !s)}>
+              {showPrompt ? '▾' : '▸'} Full prompt
+            </button>
+            {showPrompt
+              ? <pre className="concept-ep-prompt-full">{spotlight.prompt}</pre>
+              : <div className="concept-ep-prompt-peek">{spotlight.prompt.split('\n')[0].slice(0, 120)}{spotlight.prompt.length > 120 ? '…' : ''}</div>}
+          </div>
+        )}
+
+        {/* Land — OpenFDE commits the reviewed worktree changes (the only
+            user-facing commit path). Shown for the dirty worktree and for a prompt
+            episode still under review. Calm, obvious, one click. */}
+        {canLand && (
+          <div className="concept-land">
+            <button className="concept-land-btn" disabled={landing} onClick={() => onLand()}>
+              {landing ? 'Landing…' : '⤓ Land these changes'}
+            </button>
+            <span className="concept-land-hint">OpenFDE creates the commit and links it to this prompt.</span>
+          </div>
+        )}
+
+        {/* Commits — evidence inside the prompt (or the Outside bucket). Each row is
+            clickable → the existing single-commit spotlight (impact/diff). */}
+        {(isEpisode || isOutside) && episodeCommits.length > 0 && (
+          <div className="concept-commits">
+            <div className="concept-commits-head">
+              {episodeCommits.length} commit{episodeCommits.length === 1 ? '' : 's'}{isEpisode ? ' landed' : ''}
+            </div>
+            {episodeCommits.map(c => (
+              <button
+                key={c.sha} className="concept-commit-row"
+                title={`${commitDisplayTitle(c)}\n${(c.summary || '').replace(/^openfde:\s*/, '')}\nopen impact / diff`}
+                onClick={() => onSpotlightCommit?.(c.sha)} disabled={!onSpotlightCommit}>
+                <span className="concept-commit-sha">{c.shortSha}</span>
+                {/* Clean display title (backend `commit_display` via displayTitle), never the
+                    noisy raw subject ("openfde: Here's the CC prompt"). Raw stays in the tooltip. */}
+                <span className="concept-commit-msg">{commitDisplayTitle(c)}</span>
+                <span className="concept-commit-meta">
+                  {c.fileCount ? `${c.fileCount}f` : ''}{c.fileCount && c.timestamp ? ' · ' : ''}{relTime(c.timestamp)}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        {isEpisode && episodeCommits.length === 0 && (
+          <div className="concept-commits">
+            <div className="concept-commits-head">
+              {spotlight.status === 'reviewing' ? 'Edited — not yet landed (review & Land)' : 'No commits yet'}
+            </div>
+          </div>
+        )}
+
+        {/* Changed files — collapsible list so new / untracked / off-canvas files
+            stay visible even when they have no concept and no box to light. */}
+        {isChange && fileEntries.length > 0 && (
+          <div className="concept-files">
+            <button className="concept-files-toggle" onClick={() => setShowFiles(s => !s)}>
+              {showFiles ? '▾' : '▸'} {spotlight.count || fileEntries.length} changed file{(spotlight.count || fileEntries.length) === 1 ? '' : 's'}
+            </button>
+            {showFiles && (
+              <div className="concept-files-list">
+                {fileEntries.map(f => (
+                  <button key={f.path} className="concept-file-row" title="copy path" onClick={() => copyPath(f.path)}>
+                    {f.status && <span className={`concept-file-badge st-${(f.status || '').toLowerCase().replace(/[^a-z]/g, '') || 'm'}`}>{f.status === '?' ? 'NEW' : f.status}</span>}
+                    <span className="concept-file-path">{f.path}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Patch summary — collapsible diff for a change spotlight (commit/worktree). */}
+        {isChange && spotlight.patch && (
+          <div className="concept-patch">
+            <button className="concept-patch-toggle" onClick={() => setShowPatch(s => !s)}>
+              {showPatch ? '▾' : '▸'} What changed (diff{spotlight.patchTruncated ? ', truncated' : ''})
+            </button>
+            {showPatch && (
+              <pre className="concept-patch-body">
+                {String(spotlight.patch).split('\n').slice(0, 200).map((ln, i) => (
+                  <div key={i} className={patchLineClass(ln)}>{ln || ' '}</div>
+                ))}
+              </pre>
+            )}
+          </div>
+        )}
 
         {/* Concept Checks — actionable cards for partially-updated concepts */}
         {review.length > 0 && (
@@ -162,7 +317,7 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
         )}
 
         {/* Touched, no action — collapsed shared vocabulary */}
-        {isCommit && touched.length > 0 && (
+        {isChange && touched.length > 0 && (
           <div className="concept-touched">
             <button className="concept-touched-toggle" onClick={() => setShowTouched(s => !s)}>
               {showTouched ? '▾' : '▸'} {touched.length} value{touched.length === 1 ? '' : 's'} touched (no action)
@@ -243,4 +398,16 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
       </footer>
     </div>
   )
+}
+
+// Compact relative time for commit rows ("3h ago"). Empty string for missing/bad dates.
+function relTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const secs = Math.max(0, (Date.now() - d.getTime()) / 1000)
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+  return `${Math.floor(secs / 86400)}d ago`
 }

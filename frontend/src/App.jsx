@@ -43,6 +43,10 @@ import {
   cancelCouncilRun,
   postStory,
   getCommitImpact,
+  getWorktreeImpact,
+  reassimilateReview,
+  getReviewEpisodes,
+  landEpisode,
   askConcept,
   getConceptCards,
   saveConceptCard,
@@ -91,12 +95,40 @@ export default function App() {
   // run: { runId, status, scopedBoxIds, scopedArrowIds, nodeStates, edgeStates,
   //        trace: {id:[events]}, failures: {id:{...}} } | null
   const [run, setRun] = useState(null)
-  // Ambient "watch any agent" activity: boxId -> last-touched timestamp (fades).
-  const [watchActivity, setWatchActivity] = useState({})
+  // Ambient "watch any agent" activity: boxId -> last-touched timestamp. Boxes
+  // HOLD their glow while the agent keeps working and settle only after it goes
+  // quiet (no edits anywhere for SETTLE_MS). watchTick refreshes active→trail
+  // tiers over time without new events.
+  const [watchActivity, setWatchActivity] = useState({})  // fileNodeId -> last-touch ts
+  const [watchTiers, setWatchTiers] = useState({})        // fileNodeId -> 'active'|'trail'
+  const watchAutoExpandedRef = useRef(new Set())          // modules WE auto-expanded
   const runRef = useRef(null)
   // ── Git timeline + diff inspection (Step 18) ─────────────────────────────
   const [gitCommits, setGitCommits] = useState([])
   const [commitDiff, setCommitDiff] = useState(null)   // { loading, sha, data }
+  // Review Delta (Land·Watch·Review): uncommitted worktree as a calm "Review
+  // changes" affordance. { dirty, count, signature } — null until first probe.
+  const [worktree, setWorktree] = useState(null)
+  const worktreeSigRef = useRef(null)                  // last signature we fetched/spotlit
+  // Prompt Story Rail (OpenFDE owns commits): prompt episodes + the "Outside
+  // OpenFDE" bucket of commits not linked to a prompt.
+  const [episodes, setEpisodes] = useState([])
+  const [outsideBucket, setOutsideBucket] = useState(null)
+  const [landing, setLanding] = useState(false)
+  // Live follow — when ON, the canvas camera centers the file an agent is editing
+  // and follows as it moves on. Watch glow is ALWAYS on; this only controls the
+  // camera. Persisted in localStorage (theme pattern); default ON.
+  const [liveFollow, setLiveFollow] = useState(() => {
+    try { return localStorage.getItem('openfde-live-follow') !== 'off' } catch { return true }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('openfde-live-follow', liveFollow ? 'on' : 'off') } catch { /* ignore */ }
+  }, [liveFollow])
+  // Incremental Re-assimilation: changed paths from Watch, debounced into a single
+  // understanding-refresh (ArchGraph + semantic graph) after edits settle.
+  const pendingReassimRef = useRef(new Set())
+  const reassimTimerRef = useRef(null)
+  const executingRef = useRef(false)                   // mirror of `executing` for timers
   // ── Execution backend (Step 19) ──────────────────────────────────────────
   const [backends, setBackends] = useState([])
   const [activeBackend, setActiveBackend] = useState('openfde-native')
@@ -126,6 +158,152 @@ export default function App() {
     return () => { alive = false }
   }, [])
 
+  // Probe the worktree non-destructively; only re-render when the porcelain
+  // signature changed (cheap dirty-state key) so typing never thrashes the chip.
+  // Plain function — it closes over only stable imports + state setters.
+  const refreshWorktree = async () => {
+    if (document.hidden) return
+    const imp = await getWorktreeImpact()
+    if (!imp?.ok) return
+    // Tree went clean (e.g. the change got committed) → drop any stale worktree
+    // review so the canvas never shows an uncommitted delta that no longer exists.
+    if (!imp.dirty) setCanvasSpotlight(s => (s?.kind === 'worktree' ? null : s))
+    setWorktree(prev => {
+      if (prev && prev.signature === imp.signature && prev.dirty === imp.dirty) return prev
+      return { dirty: imp.dirty, count: imp.fileCount, signature: imp.signature }
+    })
+  }
+
+  // Prompt Story Rail: load episodes (prompt turns) + the Outside-OpenFDE bucket.
+  // Also mirror the prompt→commit story into OpenPM: every landed commit becomes a
+  // Done card grouped/labeled by its prompt. Idempotent (SYNC_EPISODE_COMMITS only
+  // adds commits not already represented), so frequent polls don't churn the board.
+  const refreshEpisodes = async () => {
+    if (document.hidden) return
+    const res = await getReviewEpisodes()
+    if (!res?.ok) return
+    const eps = Array.isArray(res.episodes) ? res.episodes : []
+    setEpisodes(eps)
+    setOutsideBucket(res.outside || null)
+    // Operational/meta episodes (chatter, file-lists, "Here's the CC prompt") never
+    // become OpenPM cards — only product/build prompts with a clean title.
+    const productEps = eps.filter(ep => ep.signal !== 'operational' && !ep.storyFacts?.operational)
+    const commits = productEps.flatMap(ep => (ep.commits || []).map(c => ({
+      commitSha: c.sha, shortSha: c.shortSha, summary: c.summary,
+      // Clean card display text from the (cleaned) episode — never the raw commit subject.
+      displayTitle: c.displayTitle || ep.title || '',
+      displaySummary: c.displaySummary || ep.summary || '',
+      files: c.files || [], episodeId: ep.episodeId,
+      episodeTag: ep.tag || '', sequence: ep.sequence || 0,
+      promptTitle: ep.title || '',
+      promptLabel: ep.title || (ep.prompt || ep.summary || '').split('\n')[0].slice(0, 48),
+    })))
+    if (commits.length) pmDispatch({ type: 'SYNC_EPISODE_COMMITS', commits })
+  }
+
+  // Click a prompt chip → spotlight that episode: its edited files turn AMBER on
+  // the canvas (intent-level highlight, distinct from a single commit's green),
+  // and the panel lists the prompt's commits + files.
+  function onSpotlightEpisode(ep) {
+    if (!ep) return
+    const files = ep.files || []
+    const title = (ep.title || (ep.prompt || ep.summary || 'Prompt').split('\n')[0].slice(0, 40)) || 'Prompt'
+    setCanvasSpotlight({
+      kind: 'episode', episodeId: ep.episodeId,
+      tag: ep.tag || '', label: title, title,
+      summary: ep.summary || '', prompt: ep.prompt || '',
+      status: ep.status, summarySource: ep.summarySource || null,
+      count: files.length, files: [], amberFiles: files,
+      fileEntries: files.map(p => ({ path: p, status: '' })),
+      commits: ep.commits || [], epKind: ep.kind || 'agent',
+    })
+    setActiveView('whiteboard')
+  }
+
+  // Story view: clicking a concept ambers its related files on the canvas and dims
+  // OpenPM cards whose prompt tag isn't part of the concept. Stays in Story (the
+  // detail is inline there); the canvas amber is ready when the user switches.
+  const [highlightTags, setHighlightTags] = useState(null)
+  function onSelectConcept(concept) {
+    if (!concept) {
+      setHighlightTags(null)
+      setCanvasSpotlight(s => (s?.kind === 'storyConcept' ? null : s))
+      return
+    }
+    setHighlightTags(concept.episodeTags || [])
+    const files = concept.files || []
+    setCanvasSpotlight({
+      kind: 'storyConcept', label: concept.title, title: concept.title,
+      summary: concept.summary || '', status: concept.status,
+      count: files.length, files: [], amberFiles: files,
+      fileEntries: files.map(p => ({ path: p, status: '' })),
+      tags: concept.episodeTags || [],
+    })
+  }
+
+  // Click the "Outside OpenFDE" chapter chip → a detail card listing the commits
+  // that weren't made through an OpenFDE prompt (manual / foreign). Same card shell
+  // as an episode, minus prompt/summary/Land; its commits are clickable.
+  function onSpotlightOutside(bucket) {
+    if (!bucket) return
+    setCanvasSpotlight({
+      kind: 'outside', label: 'Outside OpenFDE', title: 'Outside OpenFDE',
+      summary: bucket.summary || 'Commits not linked to an OpenFDE prompt (manual / foreign).',
+      commits: bucket.commits || [], count: 0, files: [], amberFiles: [],
+    })
+    setActiveView('whiteboard')
+  }
+
+  // Land: OpenFDE creates the commit for the reviewed worktree changes and links
+  // it to the active prompt episode (or a fresh "Manual changes" one). The only
+  // user-facing commit path.
+  async function onLandChanges() {
+    if (landing) return
+    setLanding(true)
+    try {
+      // Prefer the episode awaiting review (reviewing or auto-land-held); else manual.
+      const reviewing = episodes.find(e => (e.status === 'reviewing' || e.status === 'needs_manual_land') && (e.files || []).length)
+      const episodeId = reviewing?.episodeId || 'manual'
+      const res = await landEpisode(episodeId, {})
+      await Promise.all([refreshEpisodes(), (async () => {
+        const commits = await getGitTimeline(); if (Array.isArray(commits)) setGitCommits(commits)
+      })(), refreshWorktree()])
+      if (res?.committed && res.episode) {
+        onSpotlightEpisode(res.episode)        // switch the spotlight to the landed prompt
+      } else {
+        setCanvasSpotlight(s => (s?.kind === 'worktree' ? null : s))
+      }
+    } finally {
+      setLanding(false)
+    }
+  }
+
+  // Incremental Re-assimilation (Land·Watch·Review): when external edits settle,
+  // refresh OpenFDE's *understanding* (ArchGraph + semantic graph) so Review reflects
+  // new files/functions/modules — WITHOUT touching the user's canvas arrangement
+  // (top-level boxes come from persisted state, not the ArchGraph; only expanded
+  // module internals + flows re-derive). Full-recompute in v1, triggered by changes.
+  const runReassimilation = async () => {
+    // Don't re-assimilate while a run is actively writing — requeue and wait for quiet.
+    if (executingRef.current) { scheduleReassimilation(900); return }
+    const files = [...pendingReassimRef.current]
+    if (!files.length) return
+    pendingReassimRef.current = new Set()
+    const res = await reassimilateReview(files, 'file_activity')
+    if (res?.ok && res.archGraph && Array.isArray(res.archGraph.files)) {
+      setArchGraph(res.archGraph)          // refresh understanding; canvas boxes unaffected
+    }
+    // Concepts may have changed → refresh the Review Delta affordance.
+    refreshWorktree()
+  }
+
+  // Debounce: collapse a burst of edits into one re-assimilation ~1.8s after the
+  // last activity. Re-armed on every file_activity (see handleFileActivity).
+  function scheduleReassimilation(delay = 1800) {
+    if (reassimTimerRef.current) clearTimeout(reassimTimerRef.current)
+    reassimTimerRef.current = setTimeout(() => { reassimTimerRef.current = null; runReassimilation() }, delay)
+  }
+
   // Commits can land from the terminal or the council — keep the commit rail
   // current by refetching the git timeline on window focus + a light poll while
   // the tab is visible (not just once at startup).
@@ -134,10 +312,14 @@ export default function App() {
       if (document.hidden) return
       const commits = await getGitTimeline()
       if (Array.isArray(commits)) setGitCommits(commits)
+      refreshWorktree()   // keep the "Review changes" affordance current (signature-gated)
+      refreshEpisodes()   // keep the prompt story rail current
     }
+    refetch()             // initial probe so the chip can appear without manual reload
     window.addEventListener('focus', refetch)
     const id = setInterval(refetch, 15000)
     return () => { window.removeEventListener('focus', refetch); clearInterval(id) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Click a commit chip → fetch its impact → spotlight touched boxes + concepts,
@@ -155,6 +337,33 @@ export default function App() {
       kind: 'commit', label: imp.shortSha, summary: imp.summary,
       count: imp.fileCount, files: imp.files,
       amberFiles: [...amber], concepts: imp.affectedConcepts || [], sha: imp.sha,
+    })
+    setActiveView('whiteboard')
+  }
+
+  // Click the "Review changes" chip → fetch worktree impact → spotlight the
+  // touched boxes + affected concepts, exactly like a commit (same dim/light/amber
+  // + ConceptPanel), but for the *uncommitted* tree (no sha). Non-mutating.
+  async function onSpotlightWorktree() {
+    const imp = await getWorktreeImpact()
+    if (!imp?.ok || !imp.dirty) { setCanvasSpotlight(null); return }
+    worktreeSigRef.current = imp.signature
+    const filePaths = (imp.files || []).map(f => (typeof f === 'string' ? f : f.path))
+    const amber = new Set()
+    for (const c of (imp.affectedConcepts || [])) {
+      if (c.partial && c.signal === 'high') for (const f of c.untouchedFiles) amber.add(f)
+    }
+    const adds = imp.stat?.additions || 0, dels = imp.stat?.deletions || 0
+    setCanvasSpotlight({
+      kind: 'worktree', label: 'Uncommitted',
+      summary: `Uncommitted changes · +${adds} −${dels}`,
+      count: imp.fileCount, files: filePaths,
+      // Per-file entries (path + status) so the panel can list new/off-canvas files
+      // explicitly — a brand-new module has no box to light, but must not vanish.
+      fileEntries: imp.files || [],
+      amberFiles: [...amber], concepts: imp.affectedConcepts || [],
+      patch: imp.patch || '', patchTruncated: !!imp.patchTruncated,
+      stat: imp.stat || null, untracked: imp.untracked || [], sha: null,
     })
     setActiveView('whiteboard')
   }
@@ -335,12 +544,28 @@ export default function App() {
       const base = path.split('/').pop()
       b = boxes.find(bx => (bx.linkedFiles || []).some(f => f.split('/').pop() === base))
     }
-    return b ? b.id : null
+    return b || null
   }
   function handleFileActivity({ file }) {
-    const boxId = file && resolveWatchBox(file)
-    if (!boxId) return
-    setWatchActivity(prev => ({ ...prev, [boxId]: Date.now() }))
+    if (!file) return
+    // Re-assimilation collects EVERY changed path — including brand-new files that
+    // aren't on the canvas yet — so the understanding catches up. Done before the
+    // on-canvas check below (which gates only the ambient glow).
+    pendingReassimRef.current.add(file)
+    scheduleReassimilation()
+    const box = resolveWatchBox(file)
+    if (!box) return  // not on the canvas — glow presupposes Land (re-assim still runs)
+    // Auto-expand the module so the glow lands on the FILE, not the whole module.
+    // Track that WE expanded it so we can auto-collapse on settle — but if the
+    // user already had it open, it's not in our set and we leave it expanded.
+    setExpandedIds(prev => {
+      if (prev.has(box.id)) return prev
+      watchAutoExpandedRef.current.add(box.id)
+      return new Set(prev).add(box.id)
+    })
+    const key = fileNodeId(file)   // box:file:<path> — resolves to the file box
+    setWatchActivity(prev => ({ ...prev, [key]: Date.now() }))
+    setWatchTiers(prev => (prev[key] === 'active' ? prev : { ...prev, [key]: 'active' }))
   }
 
   // Architect plan arrived: pre-pulse the planned files and drill into their
@@ -411,6 +636,15 @@ export default function App() {
       else if (msg?.type === 'agent_progress') { handleAgentProgress(msg.payload || {}) }
       // Watch Any Agent: an external editor touched a repo file — ambient glow.
       else if (msg?.type === 'file_activity') { handleFileActivity(msg.payload || {}) }
+      // Prompt captured / landed: refresh the Prompt Story Rail live (a captured
+      // Claude Code prompt, a wrapper run, or a Land all push this).
+      else if (msg?.type === 'episode_updated') { refreshEpisodes() }
+      // A commit landed (the only commit path) — refresh the rail's nested beats,
+      // the OpenPM commit cards, and the git timeline so all three stay in sync.
+      else if (msg?.type === 'commit_created') {
+        refreshEpisodes()
+        getGitTimeline().then(c => { if (Array.isArray(c)) setGitCommits(c) })
+      }
       // state_updated / tasks_updated: no-op; this client's own writes are the
       // source of truth for its local state.
     })
@@ -418,21 +652,36 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Fade ambient watch activity: prune entries older than ~2.6s.
+  // Hold the watch glow while the agent works; settle the whole set only after a
+  // global quiet period (no edits anywhere for ~9s). Each tick re-derives tiers:
+  // a box touched in the last ~3.5s is the live focus (bright), earlier ones this
+  // session are a calmer trail. Date.now() lives here (effect), never in render.
   useEffect(() => {
     if (Object.keys(watchActivity).length === 0) return undefined
+    const SETTLE_MS = 9000, ACTIVE_MS = 3500
     const id = setInterval(() => {
       const now = Date.now()
-      setWatchActivity(prev => {
-        const next = {}
-        let changed = false
-        for (const [k, ts] of Object.entries(prev)) {
-          if (now - ts < 2600) next[k] = ts
-          else changed = true
+      if (now - Math.max(...Object.values(watchActivity)) > SETTLE_MS) {
+        setWatchActivity({}); setWatchTiers({})
+        // Work finished → collapse only the modules WE auto-expanded (leave the
+        // user's own expansions open).
+        const auto = watchAutoExpandedRef.current
+        if (auto.size) {
+          setExpandedIds(prev => {
+            const s = new Set(prev)
+            auto.forEach(mid => s.delete(mid))
+            return s
+          })
+          auto.clear()
         }
-        return changed ? next : prev
-      })
-    }, 500)
+        // Watch → Review handoff: edits have settled, so surface the calm
+        // "Review changes" affordance (signature-gated; never steals focus).
+        refreshWorktree()
+      } else {
+        setWatchTiers(Object.fromEntries(
+          Object.entries(watchActivity).map(([id, t]) => [id, now - t < ACTIVE_MS ? 'active' : 'trail'])))
+      }
+    }, 700)
     return () => clearInterval(id)
   }, [watchActivity])
 
@@ -950,6 +1199,9 @@ export default function App() {
       const sha = res.commit.sha
       getGitDiff(sha).then(data => setCommitDiff({ loading: false, sha, data: data || null }))
     }
+    // Review Then Land: the run left edits in the work tree under a prompt episode.
+    // Surface the prompt chip + Review Changes affordance (no auto-commit).
+    if (!cancelled) { refreshEpisodes(); refreshWorktree() }
     if (res.approval) setApprovals(prev => [res.approval, ...prev])
     getBoxSpecs().then(s => { if (s && typeof s === 'object') setBoxSpecs(s) })
   }
@@ -1230,6 +1482,10 @@ export default function App() {
     localStorage.setItem('openfde-theme', theme)
   }, [theme])
 
+  // Mirror `executing` into a ref so the re-assimilation debounce timer can read the
+  // current run state without re-arming on every render.
+  useEffect(() => { executingRef.current = executing }, [executing])
+
   // ------------------------------------------------------------------ //
   //  Global ⌘K / Ctrl+K shortcut                                        //
   // ------------------------------------------------------------------ //
@@ -1342,6 +1598,8 @@ export default function App() {
           toggleTheme={toggleTheme}
           hasDottedSelected={hasDottedSelected}
           onLockSelected={() => canvasDispatch({ type: 'FREEZE_SELECTED' })}
+          onExpandAll={expandAll}
+          onCollapseAll={collapseAll}
           onOpenCommandPalette={() => setPaletteOpen(true)}
           onHome={goHome}
         />
@@ -1375,12 +1633,26 @@ export default function App() {
               story={story}
               runNodeStates={run?.nodeStates}
               runEdgeStates={run?.edgeStates}
-              watchBoxIds={watchActivity}
+              watchBoxIds={watchTiers}
+              liveFollow={liveFollow}
+              onToggleLiveFollow={() => setLiveFollow(v => !v)}
               spotlight={canvasSpotlight}
               onClearSpotlight={() => setCanvasSpotlight(null)}
               onSpotlightCommit={onSpotlightCommit}
               gitCommits={gitCommits}
               onSelectCommit={onSelectCommit}
+              worktreeDirty={!!worktree?.dirty}
+              worktreeCount={worktree?.count || 0}
+              onReviewChanges={onSpotlightWorktree}
+              reviewActive={canvasSpotlight?.kind === 'worktree'}
+              episodes={episodes}
+              outsideBucket={outsideBucket}
+              onSpotlightEpisode={onSpotlightEpisode}
+              activeEpisodeId={canvasSpotlight?.kind === 'episode' ? canvasSpotlight.episodeId : null}
+              onSpotlightOutside={onSpotlightOutside}
+              outsideActive={canvasSpotlight?.kind === 'outside'}
+              onSelectConcept={onSelectConcept}
+              highlightTags={highlightTags}
               tasks={tasks}
               pmDispatch={pmDispatch}
               designEvents={designEvents}
@@ -1398,6 +1670,9 @@ export default function App() {
                 onSaveCard={onSaveConceptCard}
                 onFocusConcept={onFocusConcept}
                 onClose={() => setCanvasSpotlight(null)}
+                onLand={onLandChanges}
+                landing={landing}
+                onSpotlightCommit={onSpotlightCommit}
               />
             )}
           </main>

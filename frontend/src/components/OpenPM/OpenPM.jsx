@@ -32,12 +32,32 @@ export default function OpenPM({
   selectedTaskId,
   setSelectedTaskId,
   onTaskEvent,
+  onSpotlightCommit,
+  highlightTags = null,
+  onClearHighlight,
 }) {
+  // Story concept filter: when a concept is selected, dim cards whose prompt tag
+  // isn't part of that concept (non-destructive — nothing is hidden or reordered).
+  const filterTags = (highlightTags && highlightTags.length) ? new Set(highlightTags) : null
   const [draggingId, setDraggingId]   = useState(null)
   const [dragOverCol, setDragOverCol] = useState(null)
   const [blockedId, setBlockedId]     = useState(null)
   const [addingCol, setAddingCol]     = useState(null)
   const [addTitle, setAddTitle]       = useState('')
+  // Within-column ordering: 'story' = newest prompt first (sequence desc, which
+  // clusters a prompt's commits since they share its sequence); 'tag' = by prompt
+  // tag oldest-first (chronological). Kanban columns + gates are unchanged.
+  const [sortMode, setSortMode]       = useState('story')
+
+  function orderTasks(list) {
+    const arr = [...list]
+    if (sortMode === 'tag') {
+      arr.sort((a, b) => (a.episodeTag ? (a.sequence || 0) : Infinity) - (b.episodeTag ? (b.sequence || 0) : Infinity))
+    } else {
+      arr.sort((a, b) => (b.sequence || 0) - (a.sequence || 0))   // story: newest prompt first
+    }
+    return arr
+  }
 
   // ── Drag handlers ──────────────────────────────────────────────────
   function startDrag(e, taskId) {
@@ -139,12 +159,46 @@ export default function OpenPM({
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           {totalOpen} open · {totalDone} done
         </span>
+        {filterTags && (
+          <button
+            onClick={() => onClearHighlight?.()}
+            title="Clear the Story concept filter"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'inherit',
+              color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
+              border: '1px solid rgba(124,111,247,0.35)', borderRadius: 99, padding: '1px 8px', cursor: 'pointer',
+            }}
+          >
+            Story: {[...filterTags].slice(0, 4).join(', ')} ✕
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        {/* Story / Tag ordering — clusters a prompt's work items together. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.4px' }}>Sort</span>
+          {['story', 'tag'].map(m => (
+            <button
+              key={m}
+              onClick={() => setSortMode(m)}
+              title={m === 'story' ? 'Newest prompt first' : 'Group by prompt tag (chronological)'}
+              style={{
+                padding: '1px 7px', borderRadius: 99, cursor: 'pointer', fontFamily: 'inherit', fontSize: 10,
+                textTransform: 'capitalize',
+                color: sortMode === m ? 'var(--accent)' : 'var(--text-muted)',
+                background: sortMode === m ? 'rgba(124,111,247,0.10)' : 'transparent',
+                border: `1px solid ${sortMode === m ? 'rgba(124,111,247,0.35)' : 'var(--border)'}`,
+              }}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Board */}
       <div style={{ display: 'flex', gap: 8, flex: 1, overflow: 'hidden', minHeight: 0 }}>
         {COLS.map(col => {
-          const colTasks = tasks.filter(t => t.column === col.id)
+          const colTasks = orderTasks(tasks.filter(t => t.column === col.id))
           const isOver   = dragOverCol === col.id
 
           return (
@@ -201,6 +255,8 @@ export default function OpenPM({
                     onDragStart={e => startDrag(e, task.id)}
                     onDragEnd={onDragEnd}
                     onChipClick={handleChipClick}
+                    onCommitClick={onSpotlightCommit ? (e, sha) => { e.stopPropagation(); onSpotlightCommit(sha) } : null}
+                    dimmed={!!(filterTags && !filterTags.has(task.episodeTag))}
                     onVerify={status => pmDispatch({ type: 'UPDATE_TASK', id: task.id, fields: { verificationStatus: status } })}
                   />
                 ))}
@@ -239,8 +295,9 @@ export default function OpenPM({
 }
 
 // ── TaskCard ──────────────────────────────────────────────────────────
-function TaskCard({ task, allBoxes, selected, blocked, dragging, onSelect, onDragStart, onDragEnd, onChipClick, onVerify }) {
+function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelect, onDragStart, onDragEnd, onChipClick, onCommitClick, onVerify }) {
   const vc = veriBadge[task.verificationStatus] || veriBadge.pending
+  const sha = task.shortSha || (task.commitSha ? task.commitSha.slice(0, 7) : '')
 
   return (
     <div
@@ -254,11 +311,32 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, onSelect, onDra
         borderRadius: 'var(--radius-sm)',
         padding: '7px 9px',
         cursor: 'grab',
-        opacity: dragging ? 0.35 : 1,
-        transition: 'border-color 0.1s, background 0.1s',
+        opacity: dragging ? 0.35 : dimmed ? 0.32 : 1,
+        transition: 'border-color 0.1s, background 0.1s, opacity 0.12s',
         userSelect: 'none',
       }}
     >
+      {/* Prompt tag — the chapter this card belongs to (e.g. "P12 · Polish prompt
+          story"). Cards from one prompt repeat the same tag, which groups them. */}
+      {(task.episodeTag || task.promptLabel) && (
+        <div
+          title={`Prompt ${task.episodeTag ? task.episodeTag + ' · ' : ''}${task.promptTitle || task.promptLabel}`}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}
+        >
+          {task.episodeTag && (
+            <span style={{
+              flexShrink: 0, fontSize: 9, fontWeight: 700, color: 'var(--accent)',
+              background: 'rgba(124,111,247,0.12)', border: '1px solid rgba(124,111,247,0.3)',
+              borderRadius: 5, padding: '0 5px', letterSpacing: '0.3px',
+            }}>{task.episodeTag}</span>
+          )}
+          <span style={{
+            fontSize: 10, color: 'var(--accent)', fontWeight: 600,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>{task.promptTitle || task.promptLabel}</span>
+        </div>
+      )}
+
       {/* Title + verification badge */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6, marginBottom: 3 }}>
         <span style={{ fontSize: 12, color: 'var(--text)', lineHeight: 1.4, fontWeight: 500 }}>
@@ -280,9 +358,25 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, onSelect, onDra
         </div>
       )}
 
-      {/* Linked box chips */}
+      {/* Linked box chips + the landed-commit chip (evidence). Clicking the commit
+          opens its impact/diff on the canvas via the existing commit spotlight. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 5, minHeight: 16 }}>
-        {task.linkedBoxIds.length === 0 ? (
+        {sha && (
+          <span
+            onClick={onCommitClick ? e => onCommitClick(e, task.commitSha) : undefined}
+            title={onCommitClick ? `Open commit ${sha} on canvas` : `Commit ${sha}`}
+            style={{
+              fontSize: 10, fontFamily: 'ui-monospace, monospace',
+              color: 'var(--solid)', background: 'rgba(61,186,110,0.10)',
+              border: '1px solid rgba(61,186,110,0.3)', padding: '1px 6px', borderRadius: 99,
+              cursor: onCommitClick ? 'pointer' : 'default',
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}
+          >
+            ⎇ {sha}{task.files?.length ? ` · ${task.files.length}f` : ''}
+          </span>
+        )}
+        {task.linkedBoxIds.length === 0 && !sha ? (
           <span style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic', opacity: 0.6 }}>
             No linked boxes
           </span>

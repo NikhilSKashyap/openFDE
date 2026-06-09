@@ -13,12 +13,12 @@
  *   function → "box:function:<path>:<name>"
  */
 
+import dagre from '@dagrejs/dagre'
+
 // ── Layout constants (canvas units) ─────────────────────────────────────────
 const M_HEADER = 32
 const M_PAD = 16
-const M_GAP = 22
-const M_COLS = 1            // single vertical file stack — readability over compactness (Batch 4)
-const M_LEFT_LANE = 96     // left lane inside a module for cross-file rollup arcs
+const M_GAP = 22           // gap between file boxes (dagre nodesep / grid fallback)
 
 const F_MIN_W = 180
 const F_HEADER = 30
@@ -49,12 +49,6 @@ export const fnId = (path, name) => `box:function:${path}:${name}`
  *             fileById: Object, fnById: Object }}
  */
 export function computeArchLayout(boxes, archGraph, expanded) {
-  const files = (archGraph && archGraph.files) || []
-  const functions = (archGraph && archGraph.functions) || []
-
-  const filesByModule = groupBy(files, f => f.moduleId)
-  const fnsByPath = groupBy(functions, fn => fn.path)
-
   const nodes = []
   const fileById = {}
   const fnById = {}
@@ -64,120 +58,161 @@ export function computeArchLayout(boxes, archGraph, expanded) {
     const moduleExpanded = isModule && expanded.has(box.id) && !!archGraph
 
     if (!moduleExpanded) {
-      // Collapsed (or non-drillable) module: render as-is.
-      const node = {
-        id: box.id, kind: 'module', expanded: false, drillable: isModule,
-        x: box.x, y: box.y, w: box.w, h: box.h, type: box.type, title: box.title, box,
-        files: [],
-      }
-      nodes.push(node)
+      nodes.push(moduleCollapsedNode(box, isModule))
       continue
     }
 
-    // ── Expanded module: lay out file children ────────────────────────────
-    const modFiles = (filesByModule[box.moduleId] || [])
-      .slice()
-      .sort((a, b) => a.path.localeCompare(b.path))
-
-    // First pass: size every file box.
-    const fileNodes = modFiles.map(f => {
-      const fid = fileId(f.path)
-      const fExpanded = expanded.has(fid)
-      if (!fExpanded) {
-        return { id: fid, kind: 'file', expanded: false, file: f, type: box.type,
-                 w: F_MIN_W, h: F_HEADER + 18, functions: [], _rx: 0, _ry: 0 }
-      }
-      const fns = (fnsByPath[f.path] || []).slice().sort((a, b) => (a.line || 0) - (b.line || 0))
-      if (fns.length === 0) {
-        return { id: fid, kind: 'file', expanded: true, file: f, type: box.type,
-                 w: F_MIN_W, h: F_HEADER + F_EMPTY_H, functions: [], empty: true, _rx: 0, _ry: 0 }
-      }
-      const cols = Math.min(F_COLS, fns.length)
-      const rows = Math.ceil(fns.length / F_COLS)
-      const gridW = cols * FN_W + (cols - 1) * FN_GAP
-      const gridH = rows * FN_H + (rows - 1) * FN_GAP
-      const fnNodes = fns.map((fn, i) => {
-        const col = i % F_COLS
-        const row = Math.floor(i / F_COLS)
-        return {
-          id: fnId(fn.path, fn.name), kind: 'function', fn, type: box.type,
-          w: FN_W, h: FN_H,
-          _rx: F_PAD + col * (FN_W + FN_GAP),
-          _ry: F_HEADER + F_PAD + row * (FN_H + FN_GAP),
-        }
-      })
-      return {
-        id: fid, kind: 'file', expanded: true, file: f, type: box.type,
-        // + F_LANE on the right hosts the nested call-arc lane (Step 26).
-        w: Math.max(F_MIN_W, gridW + F_PAD + F_LANE),
-        h: F_HEADER + F_PAD + gridH + F_PAD,
-        functions: fnNodes, _rx: 0, _ry: 0,
-      }
-    })
-
-    // Pack file boxes into a uniform-column grid (avoids overlap).
-    const colW = fileNodes.length ? Math.max(...fileNodes.map(n => n.w)) : F_MIN_W
-    const rowCount = Math.ceil(fileNodes.length / M_COLS) || 0
-    const rowHeights = []
-    for (let r = 0; r < rowCount; r++) {
-      const inRow = fileNodes.slice(r * M_COLS, r * M_COLS + M_COLS)
-      rowHeights.push(inRow.length ? Math.max(...inRow.map(n => n.h)) : 0)
-    }
-    const rowY = []
-    let acc = M_HEADER + M_PAD
-    for (let r = 0; r < rowCount; r++) { rowY.push(acc); acc += rowHeights[r] + M_GAP }
-    const bodyH = rowCount ? (acc - M_GAP) : (M_HEADER + M_PAD)
-    const usedCols = Math.min(M_COLS, fileNodes.length || 1)
-    const bodyW = usedCols * colW + (usedCols - 1) * M_GAP
-
-    // Module width reserves a left lane (cross-file rollup arcs) + the file
-    // column (each file already carries its own right lane for same-file arcs).
-    const modW = Math.max(box.w, M_PAD + M_LEFT_LANE + bodyW + M_PAD)
-    const modH = Math.max(box.h, bodyH + M_PAD)
-
-    fileNodes.forEach((fn, i) => {
-      const col = i % M_COLS
-      const row = Math.floor(i / M_COLS)
-      fn._rx = M_PAD + M_LEFT_LANE + col * (colW + M_GAP)
-      fn._ry = rowY[row]
-    })
-
-    // Resolve absolute coordinates (module x/y + relative offsets).
-    const fileAbs = fileNodes.map(fn => {
-      const fx = box.x + fn._rx
-      const fy = box.y + fn._ry
-      const functionsAbs = (fn.functions || []).map(g => {
-        const gx = fx + g._rx
-        const gy = fy + g._ry
-        const node = { ...g, x: gx, y: gy }
-        fnById[g.id] = node
-        return node
-      })
-      const node = { ...fn, x: fx, y: fy, functions: functionsAbs }
-      fileById[fn.id] = node
-      return node
-    })
-
-    const modNode = {
-      id: box.id, kind: 'module', expanded: true, drillable: true,
-      x: box.x, y: box.y, w: modW, h: modH, type: box.type, title: box.title, box,
-      files: fileAbs,
-    }
-    nodes.push(modNode)
+    // Expanded module: size file children, then position them with dagre.
+    const { fileNodes, fEdges } = sizeModuleFiles(box, archGraph, expanded)
+    const fl = layoutFiles(fileNodes, fEdges)
+    nodes.push(assembleModule(box, fileNodes, fl, fileById, fnById))
   }
 
-  // ── Effective top-level layout pass ─────────────────────────────────────
-  // Expanded modules grow in place. Rather than re-flowing everything (which
-  // scrambles the persisted flow order and tangles arrows), keep every box where
-  // the user put it and only shove the boxes an expansion now overlaps further
-  // right, cascading down the chain. Render-only — persisted box x/y untouched.
+  return finalizeLayout(nodes, fileById, fnById)
+}
+
+// ── Engine-agnostic building blocks ─────────────────────────────────────────
+// computeArchLayout (dagre, sync) and computeArchLayoutElk (elk, async) share
+// everything except *positioning file boxes within a module*. These helpers are
+// the shared parts so the two engines stay behaviourally identical elsewhere.
+
+/** Collapsed / non-drillable module render node. */
+export function moduleCollapsedNode(box, isModule) {
+  return {
+    id: box.id, kind: 'module', expanded: false, drillable: isModule,
+    x: box.x, y: box.y, w: box.w, h: box.h, type: box.type, title: box.title, box,
+    files: [],
+  }
+}
+
+/**
+ * Size every file box (and its stacked function boxes) inside an expanded
+ * module, and derive the intra-module file→file dataflow edges. Pure sizing —
+ * no positioning yet, so both layout engines consume the same input.
+ *
+ * @returns {{ fileNodes: Array, fEdges: Array<[string,string]> }}
+ */
+export function sizeModuleFiles(box, archGraph, expanded) {
+  const files = (archGraph && archGraph.files) || []
+  const functions = (archGraph && archGraph.functions) || []
+  const filesByModule = groupBy(files, f => f.moduleId)
+  const fnsByPath = groupBy(functions, fn => fn.path)
+
+  const modFiles = (filesByModule[box.moduleId] || [])
+    .slice()
+    .sort((a, b) => a.path.localeCompare(b.path))
+
+  const fileNodes = modFiles.map(f => {
+    const fid = fileId(f.path)
+    const fExpanded = expanded.has(fid)
+    if (!fExpanded) {
+      return { id: fid, kind: 'file', expanded: false, file: f, type: box.type,
+               w: F_MIN_W, h: F_HEADER + 18, functions: [], _rx: 0, _ry: 0 }
+    }
+    const fns = (fnsByPath[f.path] || []).slice().sort((a, b) => (a.line || 0) - (b.line || 0))
+    if (fns.length === 0) {
+      return { id: fid, kind: 'file', expanded: true, file: f, type: box.type,
+               w: F_MIN_W, h: F_HEADER + F_EMPTY_H, functions: [], empty: true, _rx: 0, _ry: 0 }
+    }
+    const cols = Math.min(F_COLS, fns.length)
+    const rows = Math.ceil(fns.length / F_COLS)
+    const gridW = cols * FN_W + (cols - 1) * FN_GAP
+    const gridH = rows * FN_H + (rows - 1) * FN_GAP
+    const fnNodes = fns.map((fn, i) => {
+      const col = i % F_COLS
+      const row = Math.floor(i / F_COLS)
+      return {
+        id: fnId(fn.path, fn.name), kind: 'function', fn, type: box.type,
+        w: FN_W, h: FN_H,
+        _rx: F_PAD + col * (FN_W + FN_GAP),
+        _ry: F_HEADER + F_PAD + row * (FN_H + FN_GAP),
+      }
+    })
+    return {
+      id: fid, kind: 'file', expanded: true, file: f, type: box.type,
+      // + F_LANE on the right hosts the nested call-arc lane (Step 26).
+      w: Math.max(F_MIN_W, gridW + F_PAD + F_LANE),
+      h: F_HEADER + F_PAD + gridH + F_PAD,
+      functions: fnNodes, _rx: 0, _ry: 0,
+    }
+  })
+
+  // Intra-module file→file dataflow edges (drive layered LR positioning).
+  const fileSet = new Set(fileNodes.map(n => n.id))
+  const seen = new Set()
+  const fEdges = []
+  for (const fw of ((archGraph && archGraph.flows) || [])) {
+    if (!fw.fromFile || !fw.toFile || fw.fromFile === fw.toFile) continue
+    const a = fileId(fw.fromFile), b = fileId(fw.toFile)
+    if (fileSet.has(a) && fileSet.has(b)) {
+      const k = `${a}>${b}`
+      if (!seen.has(k)) { seen.add(k); fEdges.push([a, b]) }
+    }
+  }
+  return { fileNodes, fEdges }
+}
+
+/**
+ * Given sized file nodes and their relative positions `fl = {pos,w,h}` (from
+ * either engine, normalized to 0,0), assemble the expanded-module render node
+ * and resolve absolute geometry for files + functions. Mutates fileById/fnById.
+ */
+export function assembleModule(box, fileNodes, fl, fileById, fnById) {
+  const modW = Math.max(box.w, M_PAD + fl.w + M_PAD)
+  const modH = Math.max(box.h, M_HEADER + M_PAD + fl.h + M_PAD)
+  fileNodes.forEach(fn => {
+    const p = fl.pos[fn.id] || { x: 0, y: 0 }
+    fn._rx = M_PAD + p.x
+    fn._ry = M_HEADER + M_PAD + p.y
+  })
+
+  const fileAbs = fileNodes.map(fn => {
+    const fx = box.x + fn._rx
+    const fy = box.y + fn._ry
+    const functionsAbs = (fn.functions || []).map(g => {
+      const node = { ...g, x: fx + g._rx, y: fy + g._ry }
+      fnById[g.id] = node
+      return node
+    })
+    const node = { ...fn, x: fx, y: fy, functions: functionsAbs }
+    fileById[fn.id] = node
+    return node
+  })
+
+  const modNode = {
+    id: box.id, kind: 'module', expanded: true, drillable: true,
+    x: box.x, y: box.y, w: modW, h: modH, type: box.type, title: box.title, box,
+    files: fileAbs,
+  }
+
+  // Routed edges (ELK engine only): file→file orthogonal paths in module-content
+  // space → absolute, using the same offset as the file boxes. They ride along
+  // with the module in separateNodes (see shiftNode), then surface in
+  // finalizeLayout so the canvas can draw them in place of bezier flow arrows.
+  if (fl.routes && fl.routes.length) {
+    const ox = box.x + M_PAD
+    const oy = box.y + M_HEADER + M_PAD
+    modNode.routedEdges = fl.routes.map(r => ({
+      fromId: r.fromId, toId: r.toId,
+      points: r.points.map(p => ({ x: ox + p.x, y: oy + p.y })),
+    }))
+  }
+
+  return modNode
+}
+
+/**
+ * Final top-level pass shared by both engines: structure-preserving separation
+ * of overlapping modules, effective box geometry for arrows/ports, and bounds.
+ */
+export function finalizeLayout(nodes, fileById, fnById) {
+  // Expanded modules grow in place; only neighbours they now overlap are shoved
+  // right (persisted box x/y untouched — render-only).
   const anyExpanded = nodes.some(n => n.expanded)
   if (anyExpanded) separateNodes(nodes)
 
-  // Effective boxes carry the (possibly repacked) geometry for arrows + ports.
   const effectiveBoxes = nodes.map(n => ({ ...n.box, x: n.x, y: n.y, w: n.w, h: n.h }))
 
-  // Content bounds for the scrollable / zoomable viewport.
   let maxX = 800, maxY = 600
   for (const n of nodes) {
     maxX = Math.max(maxX, n.x + n.w)
@@ -185,7 +220,12 @@ export function computeArchLayout(boxes, archGraph, expanded) {
   }
   const bounds = { w: maxX + 160, h: maxY + 160 }
 
-  return { nodes, effectiveBoxes, bounds, fileById, fnById }
+  // Collect any routed edges (ELK engine) into a flat list keyed by endpoints;
+  // empty for the dagre engine.
+  const routedEdges = []
+  for (const n of nodes) if (n.routedEdges) routedEdges.push(...n.routedEdges)
+
+  return { nodes, effectiveBoxes, bounds, fileById, fnById, routedEdges }
 }
 
 /**
@@ -235,6 +275,10 @@ function shiftNode(n, dx, dy) {
       g.x += dx
       g.y += dy
     }
+  }
+  // Routed edges (ELK) ride along rigidly with their module.
+  for (const e of (n.routedEdges || [])) {
+    for (const p of e.points) { p.x += dx; p.y += dy }
   }
 }
 
@@ -338,6 +382,70 @@ export function computeFlowArrows(archGraph, layout, opts = {}) {
     out.push(e)
   }
   return out
+}
+
+/**
+ * Position file boxes inside an expanded module. With intra-module dataflow
+ * edges, use dagre for a clean layered left→right layout; with none, fall back
+ * to a compact square-ish grid (never a tall single column). Returns relative
+ * positions (top-left, normalized to 0,0) and the body bounding box.
+ *
+ * @param {Array} fileNodes - file render nodes (with computed w/h).
+ * @param {Array<[string,string]>} fEdges - [fromFileId, toFileId] edges.
+ * @returns {{ pos: Object, w: number, h: number }}
+ */
+// Spacing for file-box positioning, shared by the Dagre seed and the ELK layout
+// so the seed→ELK transition doesn't jump (dagre nodesep/ranksep ↔ elk
+// nodeNode / betweenLayers).
+export const FILE_SPACING = { nodesep: 22, ranksep: 56 }
+
+/**
+ * Compact square-ish grid for file boxes with no intra-module dataflow — never a
+ * tall single column. Both the Dagre seed and the ELK layout use this for the
+ * edge-less case (ELK adds nothing when there are no edges to route). Returns
+ * relative positions (top-left, from 0,0) and the body bounding box.
+ */
+export function gridLayoutFiles(fileNodes) {
+  if (fileNodes.length === 0) return { pos: {}, w: 0, h: 0 }
+  const pos = {}
+  let w = 0, h = 0
+  const cols = Math.max(1, Math.round(Math.sqrt(fileNodes.length)))
+  const colW = Math.max(...fileNodes.map(n => n.w))
+  const rowH = []
+  fileNodes.forEach((n, i) => { const r = Math.floor(i / cols); rowH[r] = Math.max(rowH[r] || 0, n.h) })
+  const rowY = []; let acc = 0
+  rowH.forEach((hh, r) => { rowY[r] = acc; acc += hh + M_GAP })
+  fileNodes.forEach((n, i) => {
+    const c = i % cols, r = Math.floor(i / cols)
+    const x = c * (colW + M_GAP), y = rowY[r]
+    pos[n.id] = { x, y }
+    w = Math.max(w, x + n.w); h = Math.max(h, y + n.h)
+  })
+  return { pos, w, h }
+}
+
+function layoutFiles(fileNodes, fEdges) {
+  if (fileNodes.length === 0) return { pos: {}, w: 0, h: 0 }
+  if (fEdges.length === 0) return gridLayoutFiles(fileNodes)
+
+  const pos = {}
+  let w = 0, h = 0
+
+  const g = new dagre.graphlib.Graph()
+  g.setGraph({ rankdir: 'LR', nodesep: FILE_SPACING.nodesep, ranksep: FILE_SPACING.ranksep, marginx: 0, marginy: 0 })
+  g.setDefaultEdgeLabel(() => ({}))
+  fileNodes.forEach(n => g.setNode(n.id, { width: n.w, height: n.h }))
+  fEdges.forEach(([a, b]) => { if (g.hasNode(a) && g.hasNode(b)) g.setEdge(a, b) })
+  dagre.layout(g)
+  // dagre gives centres; convert to top-left and normalize so the body starts at 0,0.
+  fileNodes.forEach(n => { const d = g.node(n.id); pos[n.id] = { x: d.x - n.w / 2, y: d.y - n.h / 2 } })
+  const minX = Math.min(...fileNodes.map(n => pos[n.id].x))
+  const minY = Math.min(...fileNodes.map(n => pos[n.id].y))
+  fileNodes.forEach(n => {
+    pos[n.id].x -= minX; pos[n.id].y -= minY
+    w = Math.max(w, pos[n.id].x + n.w); h = Math.max(h, pos[n.id].y + n.h)
+  })
+  return { pos, w, h }
 }
 
 function groupBy(arr, keyFn) {
