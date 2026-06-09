@@ -9,6 +9,8 @@ set.
 It also **remembers**. Prompts run through the council, OpenFDE wrappers, or
 passive Claude Code capture become *episodes*, committed with their own attributed
 scope and woven into a replayable **Story** of how the codebase came to be.
+Codex can handle the thinking roles, Claude Code can handle the coding role, and
+OpenFDE keeps the work visible, scoped, reviewed, and narrated.
 
 ## Quick Start
 
@@ -60,16 +62,23 @@ Two settings, both from the command palette (`⌘K`):
 2. **Assign providers** — `⌘K` → **Open Agent Settings**, then set each role
    (Architect / Senior Dev / Verifier).
 
-### Claude Code (local CLI) — keyless
+### Codex (local CLI) — keyless thinking roles
+
+Set **Architect** and/or **Verifier** to provider **Codex (local CLI)**.
+OpenFDE uses your existing Codex login for text-only reasoning: the Architect
+writes the scoped implementation brief, and the Verifier reviews the actual
+worktree diff before anything lands. No OpenFDE API key is needed, and each role
+is labeled in Review so the proof is visible.
+
+### Claude Code (local CLI) — keyless coding role
 
 Set any role to provider **Claude Code (local CLI)**. OpenFDE drives your local
-`claude` CLI headlessly — no copy-paste, no API key in OpenFDE. The Senior Dev
-edits in-scope files (scope is enforced before and after the run, and pre-existing
-dirty files are never reverted); the Architect and Verifier run as text roles on
-the same CLI. Auth comes from your existing `claude` login, so on a Pro/Max plan
-the whole council runs against your subscription with **zero keys** anywhere in
-the project. Each stage is labeled with its provider in Review so the proof is
-visible.
+`claude` CLI headlessly — no copy-paste, no API key in OpenFDE. It is the
+preferred **Senior Dev** backend for code edits: scope is enforced before and
+after the run, pre-existing dirty files are never reverted, and read/write
+progress streams onto the canvas as file glow. Auth comes from your existing
+`claude` login, so on a Pro/Max plan the coding role runs against your
+subscription with **zero keys** anywhere in the project.
 
 ### Real models (API)
 
@@ -94,9 +103,11 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
   completes, OpenFDE commits **only** the files attributable to that episode
   (never sweeping unrelated dirty changes) and links the commit back to the prompt.
   A manual **Land** stays available as a fallback when the scope is ambiguous.
-- **Works with any agent.** OpenFDE can passively capture prompts from your local
-  Claude Code CLI by tailing its transcripts, cwd-agnostically — so the story keeps
-  building even on changes the council didn't run.
+- **Works with external agents too.** Today, OpenFDE can passively capture prompts
+  from your local Claude Code CLI by tailing its transcripts, cwd-agnostically —
+  so the story keeps building even on changes the council didn't run. Codex and
+  other agents can be captured through the OpenFDE wrappers today; passive Codex /
+  Cursor import is future work, not a current claim.
 - **Story tab — a product memory, not a git log.** Concepts derived from your
   prompts are grouped into what you're **building** (Active), what you **parked**
   (Deferred), and what you **dropped** (Abandoned), each linking back to its
@@ -108,12 +119,12 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.4.0**, the full council can run
-**keyless on your local Claude Code CLI** (Architect, Senior Dev, and Verifier),
-with the agent **streamed live on the canvas** as it works and a **stop control**
-to halt any run. The architecture-to-execution loop runs end-to-end: select scope,
-describe intent, and the council implements, verifies against the real diff, and
-commits — within the boundaries you draw. Beyond execution, OpenFDE keeps a
-**development memory**: prompts are captured as episodes from the council,
-OpenFDE wrappers, or passive Claude Code capture, auto-committed with attributed
-scope, and replayable as a visual **Story**.
+OpenFDE is early and moving fast. As of **0.4.0**, the local-first council can
+run with **Codex local CLI for Architect/Verifier** and **Claude Code local CLI
+for Senior Dev**, with coding activity **streamed live on the canvas** and a
+**stop control** to halt any run. The architecture-to-execution loop runs
+end-to-end: select scope, describe intent, and the council implements, verifies
+against the real diff, and commits — within the boundaries you draw. Beyond
+execution, OpenFDE keeps a **development memory**: prompts are captured as
+episodes from the council, OpenFDE wrappers, or passive Claude Code capture,
+auto-committed with attributed scope, and replayable as a visual **Story**.

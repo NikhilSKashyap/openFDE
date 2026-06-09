@@ -253,18 +253,27 @@ def enrich(episode: dict, *, invoke=None, providers=None, timeout: int = 30, all
     Deterministic facts are assigned immediately (cheap). When ``allow_llm`` and the episode
     still needs it, one LLM attempt (per fingerprint) may upgrade the title/summary/storyFacts.
     """
-    from openfde.episode_summary import is_bad_title, derive_title_summary, is_operational
+    from openfde.episode_summary import (is_bad_title, derive_title_summary, is_operational,
+                                          operational_title)
     changed = False
 
     # 0) Repair existing bad titles ("Yes", "`ROADMAP.md`", "Here's the CC prompt", …).
     # A stored bad title means stale metadata: re-derive deterministically (preferring the
-    # prompt's Goal/Product-Change heading), mark operational when it's still bad, and drop
-    # the summary cache so storyFacts re-derive and the LLM re-attempts a real title. Never
-    # touches episodeId / sequence / tag / commitShas / files / the original prompt.
+    # prompt's Goal/Product-Change heading), and drop the summary cache so storyFacts re-derive
+    # and the LLM re-attempts a real title. When the re-derive is STILL bad — a wrapper/meta
+    # prompt whose own text is boilerplate ("Here's the Claude Code prompt: …") — show a clean
+    # neutral operational label + summary instead of leaking the raw line, and keep the episode
+    # operational (out of Story). Never touches episodeId / sequence / tag / commitShas / files /
+    # the original prompt (the raw text stays as Full-prompt evidence).
     if is_bad_title(episode.get("title") or ""):
         t, s = derive_title_summary(episode.get("prompt") or "", episode.get("files"))
+        if is_bad_title(t):
+            t = operational_title(episode)
+            s = "Captured implementation prompt."
+            episode["signal"] = "operational"
+        else:
+            episode["signal"] = "operational" if is_operational(episode.get("prompt") or "") else "product"
         episode["title"], episode["summary"] = t, s
-        episode["signal"] = "operational" if (is_operational(episode.get("prompt") or "") or is_bad_title(t)) else "product"
         for k in ("summaryFingerprint", "storyFacts", "summaryLlmTried", "summarySource", "summaryConfidence"):
             episode.pop(k, None)
         changed = True

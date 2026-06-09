@@ -147,6 +147,23 @@ class EnrichCacheTest(unittest.TestCase):
         self.assertTrue(ep["storyFacts"]["operational"])
         self.assertEqual(ep["storyFacts"]["concepts"], [])   # operational → no active concept
 
+    def test_wrapper_prompt_heals_to_neutral_operational_title(self):
+        # A meta wrapper prompt whose own first line is boilerplate with a CURLY apostrophe
+        # ("Here's the Claude Code prompt: …") can't be skipped by the deterministic re-derive,
+        # so the title must heal to a clean NEUTRAL operational label — never the raw line —
+        # stay operational (out of Story), and keep the raw prompt as evidence.
+        ep = {"episodeId": "r3", "sequence": 16, "tag": "P16",
+              "prompt": "Here’s the Claude Code prompt:\n\nYou are acting as senior dev.\n\nDo a polish pass.",
+              "title": "Here’s the Claude Code prompt", "summary": "stale",
+              "files": [], "commitShas": [], "signal": "operational", "summarySource": "deterministic"}
+        ls.enrich(ep, providers=[])                          # no LLM → deterministic heal
+        self.assertEqual(ep["title"], "Claude Code Implementation Prompt")
+        self.assertNotIn("Here", ep["title"])                 # raw wrapper line never shown
+        self.assertEqual(ep["signal"], "operational")         # stays operational
+        self.assertEqual(ep["storyFacts"]["concepts"], [])    # → kept out of Story
+        self.assertEqual(ep["tag"], "P16")                    # identity preserved
+        self.assertTrue(ep["prompt"].startswith("Here’s the Claude Code prompt"))  # evidence kept
+
     def test_ensure_facts_persists(self):
         import tempfile
         from pathlib import Path

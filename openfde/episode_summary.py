@@ -176,6 +176,21 @@ def is_bad_title(title: str) -> bool:
     return False
 
 
+def operational_title(episode: dict) -> str:
+    """A clean, neutral chip/card title for a wrapper/meta prompt episode — one whose own
+    visible text is just boilerplate ("Here's the Claude Code prompt: …") with no product
+    intent of its own. Names the agent when detectable. The raw prompt is preserved as
+    evidence elsewhere (Full prompt); this only labels the surface so the rail/card read clean.
+    """
+    blob = _normalize_quotes((episode.get("title") or "") + " "
+                             + (episode.get("prompt") or "")[:300]).lower()
+    if "codex" in blob and "claude" not in blob:
+        return "Codex Implementation Prompt"
+    if "claude" in blob or "cc prompt" in blob:
+        return "Claude Code Implementation Prompt"
+    return "Implementation Prompt"
+
+
 def _distill_title(line: str) -> str:
     """Trim an intent line into a concept: drop a leading 'implement'/'move … to' verb and a
     trailing version marker, so 'Implement LLM Story Summarizer v1' → 'LLM Story Summarizer'."""
