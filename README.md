@@ -110,14 +110,25 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
   is dirty-set / quiet-window based** — strongest when Codex runs in the watched repo. Other
   agents are still watched via file changes, and the wrappers remain. Historical import of
   old Claude/Codex/Cursor logs is future work.
-- **Story tab — a product memory, not a git log.** Concepts derived from your
-  prompts are grouped into what you're **building** (Active), what you **parked**
-  (Deferred), and what you **dropped** (Abandoned), each linking back to its
-  prompts, commits, and files. Press **Tell** to replay the work as a chronological
-  episode map: prompt beats laid out left-to-right by sequence, with deferred and
-  dropped ideas branching off the beat that produced them.
+- **Story tab — a product memory with a decision lifecycle.** Concepts derived
+  from your prompts land in five lanes: **Now** (the latest beat's build
+  direction), **Next** (queued — including explicit "Next:" marks), **Watch**
+  (interesting, not committed), **Deferred** (parked, with the revisit trigger
+  when you wrote one — "until passive capture lands"), and **Abandoned**. Each
+  concept links back to its prompts, commits, and files. Press **Tell** to replay
+  the work as a chronological episode map: prompt beats left-to-right by
+  sequence, with deferred / watch / dropped ideas branching off the beat that
+  produced them.
 - **OpenPM.** Landed prompts surface as Done cards on a Kanban board, tagged and
   grouped by their episode, so the board mirrors the same prompt → commit story.
+- **GitHub Issues become durable intent.** Import an issue (the board's
+  **⊕ Issue** input, or `POST /api/issues/github/import`) and it becomes a
+  **To Do** card carrying the issue badge, state, and labels — intent *before*
+  the episode. Re-import is idempotent (refreshes state, preserves your board),
+  closed issues keep their card, and an episode started from an issue carries
+  `intentSource` so commits trace back to the ticket. Issues never enter the
+  Story until an episode actually lands work. v1 rides the local `gh` CLI — no
+  OAuth, no webhooks.
 
 ## Status
 
