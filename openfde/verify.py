@@ -98,13 +98,16 @@ def _tail(text: str, cap: int = _TAIL_CAP) -> str:
 
 
 def _summary(output: str, exit_code: int) -> str:
-    """A one-line receipt: the last meaningful output line ("Ran 155 tests… OK",
-    "✖ 3 problems"), else a plain exit-code statement."""
+    """A one-line receipt: the last meaningful output line, with a terse final line
+    folded into its predecessor — unittest's "Ran 155 tests in 11.5s" + "OK" becomes
+    "Ran 155 tests in 11.5s — OK". Falls back to the exit code."""
     lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
-    for ln in reversed(lines):
-        if len(ln) > 3 or not lines:                # skip bare "OK"-only? no — keep informative
-            return ln[:_SUMMARY_CAP]
-    return ("exit 0" if exit_code == 0 else f"exit {exit_code}")
+    if not lines:
+        return "exit 0" if exit_code == 0 else f"exit {exit_code}"
+    last = lines[-1]
+    if len(last) < 8 and len(lines) >= 2:
+        last = f"{lines[-2]} — {last}"
+    return last[:_SUMMARY_CAP]
 
 
 def run_check(root, check: dict, *, runner=None, timeout: int = _CHECK_TIMEOUT) -> dict:

@@ -72,8 +72,9 @@ from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
-from openfde.episode_summary import commit_display, repair_episode_tasks
+from openfde.episode_summary import commit_display, is_bad_title, repair_episode_tasks
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
+from openfde import verify as verify_mod
 from openfde import episode_llm_summary
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
@@ -533,6 +534,53 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         persistence.save_tasks(tasks)
         await manager.broadcast({"type": "tasks_updated"})
         return web.json_response({"ok": True, "task": task, "created": created})
+
+    # ================================================================== #
+    #  REST — /api/verify  (Verify Gate Evidence v1 — local receipts)     #
+    # ================================================================== #
+
+    async def get_verify_status(request: web.Request) -> web.Response:
+        """The discovered checks + the latest worktree-level evidence (no run).
+
+        Returns:
+            web.Response — {ok, checks: [{id,label,command,required}], latest}.
+        """
+        checks = [{"id": c["id"], "label": c["label"], "command": " ".join(c["command"]),
+                   "required": c["required"]} for c in verify_mod.discover_checks(path)]
+        return web.json_response({"ok": True, "checks": checks,
+                                  "latest": persistence.load_verify_latest()})
+
+    async def post_verify_run(request: web.Request) -> web.Response:
+        """Run the repo's local checks now and store the evidence.
+
+        Body (optional): {episodeId} — also attach the evidence to that episode
+        (it then rides /api/review/episodes into Review/OpenPM surfaces).
+
+        Side effects: writes verify_latest.json; upserts the episode when given;
+        broadcasts verify_updated (+ episode_updated when attached).
+
+        Returns:
+            web.Response — {ok, verify, episodeId?}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        loop = asyncio.get_event_loop()
+        evidence = await loop.run_in_executor(None, lambda: verify_mod.run_verification(path))
+        persistence.save_verify_latest(evidence)
+        ep_id = (body.get("episodeId") or "").strip()
+        if ep_id:
+            ep = next((e for e in persistence.load_episodes()
+                       if e.get("episodeId") == ep_id), None)
+            if ep is not None:
+                ep["verify"] = evidence
+                ep["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                persistence.upsert_episode(ep)
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
+        await manager.broadcast({"type": "verify_updated", "verify": evidence})
+        return web.json_response({"ok": True, "verify": evidence,
+                                  **({"episodeId": ep_id} if ep_id else {})})
 
     # ================================================================== #
     #  REST — /api/events                                                 #
@@ -1330,7 +1378,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             # reads like its own logical change; otherwise fall back to the cleaned owning episode,
             # never the noisy raw commit subject ("openfde: Here's the CC…").
             cm = (ep.get("commitMeta") or {}).get(sha) if sha else None
-            if cm and cm.get("title"):
+            # A stored per-commit title can itself be noisy ("text", from a prompt that
+            # opened with a ```text fence, captured before the LLM title upgrade) —
+            # validate it like any other title and heal from the episode when bad.
+            if cm and cm.get("title") and not is_bad_title(cm["title"]):
                 dtitle, dsummary = cm["title"], cm.get("summary") or ""
             else:
                 dtitle, dsummary = commit_display(ep.get("title"), ep.get("summary"), c.get("summary"))
@@ -2867,6 +2918,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_put( "/api/tasks",                 put_tasks)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
+    app.router.add_get( "/api/verify/status",         get_verify_status)
+    app.router.add_post("/api/verify/run",            post_verify_run)
     app.router.add_get( "/api/events",                get_events)
     app.router.add_post("/api/events",                post_event)
     app.router.add_get( "/api/project",               get_project)

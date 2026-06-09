@@ -28,6 +28,10 @@ function makeDemoTasks() {
 const _NOISY_TITLE = new Set([
   'yes', 'ya', 'yeah', 'ok', 'okay', 'k', 'sure', 'no', 'nope', 'done', 'here', 'prompt',
   'change', 'update', 'fix', 'landed change', "here's the cc prompt", 'here is the cc prompt',
+  // Code-fence language tokens (a "```text" prompt opener is not a title) — mirrors
+  // the backend's is_bad_title fence rule.
+  'text', 'bash', 'python', 'json', 'diff', 'shell', 'sh', 'console', 'code',
+  'markdown', 'md', 'yaml', 'html', 'css', 'js', 'jsx', 'ts', 'tsx',
 ])
 function isNoisyTitle(title) {
   // Normalize smart quotes → ASCII first so a curly apostrophe ("Here's") matches like a
@@ -102,6 +106,7 @@ function pmReducer(state, action) {
             promptTitle: c.promptTitle || '', sequence: c.sequence || 0,
             commitSha: c.commitSha, shortSha: c.shortSha || (c.commitSha || '').slice(0, 7),
             source: 'openfde-episode', files: c.files || [], promptLabel: c.promptLabel || '',
+            verify: c.verify || null,       // Verify Gate receipts (lite) → evidence badges
           })
           continue
         }
@@ -113,10 +118,13 @@ function pmReducer(state, action) {
         const newTag = t.episodeTag || c.episodeTag || ''
         const newPT = t.promptTitle || c.promptTitle || ''
         const newSeq = t.sequence || c.sequence || 0
+        const newVerify = c.verify || t.verify || null     // receipts can arrive late
         if (newTitle !== t.title || newDesc !== t.description || newTag !== t.episodeTag
-            || newPT !== t.promptTitle || newSeq !== t.sequence) {
+            || newPT !== t.promptTitle || newSeq !== t.sequence
+            || JSON.stringify(newVerify) !== JSON.stringify(t.verify || null)) {
           clone()[idx] = { ...t, title: newTitle, description: newDesc,
-                           episodeTag: newTag, promptTitle: newPT, sequence: newSeq }
+                           episodeTag: newTag, promptTitle: newPT, sequence: newSeq,
+                           verify: newVerify }
         }
       }
       if (additions.length) clone().push(...additions)

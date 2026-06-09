@@ -115,6 +115,24 @@ export const listGithubIssues = () => apiFetch('/api/issues/github/list')
 export const importGithubIssue = (payload) =>
   apiFetch('/api/issues/github/import', { method: 'POST', body: JSON.stringify(payload) })
 
+// ── Verify Gate (local receipts) ──────────────────────────────────────────
+
+/**
+ * Discovered checks + latest worktree-level verification evidence (no run).
+ *
+ * @returns {Promise<{ok: boolean, checks: Array, latest: Object}|null>}
+ */
+export const getVerifyStatus = () => apiFetch('/api/verify/status')
+
+/**
+ * Run the repo's local checks now; optionally attach evidence to an episode.
+ *
+ * @param {{episodeId?: string}} [payload]
+ * @returns {Promise<{ok: boolean, verify?: Object}|null>}
+ */
+export const runVerify = (payload = {}) =>
+  apiFetch('/api/verify/run', { method: 'POST', body: JSON.stringify(payload) })
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 /**

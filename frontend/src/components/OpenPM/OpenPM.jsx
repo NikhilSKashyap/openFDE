@@ -22,6 +22,10 @@ const veriBadge = {
   failed:  { color: 'var(--violation)',  bg: 'rgba(227,51,51,0.10)',       border: 'rgba(227,51,51,0.3)' },
 }
 
+// Verify Gate receipts → tiny per-check badge text ("tests ✓", "lint ✓").
+const VERIFY_SHORT = { 'unit-tests': 'tests', 'frontend-lint': 'lint' }
+const verifyShort = ch => VERIFY_SHORT[ch.id] || (ch.id || 'check').replace(/-/g, ' ').slice(0, 10)
+
 // ── OpenPM ────────────────────────────────────────────────────────────
 export default function OpenPM({
   tasks,
@@ -476,6 +480,34 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
             }}
           >
             ⎇ {sha}{task.files?.length ? ` · ${task.files.length}f` : ''}
+          </span>
+        )}
+        {/* Verify Gate receipts — what made this safe to land (or didn't). */}
+        {task.verify?.status === 'failed' && (
+          <span title="Verification failed — open the episode card for the evidence" style={{
+            fontSize: 9.5, color: 'var(--violation)', background: 'rgba(227,51,51,0.10)',
+            border: '1px solid rgba(227,51,51,0.3)', padding: '1px 6px', borderRadius: 99,
+            fontWeight: 600,
+          }}>
+            verify failed
+          </span>
+        )}
+        {task.verify?.status === 'passed' && (task.verify.checks || []).map(ch => (
+          <span key={ch.id} title={`${ch.label}: ${ch.status}`} style={{
+            fontSize: 9.5, padding: '1px 6px', borderRadius: 99,
+            color: ch.status === 'passed' ? 'var(--solid)' : 'var(--text-muted)',
+            background: ch.status === 'passed' ? 'rgba(61,186,110,0.08)' : 'transparent',
+            border: `1px solid ${ch.status === 'passed' ? 'rgba(61,186,110,0.25)' : 'var(--border)'}`,
+          }}>
+            {verifyShort(ch)} {ch.status === 'passed' ? '✓' : '✕'}
+          </span>
+        ))}
+        {task.verify?.status === 'skipped' && (
+          <span title="No verification configured when this landed" style={{
+            fontSize: 9.5, color: 'var(--text-muted)', border: '1px solid var(--border)',
+            padding: '1px 6px', borderRadius: 99, opacity: 0.75,
+          }}>
+            no verify
           </span>
         )}
         {task.linkedBoxIds.length === 0 && !sha ? (

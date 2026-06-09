@@ -225,6 +225,9 @@ class Persistence:
         self.agent_settings_path = openfde_dir / "agent_settings.json"
         self.concept_cards_path = openfde_dir / "concept_cards.json"
         self.episodes_path = openfde_dir / "episodes.json"
+        # Latest worktree-level verification evidence (.openfde/verify.json stays
+        # reserved for the user's check CONFIG — see openfde/verify.py).
+        self.verify_latest_path = openfde_dir / "verify_latest.json"
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
@@ -497,6 +500,23 @@ class Persistence:
         """
         raw = self._read_json(self.concept_cards_path, [])
         return raw if isinstance(raw, list) else []
+
+    def load_verify_latest(self) -> dict:
+        """Latest worktree-level verification evidence ({} when never run).
+
+        Returns:
+            dict — {status, checks[], ranAt, durationMs, note?} from openfde.verify.
+        """
+        raw = self._read_json(self.verify_latest_path, {})
+        return raw if isinstance(raw, dict) else {}
+
+    def save_verify_latest(self, evidence: dict) -> None:
+        """Persist the latest worktree-level verification evidence.
+
+        Args:
+            evidence: dict — run_verification() result.
+        """
+        self._write_json(self.verify_latest_path, evidence or {})
 
     def add_concept_card(self, card: dict, cap: int = 200) -> dict:
         """Prepend a concept card, keeping the most recent `cap`.

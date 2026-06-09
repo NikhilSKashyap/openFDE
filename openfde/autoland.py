@@ -79,7 +79,14 @@ def _trailers(episode: dict) -> dict:
     return t
 
 
-def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: bool = False) -> dict:
+def _default_verify(root) -> dict:
+    """The standard gate: run the repo's discovered local checks (openfde.verify)."""
+    from openfde.verify import run_verification
+    return run_verification(root)
+
+
+def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: bool = False,
+                 run_verify=None) -> dict:
     """Commit an episode's attributed files (scoped) and update its state.
 
     The episode's diff is clustered into 1–N **logical changes** (``cluster_changes``) and each is
@@ -95,6 +102,13 @@ def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: boo
             explicit user Land (force the scoped commit for this episode).
         allow_llm: bool — cluster the diff with the local LLM (offload to an executor); False
             uses the fast deterministic by-scope split.
+        run_verify: optional (root) -> evidence — the Verify gate (injectable for tests);
+            defaults to ``openfde.verify.run_verification`` and is slow (runs the repo's
+            checks) → callers should already be in an executor. Evidence lands on
+            ``episode["verify"]``. **Auto**-land blocks on a failed required check
+            (→ needs_manual_land, nothing committed); an explicit user Land proceeds —
+            the escape hatch — with the failure recorded and visible. No checks
+            discovered → *skipped* evidence is recorded, never silent success.
 
     Returns:
         dict — {ok, committed, sha?, shortSha?, status, reason, episode, files, commits:[…],
@@ -135,6 +149,23 @@ def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: boo
                   and e.get("status") in _OPEN_STATES]
         if any(set(scoped) & set(e.get("files") or []) for e in others):
             return _set(NEEDS_MANUAL, "dirty files overlap multiple episodes — review manually")
+
+    # Verify gate — collect receipts before anything is committed. Runs after the cheap
+    # guards (so we never pay for checks on a no-op land) and before the transient
+    # auto_landing state. The evidence rides the episode into every surface.
+    evidence = (run_verify or _default_verify)(root)
+    episode["verify"] = evidence
+    if evidence.get("status") == "failed":
+        failed = "; ".join(c.get("summary") or c.get("id", "check")
+                           for c in (evidence.get("checks") or [])
+                           if c.get("required") and c.get("status") == "failed")[:200]
+        if auto:
+            # Blocked: leave the work uncommitted and park the episode for review.
+            return _set(NEEDS_MANUAL, "verification failed: " + (failed or "required check failed"))
+        # Explicit user Land = the escape hatch: proceed, but the failure stays
+        # recorded on the episode (red evidence in Review/OpenPM), never hidden.
+
+    if auto:
         # Transient — shows "auto-landing" on the card while the commits run.
         episode["status"] = AUTO_LANDING
         episode["updatedAt"] = now

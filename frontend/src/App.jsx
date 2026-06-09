@@ -197,6 +197,11 @@ export default function App() {
       episodeTag: ep.tag || '', sequence: ep.sequence || 0,
       promptTitle: ep.title || '',
       promptLabel: ep.title || (ep.prompt || ep.summary || '').split('\n')[0].slice(0, 48),
+      // Verify Gate receipts (lite) — drives the evidence badges on OpenPM cards.
+      verify: ep.verify ? {
+        status: ep.verify.status,
+        checks: (ep.verify.checks || []).map(ch => ({ id: ch.id, label: ch.label, status: ch.status })),
+      } : null,
     })))
     if (commits.length) pmDispatch({ type: 'SYNC_EPISODE_COMMITS', commits })
   }
@@ -216,6 +221,7 @@ export default function App() {
       count: files.length, files: [], amberFiles: files,
       fileEntries: files.map(p => ({ path: p, status: '' })),
       commits: ep.commits || [], epKind: ep.kind || 'agent',
+      verify: ep.verify || null,
     })
     setActiveView('whiteboard')
   }

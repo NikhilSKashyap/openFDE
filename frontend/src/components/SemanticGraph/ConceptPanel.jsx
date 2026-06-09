@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
 import { cardTitleFor as commitDisplayTitle } from '../../store/pmState'
+import { runVerify } from '../../api/backend'
 
 // Friendly labels for the normalized episode lifecycle states (Auto-Land).
 const EP_STATUS_LABEL = {
@@ -52,6 +53,17 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   const [title, setTitle] = useState(() => (isChange ? (spotlight.summary || spotlight.label) : spotlight.label))
   const [summary, setSummary] = useState('')
   const [saved, setSaved] = useState(false)
+  // Verify Gate receipts: fresh local run wins over the evidence the episode arrived with.
+  const [verifyLocal, setVerifyLocal] = useState(null)
+  const [verifyBusy, setVerifyBusy] = useState(false)
+  const verify = verifyLocal || spotlight.verify || null
+
+  async function runChecks() {
+    setVerifyBusy(true)
+    const res = await runVerify(spotlight.episodeId ? { episodeId: spotlight.episodeId } : {})
+    setVerifyBusy(false)
+    if (res?.ok && res.verify) setVerifyLocal(res.verify)
+  }
 
   const concepts = spotlight.concepts || []
   // Only cross-layer rename-coupled (high-signal) concepts may need review.
@@ -214,6 +226,66 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
             <div className="concept-commits-head">
               {spotlight.status === 'reviewing' ? 'Edited — not yet landed (review & Land)' : 'No commits yet'}
             </div>
+          </div>
+        )}
+
+        {/* Verification — the Verify Gate's receipts for this episode: each local check
+            with status + one-line summary (output tail in the tooltip). Run checks
+            re-verifies now and attaches fresh evidence to the episode. */}
+        {isEpisode && (
+          <div className="concept-commits" onClick={e => e.stopPropagation()}>
+            <div className="concept-commits-head" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>
+                Verification
+                {verify ? (
+                  <span style={{
+                    marginLeft: 6, fontWeight: 700,
+                    color: verify.status === 'passed' ? 'var(--solid)'
+                      : verify.status === 'failed' ? 'var(--violation)' : 'var(--text-muted)',
+                  }}>{verify.status}</span>
+                ) : (
+                  <span style={{ marginLeft: 6, color: 'var(--text-muted)' }}>not run</span>
+                )}
+              </span>
+              <span style={{ flex: 1 }} />
+              <button
+                onClick={runChecks} disabled={verifyBusy}
+                title="Run the repo's local checks now and attach the evidence to this episode"
+                style={{
+                  padding: '1px 8px', borderRadius: 99, cursor: verifyBusy ? 'wait' : 'pointer',
+                  fontFamily: 'inherit', fontSize: 10, color: 'var(--accent)',
+                  background: 'rgba(124,111,247,0.10)', border: '1px solid rgba(124,111,247,0.35)',
+                }}
+              >
+                {verifyBusy ? 'Running…' : 'Run checks'}
+              </button>
+            </div>
+            {verify && (verify.checks || []).map(ch => (
+              <div key={ch.id} title={ch.outputTail || ch.summary || ch.label} style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px',
+                fontSize: 11, color: 'var(--text)',
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                  background: ch.status === 'passed' ? 'var(--solid)' : 'var(--violation)',
+                }} />
+                <span style={{ fontWeight: 600, flexShrink: 0 }}>{ch.label}</span>
+                <span style={{
+                  color: 'var(--text-muted)', overflow: 'hidden',
+                  textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{ch.summary}</span>
+                {Number.isFinite(ch.durationMs) && (
+                  <span style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 9.5, color: 'var(--text-muted)' }}>
+                    {(ch.durationMs / 1000).toFixed(1)}s
+                  </span>
+                )}
+              </div>
+            ))}
+            {verify && verify.status === 'skipped' && (
+              <div style={{ padding: '3px 6px', fontSize: 10.5, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                {verify.note || 'verification not configured'}
+              </div>
+            )}
           </div>
         )}
 

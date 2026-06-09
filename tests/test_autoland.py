@@ -139,6 +139,67 @@ class ScopedCommitTest(unittest.TestCase):
             self.assertIn("OpenFDE-Episode: episode_2",
                           self._g("log", "-1", "--pretty=%B", sha).stdout)
 
+    # ── Verify Gate Evidence v1 ────────────────────────────────────────
+
+    def _verify_result(self, status, summary="2 tests failed"):
+        check = {"id": "unit-tests", "label": "Unit tests", "command": "python3 -m unittest",
+                 "required": True, "status": "failed" if status == "failed" else "passed",
+                 "summary": summary, "exitCode": 1 if status == "failed" else 0}
+        return {"status": status, "checks": [] if status == "skipped" else [check],
+                "ranAt": "2026-06-09T00:00:00Z", "durationMs": 5}
+
+    # 8) Auto-land BLOCKS on a failed required check: nothing committed, episode parked
+    #    for review, and the red evidence stored on the episode.
+    def test_auto_land_blocked_on_failed_verify(self):
+        (self.root / "a.py").write_text("a-gated\n")
+        ep = self.p.upsert_episode({"episodeId": "e_gate", "prompt": "gated", "status": "reviewing",
+                                    "files": ["a.py"], "commitShas": []})
+        head = self._g("rev-parse", "HEAD").stdout.strip()
+        res = autoland.land_episode(self.root, self.p, ep, auto=True,
+                                    run_verify=lambda root: self._verify_result("failed"))
+        self.assertFalse(res["committed"])
+        self.assertEqual(res["status"], "needs_manual_land")
+        self.assertIn("verification failed", res["reason"])
+        self.assertIn("2 tests failed", res["reason"])
+        self.assertEqual(self._g("rev-parse", "HEAD").stdout.strip(), head)   # no commit
+        self.assertEqual(self._porcelain(), "M a.py")                          # work intact
+        saved = self.p.get_episode("e_gate")
+        self.assertEqual(saved["verify"]["status"], "failed")                  # receipts kept
+
+    # 9) Manual Land is the escape hatch: it proceeds on failure, with the failure
+    #    recorded on the episode (visible, never hidden).
+    def test_manual_land_proceeds_on_failed_verify(self):
+        (self.root / "a.py").write_text("a-manual\n")
+        ep = self.p.upsert_episode({"episodeId": "e_hatch", "prompt": "hatch", "status": "reviewing",
+                                    "files": ["a.py"], "commitShas": []})
+        res = autoland.land_episode(self.root, self.p, ep, auto=False,
+                                    run_verify=lambda root: self._verify_result("failed"))
+        self.assertTrue(res["committed"])
+        self.assertEqual(self.p.get_episode("e_hatch")["verify"]["status"], "failed")
+
+    # 10) No checks configured → skipped evidence is recorded and the land proceeds —
+    #     explicit "verification not configured", never silent success.
+    def test_skipped_evidence_recorded_on_land(self):
+        (self.root / "a.py").write_text("a-skip\n")
+        ep = self.p.upsert_episode({"episodeId": "e_skip", "prompt": "skip", "status": "reviewing",
+                                    "files": ["a.py"], "commitShas": []})
+        res = autoland.land_episode(self.root, self.p, ep, auto=True,
+                                    run_verify=lambda root: self._verify_result("skipped"))
+        self.assertTrue(res["committed"])
+        self.assertEqual(self.p.get_episode("e_skip")["verify"]["status"], "skipped")
+
+    # 11) Passing checks ride the episode into the landed state.
+    def test_passing_verify_recorded_on_land(self):
+        (self.root / "a.py").write_text("a-pass\n")
+        ep = self.p.upsert_episode({"episodeId": "e_pass", "prompt": "ok", "status": "reviewing",
+                                    "files": ["a.py"], "commitShas": []})
+        res = autoland.land_episode(self.root, self.p, ep, auto=True,
+                                    run_verify=lambda root: self._verify_result("passed", "155 OK"))
+        self.assertTrue(res["committed"])
+        saved = self.p.get_episode("e_pass")
+        self.assertEqual(saved["verify"]["status"], "passed")
+        self.assertEqual(saved["status"], "landed")
+
 
 if __name__ == "__main__":
     unittest.main()
