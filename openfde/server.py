@@ -1259,9 +1259,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 budget -= 1
                 file_cache[sha] = commit_files(path, sha)
             cf = file_cache.get(sha, [])
-            # Clean display text for OpenPM / evidence cards — derived from the cleaned
-            # owning episode, never the noisy raw commit subject ("openfde: Here's the CC…").
-            dtitle, dsummary = commit_display(ep.get("title"), ep.get("summary"), c.get("summary"))
+            # Clean display text for OpenPM / evidence cards. A clustered Auto-Land stores a
+            # per-commit title/summary on the episode (commitMeta[sha]) — use it so each commit
+            # reads like its own logical change; otherwise fall back to the cleaned owning episode,
+            # never the noisy raw commit subject ("openfde: Here's the CC…").
+            cm = (ep.get("commitMeta") or {}).get(sha) if sha else None
+            if cm and cm.get("title"):
+                dtitle, dsummary = cm["title"], cm.get("summary") or ""
+            else:
+                dtitle, dsummary = commit_display(ep.get("title"), ep.get("summary"), c.get("summary"))
             return {**c, "files": cf, "fileCount": len(cf),
                     "displayTitle": dtitle, "displaySummary": dsummary}
 
@@ -1390,7 +1396,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # never unrelated dirty ones). The "Manual changes" bucket (no files) falls back
         # to a whole-tree commit of the meaningful changes the user is explicitly landing.
         from openfde import autoland
-        land = autoland.land_episode(path, persistence, ep, auto=False)
+        land = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: autoland.land_episode(path, persistence, ep, auto=False, allow_llm=True))
         if not land.get("needsWholeTree"):
             for m in land.get("broadcasts", []):
                 await manager.broadcast(m)
@@ -2357,7 +2364,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
                 actually_changed, event_ids, ledger_ids, report[:200], "reviewing")
             from openfde import autoland
-            land = autoland.land_episode(path, persistence, episode, auto=True)
+            land = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: autoland.land_episode(path, persistence, episode, auto=True, allow_llm=True))
             episode = land.get("episode", episode)
             committed = bool(land.get("committed"))
             commit_sha = land.get("sha")

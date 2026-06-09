@@ -240,7 +240,7 @@ async def _safe_broadcast(manager, msg):
 
 
 async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTERVAL,
-                     home=None, on_episode=None, quiet_window=12.0, autoland=True) -> None:
+                     home=None, on_episode=None, quiet_window=90.0, autoland=True) -> None:
     """Poll **all** Claude Code transcripts and capture prompts relevant to this repo.
 
     A prompt belongs to the watched repo when EITHER the session's cwd is the repo
@@ -316,6 +316,10 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
                 for e in entries:
                     if is_human_prompt(e):
                         rec = _prompt_record(e)
+                        # Turn boundary: this session's previous captured prompt is complete —
+                        # land its full (clustered) edit set before opening the new one.
+                        await _land_active_capture(root, persistence, manager, last_change,
+                                                   session_id=rec.get("sessionId"))
                         if rec.get("cwd") == repo_str:
                             await _capture(rec, files=[])      # cwd-matched → now
                         else:
@@ -361,25 +365,41 @@ async def _link_changes(root, persistence, baselines, manager, last_change=None)
         await _safe_broadcast(manager, {"type": "episode_updated", "episode": active})
 
 
-async def _maybe_autoland(root, persistence, manager, last_change, quiet_window) -> None:
-    """Auto-Land the newest reviewing capture episode once its files have been quiet.
-
-    Conservative: only a capture episode with attributed files, no file-set change for
-    ``quiet_window`` seconds, lands — and only the *newest* one (older reviewing episodes
-    with overlapping files are left as ``needs_manual_land`` by the scoped guardrail).
+async def _land_active_capture(root, persistence, manager, last_change, session_id=None) -> None:
+    """Land the newest open/reviewing capture episode that has attributed files — scoped, and
+    clustered into **one commit per logical change**. The LLM grouping is a subprocess, so the
+    land is offloaded to a thread (it returns broadcasts; we emit them here). ``session_id``
+    restricts to that session's episode (the turn-boundary land on a new prompt); ``None`` lands
+    whichever is newest (idle fallback). Older reviewing episodes with overlapping files stay
+    ``needs_manual_land`` (the scoped guardrail in ``land_episode``).
     """
     from openfde import autoland as _al
+    active = next((e for e in persistence.load_episodes()
+                   if e.get("source") == "openfde-capture"
+                   and e.get("status") in ("reviewing", "open") and (e.get("files") or [])
+                   and (session_id is None or e.get("sessionId") == session_id)), None)
+    if not active:
+        return
+    eid = active["episodeId"]
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: _al.land_episode(root, persistence, active, auto=True, allow_llm=True))
+    last_change.pop(eid, None)                  # landed / parked → stop timing it
+    for msg in result.get("broadcasts", []):
+        await _safe_broadcast(manager, msg)
+    logger.info("Capture land for %s → %s (%d commit[s])",
+                eid, result.get("status"), len(result.get("commits") or []))
+
+
+async def _maybe_autoland(root, persistence, manager, last_change, quiet_window) -> None:
+    """Idle fallback for the *trailing* episode: land the newest reviewing capture episode once its
+    files have been quiet for ``quiet_window`` seconds. The primary trigger is the turn-boundary
+    land when the next prompt arrives (``_land_active_capture`` on a new human prompt)."""
     active = next((e for e in persistence.load_episodes()
                    if e.get("source") == "openfde-capture"
                    and e.get("status") == "reviewing" and (e.get("files") or [])), None)
     if not active:
         return
-    eid = active["episodeId"]
-    quiet_for = time.time() - last_change.get(eid, 0)
-    if quiet_for < quiet_window:
+    if time.time() - last_change.get(active["episodeId"], 0) < quiet_window:
         return                                  # still settling — wait
-    result = _al.land_episode(root, persistence, active, auto=True)
-    last_change.pop(eid, None)                  # landed / parked → stop timing it
-    for msg in result.get("broadcasts", []):
-        await _safe_broadcast(manager, msg)
-    logger.info("Auto-land tick for %s → %s", eid, result.get("status"))
+    await _land_active_capture(root, persistence, manager, last_change)

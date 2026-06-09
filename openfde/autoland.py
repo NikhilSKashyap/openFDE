@@ -20,6 +20,7 @@ And ``complete_no_changes`` when the episode's files exist but none are currentl
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 logger = logging.getLogger("openfde.autoland")
@@ -78,8 +79,13 @@ def _trailers(episode: dict) -> dict:
     return t
 
 
-def land_episode(root, persistence, episode: dict, *, auto: bool) -> dict:
+def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: bool = False) -> dict:
     """Commit an episode's attributed files (scoped) and update its state.
+
+    The episode's diff is clustered into 1–N **logical changes** (``cluster_changes``) and each is
+    committed separately — so a prompt becomes *one commit (and one OpenPM task) per logical
+    change*, not a single lump. ``allow_llm`` enables the model-based grouping (slow subprocess →
+    the caller must run this in an executor); otherwise a deterministic by-scope split is used.
 
     Args:
         root: Path — repository root.
@@ -87,12 +93,15 @@ def land_episode(root, persistence, episode: dict, *, auto: bool) -> dict:
         episode: dict — the episode to land (mutated in place + re-persisted).
         auto: bool — True for automatic triggers (apply ambiguity guards), False for an
             explicit user Land (force the scoped commit for this episode).
+        allow_llm: bool — cluster the diff with the local LLM (offload to an executor); False
+            uses the fast deterministic by-scope split.
 
     Returns:
-        dict — {ok, committed, sha?, shortSha?, status, reason, episode, files,
-                broadcasts:[…], needsWholeTree?}. ``needsWholeTree`` is set when a
-                *manual* land has no attributed files, signalling the caller to fall
-                back to a whole-tree commit (the "Manual changes" bucket).
+        dict — {ok, committed, sha?, shortSha?, status, reason, episode, files, commits:[…],
+                broadcasts:[…], needsWholeTree?}. ``commits`` lists each landed logical change
+                ({sha, shortSha, title, files}). ``sha``/``shortSha`` are the *last* commit (back-
+                compat). ``needsWholeTree`` is set when a *manual* land has no attributed files,
+                signalling the caller to fall back to a whole-tree commit (the "Manual changes" bucket).
     """
     from openfde.git_timeline import dirty_paths, git_commit_paths
 
@@ -126,45 +135,72 @@ def land_episode(root, persistence, episode: dict, *, auto: bool) -> dict:
                   and e.get("status") in _OPEN_STATES]
         if any(set(scoped) & set(e.get("files") or []) for e in others):
             return _set(NEEDS_MANUAL, "dirty files overlap multiple episodes — review manually")
-        # Transient — shows "auto-landing" on the card while the commit runs.
+        # Transient — shows "auto-landing" on the card while the commits run.
         episode["status"] = AUTO_LANDING
         episode["updatedAt"] = now
         persistence.upsert_episode(episode)
         broadcasts.append({"type": "episode_updated", "episode": episode})
 
-    subject, body = commit_message(episode, scoped)
-    commit = git_commit_paths(root, subject, scoped, detail=body, trailers=_trailers(episode))
-    if not commit.get("committed"):
-        return _set(NEEDS_MANUAL, commit.get("reason") or "scoped commit produced no changes")
+    # Cluster the scoped diff into logical changes, then commit each separately — one commit
+    # (and one OpenPM task) per logical change. Each cluster's still-dirty files are committed
+    # scoped; the per-commit title is stored on the episode so every surface reads it durably.
+    from openfde.episode_llm_summary import cluster_changes
+    clusters = cluster_changes(episode, scoped, providers=(None if allow_llm else []))
 
-    episode["commitShas"] = list(dict.fromkeys((episode.get("commitShas") or []) + [commit["sha"]]))
-    episode["files"] = sorted(set(files + (commit.get("files") or [])))
+    landed = []                                    # [(commit, cluster)]
+    still_dirty = set(dirty)
+    for cl in clusters:
+        cl_files = [f for f in cl["files"] if f in still_dirty]
+        if not cl_files:
+            continue
+        _subj, body = commit_message(episode, cl_files)
+        commit = git_commit_paths(root, cl["message"], cl_files, detail=body, trailers=_trailers(episode))
+        if commit.get("committed"):
+            landed.append((commit, cl))
+            still_dirty -= set(commit.get("files") or [])
+
+    if not landed:
+        return _set(NEEDS_MANUAL, "scoped commit produced no changes")
+
+    new_shas = [c["sha"] for c, _ in landed]
+    committed_files = sorted({f for c, _ in landed for f in (c.get("files") or [])})
+    meta = dict(episode.get("commitMeta") or {})
+    for commit, cl in landed:
+        meta[commit["sha"]] = {"title": cl["title"],
+                               "summary": re.sub(r"^openfde:\s*", "", commit["summary"]).strip()}
+    episode["commitMeta"] = meta
+    episode["commitShas"] = list(dict.fromkeys((episode.get("commitShas") or []) + new_shas))
+    episode["files"] = sorted(set(files + committed_files))
     episode["status"] = LANDED
     episode["updatedAt"] = _now()
     persistence.upsert_episode(episode)
 
-    ce = persistence.append_event({
-        "type": "commit_created",
-        "payload": {"sha": commit["sha"], "shortSha": commit["shortSha"],
-                    "summary": commit["summary"], "episodeId": episode["episodeId"],
-                    "fileCount": len(commit.get("files", [])),
-                    "detail": f"Auto-landed {commit['shortSha']} for {episode.get('tag') or episode['episodeId']}"
-                              if auto else f"Landed {commit['shortSha']} for {episode.get('tag') or episode['episodeId']}"},
-    })
-    broadcasts.append({"type": "event_appended", "event": ce})
+    tag = episode.get("tag") or episode["episodeId"]
+    for commit, cl in landed:
+        ce = persistence.append_event({
+            "type": "commit_created",
+            "payload": {"sha": commit["sha"], "shortSha": commit["shortSha"],
+                        "summary": commit["summary"], "episodeId": episode["episodeId"],
+                        "fileCount": len(commit.get("files", [])),
+                        "detail": (f"Auto-landed {commit['shortSha']} for {tag}" if auto
+                                   else f"Landed {commit['shortSha']} for {tag}")},
+        })
+        broadcasts.append({"type": "event_appended", "event": ce})
+        broadcasts.append({
+            "type": "commit_created", "sha": commit["sha"], "shortSha": commit["shortSha"],
+            "summary": commit["summary"], "episodeId": episode["episodeId"],
+            "episodeTag": episode.get("tag"), "promptTitle": episode.get("title"),
+            "sequence": episode.get("sequence"),
+            "displayTitle": cl["title"], "displaySummary": meta[commit["sha"]]["summary"],
+            "promptLabel": episode.get("title") or (episode.get("prompt") or "").split("\n")[0][:48],
+            "files": commit.get("files", []),
+        })
     broadcasts.append({"type": "episode_updated", "episode": episode})
-    from openfde.episode_summary import commit_display
-    _dtitle, _dsummary = commit_display(episode.get("title"), episode.get("summary"), commit["summary"])
-    broadcasts.append({
-        "type": "commit_created", "sha": commit["sha"], "shortSha": commit["shortSha"],
-        "summary": commit["summary"], "episodeId": episode["episodeId"],
-        "episodeTag": episode.get("tag"), "promptTitle": episode.get("title"),
-        "sequence": episode.get("sequence"),
-        "displayTitle": _dtitle, "displaySummary": _dsummary,
-        "promptLabel": episode.get("title") or (episode.get("prompt") or "").split("\n")[0][:48],
-        "files": commit.get("files", []),
-    })
-    logger.info("Auto-landed %s → %s (%d file[s])", episode["episodeId"], commit["shortSha"], len(commit.get("files", [])))
-    return {"ok": True, "committed": True, "sha": commit["sha"], "shortSha": commit["shortSha"],
+    logger.info("Auto-landed %s → %d commit[s] (%d file[s])",
+                episode["episodeId"], len(landed), len(committed_files))
+    last = landed[-1][0]
+    return {"ok": True, "committed": True, "sha": last["sha"], "shortSha": last["shortSha"],
             "status": LANDED, "reason": None, "episode": episode,
-            "files": commit.get("files", []), "broadcasts": broadcasts}
+            "commits": [{"sha": c["sha"], "shortSha": c["shortSha"], "title": cl["title"],
+                         "files": c.get("files", [])} for c, cl in landed],
+            "files": committed_files, "broadcasts": broadcasts}

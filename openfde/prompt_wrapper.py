@@ -97,7 +97,7 @@ def run_prompt_wrapper(kind: str, prompt: str, repo_path: str, model=None,
         episode.update({"updatedAt": _now(), "status": "reviewing", "files": touched, "summary": summary})
         p.upsert_episode(episode)
         from openfde import autoland
-        land = autoland.land_episode(root, p, episode, auto=True)   # separate process: broadcasts ignored
+        land = autoland.land_episode(root, p, episode, auto=True, allow_llm=True)  # separate process: broadcasts ignored
         episode = land.get("episode", episode)
     elif touched:
         # Edits exist but the agent reported failure → leave for manual review.
