@@ -6,9 +6,9 @@ in plain English, and run an Agent Council that plans, implements, reviews the
 actual diff, commits, and records the work — inside the permission boundaries you
 set.
 
-It also **remembers**. Every prompt — whether you run the council or drive another
-agent — is captured as an *episode*, committed with its own attributed scope, and
-woven into a replayable **Story** of how the codebase came to be.
+It also **remembers**. Prompts run through the council, OpenFDE wrappers, or
+passive Claude Code capture become *episodes*, committed with their own attributed
+scope and woven into a replayable **Story** of how the codebase came to be.
 
 ## Quick Start
 
@@ -43,11 +43,12 @@ http://127.0.0.1:7420
 - **Streams the agent live**: each node glows as the council reads and writes it
   (active → next → queued → done / failed), so you watch the work move through the
   canvas instead of staring at a spinner. Stop a run mid-flight at any time.
-- **Watches any edit land** — yours, the council's, or another agent's — by glowing
+- **Watches any edit as it happens** — yours, the council's, or another agent's — by glowing
   the touched nodes, then surfaces **what changed** (files, affected concepts, diff)
   once the work settles.
-- **Remembers the path**: every prompt becomes an episode, auto-committed with an
-  attributed scope and replayable as a **Story** and an **OpenPM** board (below).
+- **Remembers the path**: council prompts, OpenFDE wrapper prompts, and passive
+  Claude Code prompts become episodes, auto-committed with attributed scope and
+  replayable as a **Story** and an **OpenPM** board (below).
 - Respects scope: **dotted = agent-editable**, **solid = locked** (protected files
   force an approval gate before anything touches them).
 
@@ -84,11 +85,35 @@ Set **Senior Dev** to mode **API**, provider **Echo**. Echo makes a deterministi
 in-scope edit so you can watch the whole loop run offline. Swap in a real provider
 key for actual code generation.
 
+## The Development Story
+
+OpenFDE doesn't just run changes — it remembers how the codebase got here.
+
+- **Prompts become episodes.** Council runs, `openfde cc` / `openfde codex`
+  wrappers, and passive Claude Code capture create prompt episodes. When the work
+  completes, OpenFDE commits **only** the files attributable to that episode
+  (never sweeping unrelated dirty changes) and links the commit back to the prompt.
+  A manual **Land** stays available as a fallback when the scope is ambiguous.
+- **Works with any agent.** OpenFDE can passively capture prompts from your local
+  Claude Code CLI by tailing its transcripts, cwd-agnostically — so the story keeps
+  building even on changes the council didn't run.
+- **Story tab — a product memory, not a git log.** Concepts derived from your
+  prompts are grouped into what you're **building** (Active), what you **parked**
+  (Deferred), and what you **dropped** (Abandoned), each linking back to its
+  prompts, commits, and files. Press **Tell** to replay the work as a chronological
+  episode map: prompt beats laid out left-to-right by sequence, with deferred and
+  dropped ideas branching off the beat that produced them.
+- **OpenPM.** Landed prompts surface as Done cards on a Kanban board, tagged and
+  grouped by their episode, so the board mirrors the same prompt → commit story.
+
 ## Status
 
-OpenFDE is early and moving fast. As of **0.3.0**, the full council can run
+OpenFDE is early and moving fast. As of **0.4.0**, the full council can run
 **keyless on your local Claude Code CLI** (Architect, Senior Dev, and Verifier),
 with the agent **streamed live on the canvas** as it works and a **stop control**
 to halt any run. The architecture-to-execution loop runs end-to-end: select scope,
 describe intent, and the council implements, verifies against the real diff, and
-commits — within the boundaries you draw.
+commits — within the boundaries you draw. Beyond execution, OpenFDE keeps a
+**development memory**: prompts are captured as episodes from the council,
+OpenFDE wrappers, or passive Claude Code capture, auto-committed with attributed
+scope, and replayable as a visual **Story**.
