@@ -42,6 +42,11 @@ class ParseValidateTest(unittest.TestCase):
         self.assertIsNone(ls.validate({"title": "", "summary": "x"}))
         self.assertIsNone(ls.validate({"title": "x" * 61, "summary": "x"}))
 
+    def test_validate_rejects_boilerplate(self):
+        for t in ["Here's the CC prompt", "You are implementing the slice",
+                  "IMPORTANT — OpenFDE owns version control", "Read the repo"]:
+            self.assertIsNone(ls.validate({"title": t, "summary": "x"}), t)
+
     def test_validate_caps_arrays_and_summary(self):
         c = ls.validate({"title": "Good Title Here", "summary": "y" * 400,
                          "concepts": [f"c{i}" for i in range(20)]})
@@ -85,7 +90,8 @@ class EnrichCacheTest(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
 
     def test_fingerprint_change_retriggers(self):
-        ep = {"episodeId": "e2", "prompt": "p", "title": "T", "files": [], "commitShas": [], "signal": "product"}
+        ep = {"episodeId": "e2", "prompt": "Build the login flow", "title": "Build login flow",
+              "files": [], "commitShas": [], "signal": "product"}
         n = {"c": 0}
 
         def inv(*a):
@@ -112,6 +118,34 @@ class EnrichCacheTest(unittest.TestCase):
         ls.enrich(ep, providers=[])                          # no LLM available
         self.assertEqual(ep["summarySource"], "deterministic")
         self.assertIn("LLM summaries", " ".join(ep["storyFacts"]["deferred"]))
+
+    def test_repairs_bad_stored_title_from_heading(self):
+        # An EXISTING episode stored with a bad title is re-derived from the prompt's Goal,
+        # without disturbing its identity (sequence / tag / commitShas / files / prompt).
+        ep = {"episodeId": "r1", "sequence": 5, "tag": "P5",
+              "prompt": "Here's the CC prompt:\n\n## Goal\n\nImplement LLM Story Summarizer v1.",
+              "title": "Here's the CC prompt", "summary": "stale", "files": ["a.py"],
+              "commitShas": ["s1"], "signal": "product", "summarySource": "deterministic",
+              "storyFacts": {"concepts": ["Here's the CC prompt"], "operational": False}}
+        ls.enrich(ep, providers=[])                      # no LLM → deterministic repair
+        self.assertEqual(ep["title"], "LLM Story Summarizer")
+        self.assertEqual(ep["signal"], "product")
+        self.assertIn("LLM Story Summarizer", ep["storyFacts"]["concepts"])
+        # Identity preserved.
+        self.assertEqual(ep["sequence"], 5)
+        self.assertEqual(ep["tag"], "P5")
+        self.assertEqual(ep["commitShas"], ["s1"])
+        self.assertEqual(ep["files"], ["a.py"])
+        self.assertIn("## Goal", ep["prompt"])
+
+    def test_repairs_bad_title_to_operational(self):
+        ep = {"episodeId": "r2", "prompt": "yes", "title": "Yes", "files": [], "commitShas": [],
+              "signal": "product", "summarySource": "deterministic",
+              "storyFacts": {"concepts": ["Yes"], "operational": False}}
+        ls.enrich(ep, providers=[])
+        self.assertEqual(ep["signal"], "operational")
+        self.assertTrue(ep["storyFacts"]["operational"])
+        self.assertEqual(ep["storyFacts"]["concepts"], [])   # operational → no active concept
 
     def test_ensure_facts_persists(self):
         import tempfile

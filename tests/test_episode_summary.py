@@ -28,7 +28,7 @@ class DeriveTest(unittest.TestCase):
                   "Implement Prompt Chapter Rail and Episode Detail Card.\n\n"
                   "Everything should be intuitive.")
         t, s = es.derive_title_summary(prompt)
-        self.assertTrue(t.startswith("Implement Prompt Chapter Rail"))
+        self.assertTrue(t.startswith("Prompt Chapter Rail"))   # leading "Implement" distilled off
         # Boilerplate ("You are implementing…", "Read the repo…") is not in the summary.
         self.assertNotIn("You are implementing", s)
         self.assertNotIn("Read the repo", s)
@@ -65,7 +65,7 @@ class OperationalTest(unittest.TestCase):
         prompt = "Here's the CC prompt:\n\n## Product Change\n\nMove to Auto-Land on prompt completion."
         self.assertFalse(es.is_operational(prompt))
         t, _ = es.derive_title_summary(prompt)
-        self.assertTrue(t.startswith("Move to Auto-Land"))
+        self.assertTrue(t.startswith("Auto-Land"))             # "Move to" distilled off, "Here's" skipped
         self.assertNotIn("Here", t)
 
     def test_product_prompt_not_operational(self):
@@ -84,6 +84,113 @@ class OperationalTest(unittest.TestCase):
         ep2 = {"episodeId": "e2", "prompt": "Add login to the auth module"}
         es.enrich_episode(ep2, 0)
         self.assertEqual(ep2["signal"], "product")
+
+
+class BadTitleTest(unittest.TestCase):
+    def test_is_bad_title_patterns(self):
+        for t in ["Yes", "ok", "Here's the CC prompt", "ROADMAP.md", "`openfde/server.py`",
+                  "curl -s localhost:7441/api/x", "IMPORTANT — OpenFDE owns version control",
+                  "Read the repo", "You are implementing the slice", "Restart the server", ""]:
+            self.assertTrue(es.is_bad_title(t), t)
+        for t in ["LLM Story Summarizer", "Auto-Land Prompt Commits", "Prompt Chapter Rail"]:
+            self.assertFalse(es.is_bad_title(t), t)
+
+    def test_is_bad_title_robust_to_curly_quotes(self):
+        # The real-repo persisted titles use a curly apostrophe — must still be caught.
+        self.assertTrue(es.is_bad_title("Here’s the CC prompt"))   # curly '
+        self.assertTrue(es.is_bad_title("Here's the CC prompt"))       # straight ' (preserved)
+        self.assertTrue(es.is_bad_title("You’re implementing the slice"))
+        self.assertFalse(es.is_bad_title("LLM Story Summarizer"))      # clean unaffected
+
+    def test_distill_strips_implement_and_version(self):
+        self.assertEqual(es.derive_title_summary("## Goal\nImplement LLM Story Summarizer v1")[0],
+                         "LLM Story Summarizer")
+        self.assertEqual(es.derive_title_summary("## Goal\nDesign and implement Prompt Story Graph v1")[0],
+                         "Prompt Story Graph")
+
+    def test_filelist_prompt_titles_from_heading(self):
+        p = ("ROADMAP.md\nFLOW.md\nopenfde/server.py\n\n## Product Change\n\n"
+             "Move from Review Then Land to Auto-Land on prompt completion.")
+        t, _ = es.derive_title_summary(p)
+        self.assertNotIn(".md", t)                       # never titled from the file list
+        self.assertTrue(t.lower().startswith("auto-land"))
+
+    def test_commit_display_prefers_clean_episode(self):
+        # A noisy raw commit subject is replaced by the cleaned episode title/summary.
+        t, s = es.commit_display("LLM Story Summarizer", "Summarizes prompts into concepts.",
+                                 "openfde: Here's the CC prompt")
+        self.assertEqual(t, "LLM Story Summarizer")
+        self.assertEqual(s, "Summarizes prompts into concepts.")
+
+    def test_commit_display_falls_back_to_clean_commit(self):
+        # No episode title → use the de-`openfde:`-ed commit subject when it's clean.
+        t, s = es.commit_display("", "", "openfde: wire prompt story rail")
+        self.assertEqual(t, "wire prompt story rail")
+        self.assertEqual(s, "wire prompt story rail")
+
+    def test_commit_display_both_bad_is_neutral(self):
+        t, s = es.commit_display("Yes", "", "openfde: `ROADMAP.md`")
+        self.assertEqual(t, "Landed change")
+        self.assertEqual(s, "")
+
+
+class RepairTasksTest(unittest.TestCase):
+    EPS = [
+        {"episodeId": "e9", "tag": "P9", "sequence": 9, "title": "LLM Story Summarizer",
+         "summary": "Summarizes prompts into product concepts.", "commitShas": ["a651bad"]},
+        {"episodeId": "e5", "tag": "P5", "sequence": 5, "title": "Prompt Chapter Rail",
+         "summary": "Prompt chips are chapters.", "commitShas": ["d5fa56a"]},
+    ]
+
+    def _noisy(self, tid, eid, sha):
+        return {"id": tid, "source": "openfde-episode", "episodeId": eid, "commitSha": sha,
+                "shortSha": sha, "title": "Here's the CC prompt", "description": "",
+                "files": [tid + ".py"], "column": "done", "verificationStatus": "passed"}
+
+    def test_repairs_noisy_episode_card_from_episode(self):
+        tasks = [self._noisy("t9", "e9", "a651bad")]
+        out, changed = es.repair_episode_tasks(tasks, self.EPS)
+        self.assertTrue(changed)
+        t = out[0]
+        self.assertEqual(t["title"], "LLM Story Summarizer")        # from the episode
+        self.assertEqual(t["description"], "Summarizes prompts into product concepts.")
+        self.assertEqual(t["episodeTag"], "P9")
+        # Identity preserved.
+        self.assertEqual(t["commitSha"], "a651bad")
+        self.assertEqual(t["shortSha"], "a651bad")
+        self.assertEqual(t["files"], ["t9.py"])
+        self.assertEqual(t["episodeId"], "e9")
+
+    def test_links_by_commit_sha_when_episode_id_missing(self):
+        t = self._noisy("t5", None, "d5fa56a")
+        out, changed = es.repair_episode_tasks([t], self.EPS)
+        self.assertTrue(changed)
+        self.assertEqual(out[0]["title"], "Prompt Chapter Rail")     # matched via commitSha
+
+    def test_clean_card_and_non_episode_task_untouched(self):
+        tasks = [
+            {"id": "c", "source": "openfde-episode", "episodeId": "e9", "commitSha": "a651bad",
+             "title": "LLM Story Summarizer", "description": "ok"},          # already clean
+            {"id": "demo", "title": "Whiteboard canvas", "column": "done"},  # not an episode card
+        ]
+        out, changed = es.repair_episode_tasks(tasks, self.EPS)
+        self.assertFalse(changed)
+        self.assertEqual(out, tasks)
+
+    def test_idempotent(self):
+        out1, c1 = es.repair_episode_tasks([self._noisy("t9", "e9", "a651bad")], self.EPS)
+        out2, c2 = es.repair_episode_tasks(out1, self.EPS)
+        self.assertTrue(c1)
+        self.assertFalse(c2)                                          # second pass is a no-op
+
+    def test_repairs_curly_apostrophe_title(self):
+        # The actual real-repo failure: the persisted title used a curly apostrophe.
+        t = self._noisy("t9", "e9", "a651bad")
+        t["title"] = "Here’s the CC prompt"                            # curly '
+        out, changed = es.repair_episode_tasks([t], self.EPS)
+        self.assertTrue(changed)
+        self.assertEqual(out[0]["title"], "LLM Story Summarizer")
+        self.assertEqual(out[0]["commitSha"], "a651bad")              # identity preserved
 
 
 class EnrichTest(unittest.TestCase):
