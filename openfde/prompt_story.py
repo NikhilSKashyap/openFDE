@@ -60,6 +60,12 @@ _STOP_PHRASES = {
     "concept", "concepts", "ideas", "idea", "paths", "path", "features", "feature",
     "things", "thing", "work", "changes", "stuff", "the rest", "everything", "code",
 }
+# Stored storyFacts are usually cleaner than raw prompts, but local LLMs can still emit
+# tiny generic nouns or quoted signal examples as "concepts". Keep those out at the
+# graph boundary so old persisted episodes self-heal on the next request.
+_NOISY_CONCEPT_PHRASES = {
+    "store",
+}
 # Trailing linking/function words to drop when reading a clause backwards.
 _LINK_TAIL = {"is", "are", "be", "was", "were", "been", "being", "will", "would",
               "should", "can", "could", "may", "might", "to", "the", "a", "an",
@@ -147,6 +153,26 @@ def _is_signal_example_unit(unit: str) -> bool:
     return marker_hits >= 3 and (
         "`" in unit or _SIGNAL_EXAMPLE_RE.search(unit) is not None
     )
+
+
+def _is_bad_concept_phrase(phrase: str) -> bool:
+    """True when a stored/derived phrase is too noisy to become a Story concept."""
+    text = (phrase or "").strip()
+    if not text:
+        return True
+    low = text.lower().strip(" \t,-–—\"'`*")
+    if low in _STOP_PHRASES or low in _NOISY_CONCEPT_PHRASES:
+        return True
+    if _is_signal_example_unit(text):
+        return True
+    # Example fragments can arrive already sliced out of the original line, e.g.
+    # "/ `next slice` / `next up`"; they are labels for the extractor, not product ideas.
+    if "`" in text and any(marker in low for marker in (
+        "watch:", "maybe", "consider", "explore", "interesting",
+        "deferred", "next:", "next slice", "next up", "abandoned",
+    )):
+        return True
+    return False
 
 
 def _sf_trigger(phrase: str, det: list):
@@ -311,7 +337,7 @@ def build_prompt_graph(episodes: list) -> dict:
         primary = None
         for ct in active_titles:
             ct = (ct or "").strip()
-            if not ct or is_bad_title(ct):       # never promote operational/meta strings
+            if is_bad_title(ct) or _is_bad_concept_phrase(ct):
                 continue
             c = _ensure(concepts, ct, "active")
             if not c["summary"]:
@@ -334,6 +360,8 @@ def build_prompt_graph(episodes: list) -> dict:
         else:
             pairs = det
         for phrase, kind, trigger in pairs:
+            if _is_bad_concept_phrase(phrase):
+                continue
             dc = _ensure(concepts, phrase, _KIND_STATUS.get(kind, kind))
             if kind == "watch":
                 watch_only.setdefault(dc["id"], True)
