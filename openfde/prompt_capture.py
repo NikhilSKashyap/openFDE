@@ -370,6 +370,8 @@ _CLAUDE_ADAPTER = {
     "is_prompt": is_human_prompt,
     "record": lambda entry, fctx: _prompt_record(entry),
     "edits": edit_files_under,
+    # The transcript filename IS the session uuid (~/.claude/projects/<slug>/<uuid>.jsonl).
+    "session_of": lambda path, fctx: path.stem,
 }
 _CODEX_ADAPTER = {
     "kind": "codex",
@@ -379,6 +381,7 @@ _CODEX_ADAPTER = {
     "is_prompt": is_codex_human_prompt,
     "record": _codex_prompt_record,
     "edits": lambda entry, root: [],          # v1: dirty-set attribution, no brittle tool parse
+    "session_of": lambda path, fctx: fctx.get("sessionId"),
 }
 _ADAPTERS = [_CLAUDE_ADAPTER, _CODEX_ADAPTER]
 
@@ -459,6 +462,7 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
     pending = {}       # sessionId → last human prompt not yet captured for this repo
     baselines = {}     # episodeId → dirty set at capture time (in-memory)
     last_change = {}   # episodeId → monotonic time of its last file-set change (quiet timer)
+    session_activity = {}  # sessionId → time of its transcript's last append (turn liveness)
     logger.info("Prompt capture watching Claude Code + Codex transcripts "
                 "(%d baselined, repo=%s, autoland=%s)", len(offsets), repo_str, autoland)
 
@@ -496,6 +500,12 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
                 if size <= start:
                     offsets[key] = size           # unchanged / new-baseline / rotated
                     continue
+                # The transcript grew → its session's agent is mid-turn (thinking, tool
+                # calls, results), even when no repo file changes. This liveness signal
+                # keeps the idle fallback from splitting a long turn (_maybe_autoland).
+                sid_alive = ad["session_of"](path, fctx)
+                if sid_alive:
+                    session_activity[sid_alive] = time.time()
                 entries, new_off = read_new_lines(path, start)
                 offsets[key] = new_off
                 for e in entries:
@@ -520,9 +530,11 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
             if tick % 2 == 0:
                 await _link_changes(root, persistence, baselines, manager, last_change)
             # Conservative Auto-Land: once a capture episode's files have settled for a
-            # quiet window, commit them (scoped). Ambiguous sets stay needs_manual_land.
+            # quiet window AND its session's transcript has gone quiet too, commit them
+            # (scoped). Ambiguous sets stay needs_manual_land.
             if autoland:
-                await _maybe_autoland(root, persistence, manager, last_change, quiet_window)
+                await _maybe_autoland(root, persistence, manager, last_change, quiet_window,
+                                      session_activity)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a bad tick must not kill the watcher
@@ -577,15 +589,24 @@ async def _land_active_capture(root, persistence, manager, last_change, session_
                 eid, result.get("status"), len(result.get("commits") or []))
 
 
-async def _maybe_autoland(root, persistence, manager, last_change, quiet_window) -> None:
+async def _maybe_autoland(root, persistence, manager, last_change, quiet_window,
+                          session_activity=None) -> None:
     """Idle fallback for the *trailing* episode: land the newest reviewing capture episode once its
-    files have been quiet for ``quiet_window`` seconds. The primary trigger is the turn-boundary
-    land when the next prompt arrives (``_land_active_capture`` on a new human prompt)."""
+    files have been quiet for ``quiet_window`` seconds **and** its session's transcript has gone
+    quiet too. File-quiet alone can't tell "turn is over" from "agent is thinking" — a long agent
+    turn (edit → minutes of reading/tests → edit) used to split here, landing the first file and
+    orphaning the rest. The transcript keeps appending while the agent works, so transcript-quiet
+    is the missing half of "the turn is actually over". The primary trigger remains the
+    turn-boundary land when the next prompt arrives (``_land_active_capture``); episodes without a
+    tracked session (no ``sessionId``) keep the old file-quiet-only behavior."""
     active = next((e for e in persistence.load_episodes()
                    if e.get("source") == "openfde-capture"
                    and e.get("status") == "reviewing" and (e.get("files") or [])), None)
     if not active:
         return
     if time.time() - last_change.get(active["episodeId"], 0) < quiet_window:
-        return                                  # still settling — wait
+        return                                  # files still settling — wait
+    sid = active.get("sessionId")
+    if session_activity and sid and time.time() - session_activity.get(sid, 0) < quiet_window:
+        return                                  # session still streaming — the turn isn't over
     await _land_active_capture(root, persistence, manager, last_change)
