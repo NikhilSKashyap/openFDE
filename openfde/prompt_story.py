@@ -51,6 +51,8 @@ _WATCH = ("watch:", "worth watching", "not committed", "keep an eye on")
 _WATCH_RE = re.compile(r"\b(maybe|consider|explore|exploring|interesting)\b", re.I)
 # Revisit-trigger language inside a deferred unit: "until X lands", "once Y ships".
 _TRIGGER_RE = re.compile(r"\b(when|once|after|until|as soon as)\b", re.I)
+_SIGNAL_EXAMPLE_RE = re.compile(
+    r"\b(phrases?\s+like|signals?|examples?|markers?|keywords?|from\s+phrases)\b", re.I)
 # Phrases too generic to be a concept on their own.
 _STOP_PHRASES = {
     "this", "that", "it", "them", "the rail", "this slice", "the card", "the ui",
@@ -131,6 +133,22 @@ def _trigger_clause(text: str):
     return out if len(words) >= 2 else None
 
 
+def _is_signal_example_unit(unit: str) -> bool:
+    """True for docs/spec lines listing lifecycle trigger words, not actual ideas.
+
+    Example: "Watch: phrases like `Watch:`, `interesting`, `maybe`, `consider`…"
+    should not become a concept titled "Interesting, maybe, consider…".
+    """
+    low = (unit or "").lower()
+    marker_hits = sum(1 for marker in (
+        "watch:", "maybe", "consider", "explore", "interesting",
+        "deferred", "next:", "next slice", "abandoned",
+    ) if marker in low)
+    return marker_hits >= 3 and (
+        "`" in unit or _SIGNAL_EXAMPLE_RE.search(unit) is not None
+    )
+
+
 def _sf_trigger(phrase: str, det: list):
     """Carry a deterministically-extracted trigger onto the matching storyFacts
     deferred phrase (the LLM usually echoes the prompt's wording, so a shared
@@ -160,6 +178,8 @@ def _signals(ep: dict):
     out, seen = [], set()
     caps = {"abandoned": 0, "deferred": 0, "next": 0, "watch": 0}
     for unit in _units(text):
+        if _is_signal_example_unit(unit):
+            continue
         low = unit.lower()
         has_ab = any(s in low for s in _ABANDON) or any(low.startswith(s) for s in _ABANDON_LEAD)
         has_df = any(s in low for s in _DEFER)

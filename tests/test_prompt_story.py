@@ -259,6 +259,15 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(c["status"], "deferred")  # broad class stays in the old set
         self.assertEqual(g["lifecycleCounts"]["watch"], 2)
 
+    def test_watch_signal_examples_are_not_concepts(self):
+        g = build_prompt_graph([
+            _ep("e1", 1, "Story Lifecycle Lanes",
+                prompt=("Watch: weak-interest concepts from phrases like `Watch:`, "
+                        "`interesting`, `maybe`, `consider`, `explore`, `worth watching`.")),
+        ])
+        watch_titles = [c["title"] for c in g["concepts"] if c["lifecycle"] == "watch"]
+        self.assertEqual(watch_titles, [])
+
     def test_deferred_concept_carries_revisit_trigger(self):
         g = build_prompt_graph([
             _ep("e1", 1, "Capture Hardening",

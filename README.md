@@ -121,7 +121,7 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.4.0**, the local-first council can
+OpenFDE is early and moving fast. As of **0.4.1**, the local-first council can
 run with **Codex local CLI for Architect/Verifier** and **Claude Code local CLI
 for Senior Dev**, with coding activity **streamed live on the canvas** and a
 **stop control** to halt any run. The architecture-to-execution loop runs
