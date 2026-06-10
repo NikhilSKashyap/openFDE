@@ -640,9 +640,11 @@ def build_story_timeline(episodes: list, concepts: list, edges: list = None,
     spine = []
     for e in spine_eps:
         eid = e.get("episodeId")
-        ups = (above.get(eid) or [])[:_MAX_BRANCH_PER_EP]
-        downs = (below.get(eid) or [])[:_MAX_BRANCH_PER_EP]
-        overflow = (len(above.get(eid) or []) - len(ups)) + (len(below.get(eid) or []) - len(downs))
+        # The storyline shows EVERYTHING at every beat (product rule — no "+N more"
+        # hiding decisions); the frontend's multi-column branch layout absorbs density.
+        ups = above.get(eid) or []
+        downs = below.get(eid) or []
+        overflow = 0
         v = e.get("verify") or {}
         pr = e.get("pr") or {}
         src = e.get("intentSource") or {}
@@ -669,7 +671,10 @@ def build_story_timeline(episodes: list, concepts: list, edges: list = None,
     events = [e for e in (events or []) if isinstance(e, dict)]
     bridges = []
     for a, b in zip(spine_eps, spine_eps[1:]):
+        # DERIVED evidence is never trimmed (display everything); only the bucketed
+        # raw event-log items are capped — the Events layer holds their full tail.
         ticks = _episode_ticks(a)
+        raw_here = []
         t_a, t_b = _ts(a.get("createdAt")), _ts(b.get("createdAt"))
         if t_a and t_b:
             for ev in events:
@@ -677,10 +682,10 @@ def build_story_timeline(episodes: list, concepts: list, edges: list = None,
                     continue
                 t = _ts(ev.get("timestamp"))
                 if t and t_a < t <= t_b:
-                    ticks.append(_event_tick(ev))
+                    raw_here.append(_event_tick(ev))
         bridges.append({"fromEpisodeId": a.get("episodeId"), "toEpisodeId": b.get("episodeId"),
-                        "events": ticks[:_MAX_BRIDGE_TICKS],
-                        "overflow": max(0, len(ticks) - _MAX_BRIDGE_TICKS)})
+                        "events": ticks + raw_here[:_MAX_BRIDGE_TICKS],
+                        "overflow": max(0, len(raw_here) - _MAX_BRIDGE_TICKS)})
 
     raw_tail = [_event_tick(ev) for ev in events[-_MAX_RAW_EVENTS:]]
     return {"spine": spine, "bridges": bridges, "rawEvents": raw_tail,

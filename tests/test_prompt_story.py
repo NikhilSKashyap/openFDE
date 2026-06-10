@@ -394,9 +394,8 @@ class StoryTimelineTest(unittest.TestCase):
         self.assertEqual(by_kind["pr"][0]["label"], "PR #7")
         self.assertEqual(by_kind["pr"][0]["url"], "https://github.com/a/r/pull/7")
         self.assertEqual(by_kind["issue"][0]["label"], "issue #42")
-        # 6 candidate ticks, cap 5 — the least-telling (files) trims into overflow.
-        self.assertNotIn("files", by_kind)
-        self.assertEqual(bridge["overflow"], 1)
+        self.assertEqual(by_kind["files"][0]["label"], "1 file")   # everything displays
+        self.assertEqual(bridge["overflow"], 0)
         # spine node carries the lite verify/pr/issue too
         n = g["storyTimeline"]["spine"][0]
         self.assertEqual(n["pr"]["number"], 7)
@@ -435,14 +434,27 @@ class StoryTimelineTest(unittest.TestCase):
         self.assertIn("commit", kinds)                          # derived ticks survive
         self.assertNotIn("event", kinds)                        # bucketing safely skipped
 
-    def test_bridge_ticks_capped_with_overflow(self):
+    def test_derived_evidence_is_never_trimmed(self):
+        # Product rule: the storyline displays EVERYTHING — all 9 commits AND the
+        # files tick render (the old cap would have trimmed to 5); only bucketed
+        # raw event-log items are capped (the Events layer holds their tail).
         shas = [f"{i:040x}" for i in range(9)]
-        a = self._rich_ep("e1", 1, "Busy", commitShas=shas)
+        a = self._rich_ep("e1", 1, "Busy", commitShas=shas, files=["x.py", "y.py"])
         b = self._rich_ep("e2", 2, "After")
         g = build_prompt_graph([b, a])
         bridge = g["storyTimeline"]["bridges"][0]
-        self.assertEqual(len(bridge["events"]), 5)              # _MAX_BRIDGE_TICKS (3–5 rule)
-        self.assertGreaterEqual(bridge["overflow"], 4)
+        self.assertEqual(len([t for t in bridge["events"] if t["kind"] == "commit"]), 9)
+        kinds = [t["kind"] for t in bridge["events"]]
+        self.assertIn("files", kinds)                           # nothing trimmed away
+        self.assertEqual(len(bridge["events"]), 10)             # 9 commits + files
+        self.assertEqual(bridge["overflow"], 0)
+
+    def test_branches_are_never_capped(self):
+        prompt = "\n".join(f"Deferred: parked idea number {i} here." for i in range(6))
+        g = build_prompt_graph([self._rich_ep("e1", 1, "Busy Beat", prompt=prompt)])
+        node = g["storyTimeline"]["spine"][0]
+        self.assertGreaterEqual(len(node["branchesAbove"]), 3)  # signal-cap only, no UI cap
+        self.assertEqual(node["branchOverflow"], 0)             # nothing hidden behind "+N"
 
     def test_receipts_lead_the_bridge(self):
         # The cap trims from the tail — verify/PR must survive a many-commit episode.

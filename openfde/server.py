@@ -1514,6 +1514,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response(build_prompt_graph(episodes,
                                                     events=persistence.load_events()[-200:]))
 
+
     async def post_summarize_episodes(request: web.Request) -> web.Response:
         """On-demand LLM story summary: upgrade up to ``limit`` eligible episodes (default 1)
         using the local CLI, off the event loop. Broadcasts ``episode_updated`` for any
