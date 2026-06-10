@@ -1278,6 +1278,68 @@
 .tellmap-parked-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
 .tellmap-ops-note { margin-top: 12px; font-size: 10px; color: var(--text-muted); opacity: 0.7; font-style: italic; }
 
+/* ── Story Timeline v3 — merged Story+Timeline (center spine + bridges) ──────
+   3-row grid, column flow: every triplet of children is one column. Episode
+   columns hold [branches-above, box, branches-below]; bridge columns hold an
+   empty cell, the tick line, an empty cell. Pure CSS, horizontal scroll. */
+.tlv3-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px 10px; }
+.tlv3-grid {
+  display: grid;
+  grid-template-rows: minmax(24px, auto) auto minmax(24px, auto);
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  align-items: center;
+  column-gap: 0;
+}
+.tlv3-above, .tlv3-below {
+  display: flex; flex-direction: column; gap: 4px; padding: 0 6px;
+  max-width: 200px; align-self: end; justify-content: flex-end;
+}
+.tlv3-below { align-self: start; justify-content: flex-start; padding-top: 6px; }
+.tlv3-above { padding-bottom: 6px; }
+.tlv3-mid { display: flex; align-items: center; }
+/* connector stems: a short vertical line tying branches to the spine row */
+.tlv3-branch { position: relative; width: 176px; margin-left: 0; }
+.tlv3-branch::before { display: none; }
+.tlv3-branch.up::after, .tlv3-branch.down::after { content: none; }
+.tlv3-above .tlv3-branch:last-child { box-shadow: 0 10px 0 -9px var(--border); }
+.tlv3-below .tlv3-branch:first-child { box-shadow: 0 -10px 0 -9px var(--border); }
+.tellmap-branch.next { border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); background: rgba(124,111,247,0.06); }
+.tellmap-branch.next .tellmap-branch-kind { color: var(--accent); }
+
+/* the bridge: a line carrying compact ticks between two beats */
+.tlv3-bridge {
+  display: flex; align-items: center; gap: 5px; padding: 0 4px;
+  min-width: 70px; max-width: 420px; flex-wrap: wrap; justify-content: center;
+}
+.tlv3-line { flex: 1 0 14px; height: 1.6px; background: color-mix(in srgb, var(--accent) 55%, transparent); min-width: 14px; }
+.tlv3-line.arrow { position: relative; }
+.tlv3-line.arrow::after {
+  content: ""; position: absolute; right: -1px; top: 50%; transform: translateY(-50%);
+  border-left: 6px solid color-mix(in srgb, var(--accent) 75%, transparent);
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+}
+.tlv3-tick {
+  font-size: 9.5px; font-family: ui-monospace, monospace; line-height: 1.5;
+  padding: 0 6px; border-radius: 99px; border: 1px solid var(--border);
+  background: var(--surface-2); white-space: nowrap; max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tlv3-tick.clickable { cursor: pointer; }
+.tlv3-tick.clickable:hover { background: var(--surface); }
+.tlv3-tick.more { color: var(--text-muted); }
+
+/* Events — the raw/technical layer under the narrative */
+.tlv3-events {
+  flex-shrink: 0; margin-top: 8px; border-top: 1px solid var(--border);
+  padding-top: 6px; max-height: 180px; overflow: auto;
+}
+.tlv3-events-head { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 4px; }
+.tlv3-event-row { display: flex; gap: 10px; align-items: baseline; padding: 1px 2px; font-size: 10.5px; }
+.tlv3-event-time { font-family: ui-monospace, monospace; color: var(--text-muted); flex-shrink: 0; }
+.tlv3-event-type { font-family: ui-monospace, monospace; color: var(--dotted); flex-shrink: 0; min-width: 110px; }
+.tlv3-event-label { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .spec-code {
   font-family: ui-monospace, monospace;
   font-size: 10px;

@@ -39,7 +39,8 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
   const [graph, setGraph]     = useState(null)
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState(null)
-  const [tellMode, setTellMode] = useState(false)   // Story Tell: the chronological episode map
+  const [tellMode, setTellMode] = useState(false)   // Story Tell: the merged narrative timeline
+  const [eventsOpen, setEventsOpen] = useState(false) // raw/technical Events layer inside Tell
 
   // Fetch on mount and whenever the episode set changes (a new prompt / a Land).
   // Async IIFE + alive guard so setState only runs inside the async body.
@@ -82,10 +83,25 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
             {lanes.map(l => `${l.items.length} ${l.key}`).join(' · ')}
           </span>
         )}
+        {tellMode && (
+          <button
+            onClick={() => setEventsOpen(v => !v)}
+            title="Raw event-log layer — the technical timeline under the story"
+            style={{
+              padding: '3px 10px', fontSize: 11, fontFamily: 'inherit', fontWeight: 600,
+              cursor: 'pointer', borderRadius: 99,
+              color: eventsOpen ? 'var(--dotted)' : 'var(--text-muted)',
+              background: eventsOpen ? 'rgba(74,158,255,0.10)' : 'transparent',
+              border: `1px solid ${eventsOpen ? 'rgba(74,158,255,0.4)' : 'var(--border)'}`,
+            }}
+          >
+            Events
+          </button>
+        )}
         {concepts.length > 0 && (
           <button
             onClick={() => setTellMode(v => !v)}
-            title={tellMode ? 'Back to the concept columns' : 'Replay the development story as a chronological episode map'}
+            title={tellMode ? 'Back to the concept columns' : 'Replay the build as a narrative timeline — beats on a spine, what happened between them on the bridges'}
             style={{
               display: 'flex', alignItems: 'center', gap: 5, padding: '3px 10px',
               fontSize: 11, fontFamily: 'inherit', fontWeight: 600, cursor: 'pointer',
@@ -110,10 +126,9 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
                       flexShrink: 0, fontSize: 10, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
           <LegendSwatch color="var(--accent)"    label="episode" />
           <LegendSwatch color="var(--accent)"    filled label="now" />
-          <LegendSwatch color="var(--active)"    dashed label="deferred" />
-          <LegendSwatch color="var(--dotted)"    dashed label="watch" />
-          <LegendSwatch color="var(--violation)" label="abandoned" />
-          <span style={{ opacity: 0.7 }}>· left → right by sequence · click a beat to open it</span>
+          <span style={{ opacity: 0.85 }}>↑ watch · deferred · next</span>
+          <span style={{ opacity: 0.85 }}>↓ abandoned</span>
+          <span style={{ opacity: 0.7 }}>· bridges carry commits / checks / PRs between beats · click a beat to open it</span>
         </div>
       )}
 
@@ -126,8 +141,9 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
           ideas land in <b>next</b>, and ideas you watch, defer, or drop fill the other lanes.
         </div>
       ) : tellMode ? (
-        <StoryTellMap graph={graph} epById={epById}
-                      onSpotlightEpisode={onSpotlightEpisode} setActiveView={setActiveView} />
+        <StoryTellMap graph={graph} epById={epById} eventsOpen={eventsOpen}
+                      onSpotlightEpisode={onSpotlightEpisode}
+                      onSpotlightCommit={onSpotlightCommit} setActiveView={setActiveView} />
       ) : (
         <div style={{ display: 'flex', gap: 8, flex: 1, overflow: 'hidden', minHeight: 0 }}>
           {lanes.map(lane => {
@@ -159,24 +175,26 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
   )
 }
 
-// ── Story Tell map — chronological episode boxes ────────────────────────
-// Pure CSS layout (flex), driven entirely by the backend's `graph.storyMap`. We render a
-// bounded set of episode boxes + capped branches — never the (potentially 80+) concept
-// cards — so Tell mode stays light and there is nothing to measure.
-function StoryTellMap({ graph, epById, onSpotlightEpisode, setActiveView }) {
-  const map = graph?.storyMap
-  if (!map || !(map.spine || []).length) {
+// ── Story Timeline v3 — Story and Timeline merged into one narrative surface ──
+// A CSS grid with three rows: lifecycle branches ABOVE (watch / deferred / queued
+// next), the chronological episode spine in the CENTER, abandoned branches BELOW.
+// Between beats, a bridge line carries what actually happened — commits, verify
+// receipts, the PR, the linked issue — as compact clickable ticks. Driven entirely
+// by the backend's `graph.storyTimeline`; pure CSS, nothing measured.
+function StoryTellMap({ graph, epById, eventsOpen, onSpotlightEpisode, onSpotlightCommit, setActiveView }) {
+  const tl = graph?.storyTimeline
+  if (!tl || !(tl.spine || []).length) {
     return (
       <div className="tellmap" style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12, lineHeight: 1.5 }}>
         No product episodes yet — prompts that change the product become the story beats here.
       </div>
     )
   }
-  const last = map.spine.length - 1
-  // Open a beat: spotlight its episode on the canvas (detail card + amber files) and take
-  // the user there to see it, since the spotlight surfaces on the whiteboard, not in Story.
-  // Self-sufficient: the storyMap node already carries the episode's identity + files, so a
-  // click works even before the heavier /api/review/episodes payload has populated `epById`.
+  const spine = tl.spine
+  const bridges = tl.bridges || []
+  const last = spine.length - 1
+  // Open a beat: spotlight its episode on the canvas (detail card + amber files).
+  // Self-sufficient: the node carries identity + files even before epById hydrates.
   const open = (node) => {
     const ep = epById[node.episodeId] || {
       episodeId: node.episodeId, tag: node.tag, title: node.title,
@@ -185,46 +203,119 @@ function StoryTellMap({ graph, epById, onSpotlightEpisode, setActiveView }) {
     onSpotlightEpisode?.(ep)
     setActiveView?.('whiteboard')
   }
+
+  // grid-auto-flow: column with 3 rows → every triplet of children forms a column.
+  // Episode columns contribute [above, box, below]; bridge columns [gap, line, gap].
+  const cells = []
+  spine.forEach((n, i) => {
+    cells.push(
+      <div className="tlv3-above" key={`a${n.episodeId}`}>
+        {(n.branchesAbove || []).map(b => (
+          <TimelineBranch key={b.conceptId} branch={b} dir="up" />
+        ))}
+      </div>,
+      <div className="tlv3-mid" key={`m${n.episodeId}`}>
+        <EpisodeBox node={n} isNow={i === last} onClick={() => open(n)} />
+      </div>,
+      <div className="tlv3-below" key={`b${n.episodeId}`}>
+        {(n.branchesBelow || []).map(b => (
+          <TimelineBranch key={b.conceptId} branch={b} dir="down" />
+        ))}
+        {n.branchOverflow > 0 && <div className="tellmap-branch-more">+{n.branchOverflow} more</div>}
+      </div>,
+    )
+    if (i < last) {
+      const bridge = bridges.find(br => br.fromEpisodeId === n.episodeId) || { events: [] }
+      cells.push(
+        <div className="tlv3-above" key={`ba${n.episodeId}`} />,
+        <div className="tlv3-bridge" key={`bm${n.episodeId}`}>
+          <span className="tlv3-line" />
+          {(bridge.events || []).map((t, j) => (
+            <BridgeTick key={j} tick={t} onSpotlightCommit={onSpotlightCommit} />
+          ))}
+          {bridge.overflow > 0 && <span className="tlv3-tick more">+{bridge.overflow}</span>}
+          <span className="tlv3-line arrow" />
+        </div>,
+        <div className="tlv3-below" key={`bb${n.episodeId}`} />,
+      )
+    }
+  })
+
   return (
     <div className="tellmap">
-      <div className="tellmap-spine">
-        {map.spine.map((n, i) => (
-          <div className="tellmap-col" key={n.episodeId || i}>
-            <div className="tellmap-eprow">
-              <EpisodeBox node={n} isNow={i === last} onClick={() => open(n)} />
-              {i < last && <SpineArrow />}
-            </div>
-            {(n.deferred.length > 0 || n.abandoned.length > 0 || (n.watch || []).length > 0 || n.branchOverflow > 0) && (
-              <div className="tellmap-branches">
-                {n.deferred.map(b => <BranchBox key={b.conceptId} branch={b} kind="deferred" />)}
-                {(n.watch || []).map(b => <BranchBox key={b.conceptId} branch={b} kind="watch" />)}
-                {n.abandoned.map(b => <BranchBox key={b.conceptId} branch={b} kind="abandoned" />)}
-                {n.branchOverflow > 0 && <div className="tellmap-branch-more">+{n.branchOverflow} more</div>}
-              </div>
-            )}
-          </div>
-        ))}
+      <div className="tlv3-scroll">
+        <div className="tlv3-grid">{cells}</div>
       </div>
 
-      {(map.parked || []).length > 0 && (
-        <div className="tellmap-parked">
-          <div className="tellmap-parked-label">Parked · source prompt unknown</div>
-          <div className="tellmap-parked-row">
-            {map.parked.map(b => (
-              <BranchBox key={b.conceptId} branch={b} parked
-                         kind={b.lifecycle === 'watch' ? 'watch'
-                           : b.status === 'abandoned' ? 'abandoned' : 'deferred'} />
-            ))}
-            {map.parkedOverflow > 0 && <div className="tellmap-branch-more">+{map.parkedOverflow} more</div>}
-          </div>
+      {tl.hiddenOps > 0 && (
+        <div className="tellmap-ops-note">
+          +{tl.hiddenOps} operational/meta {tl.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
         </div>
       )}
 
-      {map.hiddenOps > 0 && (
-        <div className="tellmap-ops-note">
-          +{map.hiddenOps} operational/meta {map.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
+      {/* Events — the raw/technical timeline layer under the narrative. */}
+      {eventsOpen && (
+        <div className="tlv3-events">
+          <div className="tlv3-events-head">Raw events · most recent {Math.min((tl.rawEvents || []).length, 60)}</div>
+          {(tl.rawEvents || []).slice().reverse().map((ev, i) => (
+            <div className="tlv3-event-row" key={i} title={ev.detail || ev.label}>
+              <span className="tlv3-event-time">{(ev.timestamp || '').slice(11, 19) || '—'}</span>
+              <span className="tlv3-event-type">{ev.type || 'event'}</span>
+              <span className="tlv3-event-label">{ev.label}</span>
+            </div>
+          ))}
+          {!(tl.rawEvents || []).length && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic', padding: '4px 2px' }}>
+              no raw events yet
+            </div>
+          )}
         </div>
       )}
+    </div>
+  )
+}
+
+// One bridge tick — a compact badge for something that happened between beats.
+// commit → opens the commit spotlight; pr/issue → opens GitHub; rest → tooltip.
+const TICK_KIND = {
+  commit: { color: 'var(--solid)' },
+  verify: { color: 'var(--solid)' },
+  pr:     { color: 'var(--accent)' },
+  issue:  { color: 'var(--accent)' },
+  files:  { color: 'var(--text-muted)' },
+  event:  { color: 'var(--dotted)' },
+}
+function BridgeTick({ tick, onSpotlightCommit }) {
+  const failed = tick.kind === 'verify' && tick.status !== 'passed' && tick.status !== 'skipped'
+  const color = failed ? 'var(--violation)' : (TICK_KIND[tick.kind] || TICK_KIND.event).color
+  const clickable = (tick.kind === 'commit' && onSpotlightCommit) || ((tick.kind === 'pr' || tick.kind === 'issue') && tick.url)
+  const onClick = () => {
+    if (tick.kind === 'commit' && onSpotlightCommit) onSpotlightCommit(tick.sha)
+    else if ((tick.kind === 'pr' || tick.kind === 'issue') && tick.url) window.open(tick.url, '_blank', 'noreferrer')
+  }
+  return (
+    <span
+      className={'tlv3-tick' + (clickable ? ' clickable' : '')}
+      style={{ color, borderColor: `color-mix(in srgb, ${color} 45%, transparent)` }}
+      title={tick.detail ? `${tick.label} — ${tick.detail}` : tick.label}
+      onClick={clickable ? onClick : undefined}
+    >
+      {tick.label}
+    </span>
+  )
+}
+
+// A lifecycle branch above/below a beat, with its little connector stem.
+function TimelineBranch({ branch, dir }) {
+  const kind = branch.lifecycle === 'abandoned' ? 'abandoned'
+    : branch.lifecycle === 'watch' ? 'watch'
+      : branch.lifecycle === 'next' ? 'next' : 'deferred'
+  const kindLabel = kind === 'abandoned' ? '✕ dropped' : kind
+  return (
+    <div className={`tellmap-branch tlv3-branch ${kind} ${dir}`}
+         title={branch.trigger ? `${branch.title} — revisit ${branch.trigger}` : branch.title}>
+      <span className="tellmap-branch-kind">{kindLabel}</span>
+      <span className="tellmap-branch-title">{branch.title}</span>
     </div>
   )
 }
@@ -245,31 +336,6 @@ function EpisodeBox({ node, isNow, onClick }) {
         {node.conceptCount > 0 && <span className="tellmap-chip" title={`${node.conceptCount} concept(s)`}>◆ {node.conceptCount}</span>}
       </div>
     </div>
-  )
-}
-
-function BranchBox({ branch, kind, parked }) {
-  const kindLabel = kind === 'abandoned' ? '✕ dropped' : kind === 'watch' ? 'watch' : 'deferred'
-  return (
-    <div className={`tellmap-branch ${kind}${parked ? ' parked' : ''}`}
-         title={branch.trigger ? `${branch.title} — revisit ${branch.trigger}` : branch.title}>
-      <span className="tellmap-branch-kind">
-        {kindLabel}
-        {parked && branch.fromTag ? ` · ${branch.fromTag}` : ''}
-      </span>
-      <span className="tellmap-branch-title">{branch.title}</span>
-    </div>
-  )
-}
-
-function SpineArrow() {
-  return (
-    <span className="tellmap-arrow" aria-hidden="true">
-      <svg width="30" height="12" viewBox="0 0 30 12">
-        <line x1="2" y1="6" x2="22" y2="6" stroke="var(--accent)" strokeWidth="1.6" opacity="0.7" />
-        <path d="M22,2 L28,6 L22,10 z" fill="var(--accent)" opacity="0.85" />
-      </svg>
-    </span>
   )
 }
 
