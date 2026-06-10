@@ -139,10 +139,13 @@ def pr_readiness(root, episode: dict, *, runner=None, which=None, _ctx=None) -> 
     ``create_episode_pr`` enforces, without creating, pushing, or calling gh:
 
       - ``created`` — the episode already carries ``pr.url`` (action: open it).
-      - ``blocked`` — any of: operational/meta episode, no landed commits, dirty
-        worktree, verification failed, verification missing/skipped while the repo
-        HAS checks configured (conservative v1.1), head commit already reachable
-        from the remote default branch, gh CLI not installed.
+      - ``blocked`` — any of: operational/meta episode, no landed commits, **this
+        episode's own files** having uncommitted edits (unrelated dirty files are
+        ignored with a named note — a PR branches from the landed commit, so the
+        worktree never reaches it), verification failed, verification
+        missing/skipped while the repo HAS checks configured (conservative v1.1),
+        head commit already reachable from the remote default branch, gh CLI not
+        installed.
       - ``ready`` — clean tree + landed commits + required checks passed + head not
         on base; ``reasons`` lists the receipts ("1 landed commit", "worktree
         clean", "unit tests passed", …).
@@ -190,14 +193,21 @@ def pr_readiness(root, episode: dict, *, runner=None, which=None, _ctx=None) -> 
         clean = _ok(st) and not (st.stdout or "").strip()
         dirty_names = [ln[3:].strip() for ln in (st.stdout or "").splitlines() if ln.strip()] \
             if not clean else []
+    # Only dirt that overlaps THIS episode's files blocks: a PR branches from the
+    # landed commit (`git branch <name> <sha>` + push — the worktree never touches the
+    # PR), so unrelated in-progress work cannot leak in. The global-clean rule made
+    # "Not ready" perpetual once several work streams coexisted (observed live: one
+    # stray file blocked every episode's verdict).
+    ep_files = set(episode.get("files") or [])
+    own_dirty = sorted(ep_files & set(dirty_names))
     if clean:
         reasons.append("worktree clean")
+    elif own_dirty:
+        shown = ", ".join(own_dirty[:3]) + ("…" if len(own_dirty) > 3 else "")
+        blocked.append(f"this episode's files have uncommitted edits ({shown})")
     else:
-        # Name the files: on an already-landed episode the dirt is OTHER work, and
-        # "uncommitted files" with no names sent the user hunting (observed live).
         shown = ", ".join(dirty_names[:3]) + ("…" if len(dirty_names) > 3 else "")
-        blocked.append("worktree has uncommitted files"
-                       + (f" ({shown})" if shown else ""))
+        reasons.append(f"unrelated edits ignored ({shown}) — a PR branches from the landed commit")
 
     v = episode.get("verify") or {}
     vstatus = v.get("status")
@@ -241,7 +251,9 @@ def pr_readiness(root, episode: dict, *, runner=None, which=None, _ctx=None) -> 
 def create_episode_pr(root, episode: dict, *, runner=None, now=None) -> dict:
     """Branch from the episode's newest commit, push, and open a GitHub PR via `gh`.
 
-    Guardrails (v1): requires landed commit evidence and a **clean worktree**;
+    Guardrails: requires landed commit evidence and that **this episode's own files
+    are fully landed** (unrelated dirty files are allowed — the branch is created at
+    the episode's commit and pushed by ref, so the worktree never reaches the PR);
     idempotent — an episode already carrying ``pr.url`` returns it untouched;
     a head commit **already reachable from the remote default branch** is refused
     ("no PR needed") before anything is created or pushed; gh missing/
@@ -270,9 +282,15 @@ def create_episode_pr(root, episode: dict, *, runner=None, now=None) -> dict:
     st = _run(["git", "status", "--porcelain"], root, runner)
     if not _ok(st):
         return {"ok": False, "error": _err(st, "git status failed")}
-    if (st.stdout or "").strip():
+    dirty_names = [ln[3:].strip() for ln in (st.stdout or "").splitlines() if ln.strip()]
+    # Block only when THIS episode's files are dirty (its work isn't fully landed).
+    # Unrelated in-progress files can't reach the PR — the branch is created at the
+    # episode's landed commit and pushed by ref; the worktree is never read.
+    own_dirty = sorted(set(episode.get("files") or []) & set(dirty_names))
+    if own_dirty:
+        shown = ", ".join(own_dirty[:3]) + ("…" if len(own_dirty) > 3 else "")
         return {"ok": False,
-                "error": "worktree is dirty — land or stash changes before Land as PR (v1 requires a clean tree)"}
+                "error": f"this episode's files have uncommitted edits ({shown}) — land them first"}
 
     head_sha = shas[-1]                            # newest landed commit = the PR head
 
