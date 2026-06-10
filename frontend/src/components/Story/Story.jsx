@@ -11,11 +11,12 @@ import { getPromptGraph } from '../../api/backend'
  *     trigger), and what no longer fits. Each card links back to its prompts/commits/
  *     files. Lanes filter on the backend-derived `concept.lifecycle` (broad `status`
  *     stays the legacy fallback).
- *   • Tell ON  — the **chronological episode story map** (`StoryTellMap`): product
- *     episodes as canvas-like boxes left→right by sequence, with deferred/abandoned
- *     ideas branching below the episode that produced them. The unit is the *episode*,
- *     not the concept. The map structure is computed deterministically on the backend
- *     (`graph.storyMap`); this view only lays it out with CSS — no DOM measurement.
+ *   • Tell ON  — the **Narrative Graph** (`StoryNarrative`): the main build spine
+ *     runs forward with evidence ladders between beats; explorations branch
+ *     diagonally forward up-right off the beat they grew from; dropped/superseded
+ *     paths fall forward down-right (with a dashed "returned" edge back to the beat
+ *     that resumed the main direction). Driven by `graph.storyNarrative` — derived,
+ *     immutable, deterministic coordinates, no drag, nothing persisted.
  *
  * @param {Array}    props.episodes           - episodes (refetch trigger when they change)
  * @param {Function} props.onSpotlightEpisode - (episode) => void  (opens the episode card)
@@ -129,9 +130,9 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
                       flexShrink: 0, fontSize: 10, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
           <LegendSwatch color="var(--accent)"    label="episode" />
           <LegendSwatch color="var(--accent)"    filled label="now" />
-          <span style={{ opacity: 0.85 }}>↑ watch · deferred · next</span>
-          <span style={{ opacity: 0.85 }}>↓ abandoned</span>
-          <span style={{ opacity: 0.7 }}>· receipts above the arrow, commits & files below · click anything to open it</span>
+          <span style={{ opacity: 0.85 }}>↗ explored · watch · deferred</span>
+          <span style={{ opacity: 0.85 }}>↘ dropped</span>
+          <span style={{ opacity: 0.7 }}>· branches move forward, not parked · receipts ride the spine · click anything to open it</span>
         </div>
       )}
 
@@ -145,8 +146,8 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
         </div>
       ) : tellMode ? (
         <div style={{ display: 'flex', flex: 1, minHeight: 0, gap: 10 }}>
-          <StoryTellMap graph={graph} eventsOpen={eventsOpen}
-                        detail={detail} setDetail={setDetail} />
+          <StoryNarrative graph={graph} eventsOpen={eventsOpen}
+                          detail={detail} setDetail={setDetail} />
           {detail && (
             <StoryDrawer detail={detail} epById={epById}
                          onClose={() => setDetail(null)}
@@ -186,122 +187,246 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
   )
 }
 
-// ── Story Timeline v3 — Story and Timeline merged into one narrative surface ──
-// A CSS grid with three rows: lifecycle branches ABOVE (watch / deferred / queued
-// next), the chronological episode spine in the CENTER, abandoned branches BELOW.
-// Between beats, a bridge line carries what actually happened — commits, verify
-// receipts, the PR, the linked issue — as compact clickable ticks. Driven entirely
-// by the backend's `graph.storyTimeline`; pure CSS, nothing measured.
-function StoryTellMap({ graph, eventsOpen, detail, setDetail }) {
+// ── Narrative Graph v1 — the story as a branching path, not a flat line ──────
+// The main build spine runs forward; explorations branch DIAGONALLY FORWARD
+// up-right off the beat they grew from; dropped/superseded paths fall forward
+// down-right; a superseded path points back at the beat that returned to the
+// main direction. All positions are a pure function of `graph.storyNarrative`
+// (+ concept branches from `graph.storyTimeline`) — derived, immutable, no
+// drag, nothing measured, nothing persisted.
+const NV = {
+  XP: 470,   // spine pitch (box + evidence ladder)
+  W: 176, H: 96,                 // episode box (matches .tellmap-box)
+  DX: 200, DY: 168,              // first diagonal step off a parent
+  FANX: 52, FANY: 104,           // stagger for siblings on the same side
+  CH: 64,                        // concept card approx height (line endpoints)
+  PAD: 84, LH: 150,              // board padding; ladder row height
+}
+
+function layoutNarrative(nv, tl) {
+  const pos = {}                                     // episodeId -> {x, y} (y rel. to spine=0)
+  ;(nv.spineEpisodeIds || []).forEach((id, i) => { pos[id] = { x: i * NV.XP, y: 0 } })
+  const fan = {}                                     // `${parentId}:${side}` -> sibling count
+  const take = (pid, side) => (fan[`${pid}:${side}`] = (fan[`${pid}:${side}`] || 0) + 1)
+
+  const ordered = (nv.nodes || []).slice().sort((a, b) => (a.sequence || 0) - (b.sequence || 0))
+  for (const n of ordered) {
+    if (pos[n.episodeId] || !n.parentEpisodeId) continue
+    const p = pos[n.parentEpisodeId]
+    if (!p) continue
+    const side = n.lane === 'abandoned' ? 1 : -1     // dropped ↘ below, explored ↗ above
+    const k = take(n.parentEpisodeId, side) - 1
+    pos[n.episodeId] = { x: p.x + NV.DX + k * NV.FANX,
+                         y: p.y + side * (NV.DY + k * NV.FANY) }
+  }
+
+  const cpos = []                                    // concept cards join the same fans
+  for (const sn of (tl?.spine || [])) {
+    const at = pos[sn.episodeId]
+    if (!at) continue
+    for (const b of (sn.branchesAbove || [])) {
+      const k = take(sn.episodeId, -1) - 1
+      cpos.push({ branch: b, parentId: sn.episodeId, side: -1,
+                  x: at.x + NV.DX + k * NV.FANX, y: at.y - (NV.DY + k * NV.FANY) })
+    }
+    for (const b of (sn.branchesBelow || [])) {
+      const k = take(sn.episodeId, 1) - 1
+      cpos.push({ branch: b, parentId: sn.episodeId, side: 1,
+                  x: at.x + NV.DX + k * NV.FANX, y: at.y + NV.DY + k * NV.FANY })
+    }
+  }
+
+  let minY = 0, maxY = NV.H, maxX = NV.W
+  for (const p of Object.values(pos)) { minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y + NV.H); maxX = Math.max(maxX, p.x + NV.W) }
+  for (const p of cpos)               { minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y + NV.CH); maxX = Math.max(maxX, p.x + NV.W) }
+  const offY = NV.PAD - minY
+  const shifted = Object.fromEntries(Object.entries(pos).map(([id, p]) => [id, { x: p.x + NV.PAD, y: p.y + offY }]))
+  const cshift = cpos.map(p => ({ ...p, x: p.x + NV.PAD, y: p.y + offY }))
+  return { pos: shifted, cpos: cshift, width: maxX + 2 * NV.PAD,
+           height: maxY - minY + 2 * NV.PAD, spineY: offY }
+}
+
+function NarrativeLadder({ edge, x, y, w, node, isSel, setDetail }) {
+  const indexed = (edge.events || []).map((t, j) => ({ t, j }))
+  const up = indexed.filter(({ t }) => t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue')
+  const down = indexed.filter(({ t }) => !(t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue'))
+  const receipt = ({ t, j }, dir) => (
+    <span className={`tlv3-receipt ${dir}`} key={j}>
+      {dir === 'down' && <span className="tlv3-stem" />}
+      <BridgeTick tick={t} selected={isSel(t.kind, `${node.episodeId}:${j}`)}
+                  onClick={() => setDetail({ kind: t.kind, key: `${node.episodeId}:${j}`, tick: t, node })} />
+      {dir === 'up' && <span className="tlv3-stem" />}
+    </span>
+  )
+  return (
+    <div className="nv-ladder" style={{ left: x, top: y, width: w, height: NV.LH }}>
+      <div className="tlv3-bridge-row up">{up.map(e => receipt(e, 'up'))}</div>
+      <div className="nv-line" />
+      <div className="tlv3-bridge-row down">
+        {down.map(e => receipt(e, 'down'))}
+        {edge.overflow > 0 && (
+          <span className="tlv3-receipt down">
+            <span className="tlv3-stem" style={{ visibility: 'hidden' }} />
+            <span className="tlv3-tick more" title="more raw events on this stretch — the Events layer has them all">+{edge.overflow}</span>
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function StoryNarrative({ graph, eventsOpen, detail, setDetail }) {
+  const nv = graph?.storyNarrative
   const tl = graph?.storyTimeline
   const scrollRef = useRef(null)
-  const spineLen = tl?.spine?.length || 0
-  // The latest beat is the landing point: chronology stays oldest→newest left→right,
-  // and the viewport opens at the right end so "now" is what you see first.
+  const spineLen = nv?.spineEpisodeIds?.length || 0
+  // The latest mainline beat is the landing point.
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollLeft = el.scrollWidth
   }, [spineLen])
-  if (!tl || !spineLen) {
+  if (!nv || !(nv.nodes || []).length) {
     return (
       <div className="tellmap" style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12, lineHeight: 1.5 }}>
         No product episodes yet — prompts that change the product become the story beats here.
       </div>
     )
   }
-  const spine = tl.spine
-  const bridges = tl.bridges || []
-  const last = spine.length - 1
+  const L = layoutNarrative(nv, tl)
+  const tlById = Object.fromEntries((tl?.spine || []).map(n => [n.episodeId, n]))
   const isSel = (kind, key) => detail && detail.kind === kind && detail.key === key
+  const spineIds = nv.spineEpisodeIds || []
+  const lastSpine = spineIds[spineIds.length - 1]
+  const contByFrom = {}
+  const branchEdges = []
+  const returnEdges = []
+  for (const e of nv.edges || []) {
+    if (e.kind === 'continues') contByFrom[e.fromEpisodeId] = e
+    else if (e.kind === 'returns') returnEdges.push(e)
+    else if (e.toEpisodeId) branchEdges.push(e)            // explores / drops to episodes
+  }
+  const openEpisode = (n) => setDetail({ kind: 'episode', key: n.episodeId, node: tlById[n.episodeId] || n })
 
-  // grid-auto-flow: column with 3 rows → every triplet of children forms a column.
-  // Episode columns contribute [above, box, below]; bridge columns [gap, line, gap].
-  const cells = []
-  spine.forEach((n, i) => {
-    const ups = n.branchesAbove || []
-    const downs = n.branchesBelow || []
-    cells.push(
-      <div className={'tlv3-above' + (ups.length ? ' has-branches' : '') + (ups.length > 2 ? ' tlv3-cols2' : '')}
-           key={`a${n.episodeId}`}>
-        {ups.map(b => (
-          <TimelineBranch key={b.conceptId} branch={b}
-                          onClick={() => setDetail({ kind: 'branch', key: b.conceptId, branch: b, node: n })} />
-        ))}
-      </div>,
-      <div className="tlv3-mid" key={`m${n.episodeId}`}>
-        <EpisodeBox node={n} isNow={i === last} cont={i > 0} selected={isSel('episode', n.episodeId)}
-                    onClick={() => setDetail({ kind: 'episode', key: n.episodeId, node: n })} />
-      </div>,
-      <div className={'tlv3-below' + (downs.length ? ' has-branches' : '') + (downs.length > 2 ? ' tlv3-cols2' : '')}
-           key={`b${n.episodeId}`}>
-        {downs.map(b => (
-          <TimelineBranch key={b.conceptId} branch={b}
-                          onClick={() => setDetail({ kind: 'branch', key: b.conceptId, branch: b, node: n })} />
-        ))}
-      </div>,
-    )
-    if (i < last) {
-      const bridge = bridges.find(br => br.fromEpisodeId === n.episodeId) || { events: [] }
-      // Evidence ladder: receipts hang ABOVE the spine (verify / PR / issue — the
-      // trust-and-intent layer) and BELOW it (commits / files / raw events — the
-      // what-physically-happened layer), each chip on its own stem. The spine itself
-      // is one uninterrupted thick arrow drawn as a per-bridge underlay segment.
-      const indexed = (bridge.events || []).map((t, j) => ({ t, j }))
-      const evUp = indexed.filter(({ t }) => t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue')
-      const evDown = indexed.filter(({ t }) => !(t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue'))
-      const receipt = ({ t, j }, dir) => (
-        <span className={`tlv3-receipt ${dir}`} key={j}>
-          {dir === 'down' && <span className="tlv3-stem" />}
-          <BridgeTick tick={t} selected={isSel(t.kind, `${n.episodeId}:${j}`)}
-                      onClick={() => setDetail({ kind: t.kind, key: `${n.episodeId}:${j}`, tick: t, node: n })} />
-          {dir === 'up' && <span className="tlv3-stem" />}
-        </span>
-      )
-      cells.push(
-        <div className="tlv3-above" key={`ba${n.episodeId}`} />,
-        <div className="tlv3-bridge" key={`bm${n.episodeId}`}>
-          <div className="tlv3-bridge-row up">{evUp.map(e => receipt(e, 'up'))}</div>
-          <div className="tlv3-bridge-gap" />
-          <div className="tlv3-bridge-row down">
-            {evDown.map(e => receipt(e, 'down'))}
-            {bridge.overflow > 0 && (
-              <span className="tlv3-receipt down">
-                <span className="tlv3-stem" style={{ visibility: 'hidden' }} />
-                <span className="tlv3-tick more" title="more raw events on this stretch — the Events layer has them all">+{bridge.overflow}</span>
-              </span>
-            )}
-          </div>
-        </div>,
-        <div className="tlv3-below" key={`bb${n.episodeId}`} />,
-      )
-    }
-  })
+  // SVG connector endpoints — diagonal forward, parent corner → child left-middle.
+  const edgeLine = (e) => {
+    const p = L.pos[e.fromEpisodeId], c = L.pos[e.toEpisodeId]
+    if (!p || !c) return null
+    const down = c.y > p.y
+    const x1 = p.x + NV.W - 18, y1 = down ? p.y + NV.H - 4 : p.y + 4
+    const x2 = c.x - 3, y2 = c.y + NV.H / 2
+    return { x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 }
+  }
 
   return (
     <div className="tellmap">
       <div className="tlv3-scroll" ref={scrollRef}>
-        <div className="tlv3-grid">{cells}</div>
+        <div className="nv-board" style={{ width: L.width, height: L.height }}>
+          <svg className="nv-svg" width={L.width} height={L.height}>
+            <defs>
+              <marker id="nv-arrow" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+                <path d="M0,0 L9,4 L0,8 z" className="nv-arrowhead" />
+              </marker>
+            </defs>
+            {branchEdges.map((e, i) => {
+              const g = edgeLine(e)
+              if (!g) return null
+              const target = (nv.nodes || []).find(n => n.episodeId === e.toEpisodeId)
+              return (
+                <g key={`be${i}`}>
+                  <line x1={g.x1} y1={g.y1} x2={g.x2} y2={g.y2}
+                        className={`nv-edge ${e.kind}`} markerEnd="url(#nv-arrow)" />
+                  <text x={g.mx} y={g.my - 5} className="nv-elabel" textAnchor="middle"
+                        onClick={() => target && openEpisode(target)}>{e.label}</text>
+                </g>
+              )
+            })}
+            {returnEdges.map((e, i) => {
+              const p = L.pos[e.fromEpisodeId], c = L.pos[e.toEpisodeId]
+              if (!p || !c) return null
+              const x1 = p.x + NV.W, y1 = p.y + NV.H / 2
+              const down = c.y + NV.H < p.y                    // target above → exit upward
+              const x2 = c.x + 24, y2 = down ? c.y + NV.H + 3 : c.y - 3
+              return (
+                <g key={`re${i}`}>
+                  <line x1={x1} y1={y1} x2={x2} y2={y2}
+                        className="nv-edge returns" markerEnd="url(#nv-arrow)" />
+                  <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 5} className="nv-elabel" textAnchor="middle">returned</text>
+                </g>
+              )
+            })}
+            {L.cpos.map((c, i) => {
+              const p = L.pos[c.parentId]
+              if (!p) return null
+              const x1 = p.x + NV.W - 18, y1 = c.side > 0 ? p.y + NV.H - 4 : p.y + 4
+              const x2 = c.x - 3, y2 = c.y + NV.CH / 2
+              const label = c.branch.lifecycle === 'abandoned' ? 'dropped' : (c.branch.lifecycle || 'watch')
+              return (
+                <g key={`ce${i}`}>
+                  <line x1={x1} y1={y1} x2={x2} y2={y2}
+                        className="nv-edge concept" markerEnd="url(#nv-arrow)" />
+                  <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 5} className="nv-elabel" textAnchor="middle"
+                        onClick={() => setDetail({ kind: 'branch', key: c.branch.conceptId, branch: c.branch, node: tlById[c.parentId] })}>
+                    {label}
+                  </text>
+                </g>
+              )
+            })}
+          </svg>
+
+          {spineIds.map((id, i) => {
+            if (i >= spineIds.length - 1) return null
+            const edge = contByFrom[id]
+            const from = L.pos[id], to = L.pos[spineIds[i + 1]]
+            if (!edge || !from || !to) return null
+            const node = (nv.nodes || []).find(n => n.episodeId === id)
+            return <NarrativeLadder key={`l${id}`} edge={edge} node={node}
+                                    x={from.x + NV.W} y={L.spineY + NV.H / 2 - NV.LH / 2}
+                                    w={to.x - from.x - NV.W} isSel={isSel} setDetail={setDetail} />
+          })}
+
+          {(nv.nodes || []).map(n => {
+            const p = L.pos[n.episodeId]
+            if (!p) return null
+            const tlNode = tlById[n.episodeId] || n
+            return (
+              <div className="nv-abs" key={n.episodeId} style={{ left: p.x, top: p.y }}>
+                <EpisodeBox node={tlNode} isNow={n.episodeId === lastSpine}
+                            cont={n.lane === 'spine' && n.episodeId !== spineIds[0]}
+                            lane={n.lane}
+                            selected={isSel('episode', n.episodeId)}
+                            onClick={() => openEpisode(n)} />
+              </div>
+            )
+          })}
+
+          {L.cpos.map((c, i) => (
+            <div className="nv-abs" key={`c${i}`} style={{ left: c.x, top: c.y }}>
+              <TimelineBranch branch={c.branch}
+                              onClick={() => setDetail({ kind: 'branch', key: c.branch.conceptId, branch: c.branch, node: tlById[c.parentId] })} />
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Events — the raw/technical timeline layer under the narrative. The
           operational-episodes note lives HERE (it's meta, not story) so the
-          default board is nothing but the centered spine. */}
+          default board is nothing but the narrative graph. */}
       {eventsOpen && (
         <div className="tlv3-events">
-          {tl.hiddenOps > 0 && (
+          {tl?.hiddenOps > 0 && (
             <div className="tellmap-ops-note" style={{ marginTop: 0, marginBottom: 6 }}>
               +{tl.hiddenOps} operational/meta {tl.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
             </div>
           )}
-          <div className="tlv3-events-head">Raw events · most recent {Math.min((tl.rawEvents || []).length, 60)}</div>
-          {(tl.rawEvents || []).slice().reverse().map((ev, i) => (
+          <div className="tlv3-events-head">Raw events · most recent {Math.min((tl?.rawEvents || []).length, 60)}</div>
+          {(tl?.rawEvents || []).slice().reverse().map((ev, i) => (
             <div className="tlv3-event-row" key={i} title={ev.detail || ev.label}>
               <span className="tlv3-event-time">{(ev.timestamp || '').slice(11, 19) || '—'}</span>
               <span className="tlv3-event-type">{ev.type || 'event'}</span>
               <span className="tlv3-event-label">{ev.label}</span>
             </div>
           ))}
-          {!(tl.rawEvents || []).length && (
+          {!(tl?.rawEvents || []).length && (
             <div style={{ fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic', padding: '4px 2px' }}>
               no raw events yet
             </div>
@@ -313,7 +438,6 @@ function StoryTellMap({ graph, eventsOpen, detail, setDetail }) {
 }
 
 // One bridge tick — a compact badge for something that happened between beats.
-// commit → opens the commit spotlight; pr/issue → opens GitHub; rest → tooltip.
 const TICK_KIND = {
   commit: { color: 'var(--solid)' },
   verify: { color: 'var(--solid)' },
@@ -322,6 +446,7 @@ const TICK_KIND = {
   files:  { color: 'var(--text-muted)' },
   event:  { color: 'var(--dotted)' },
 }
+
 function BridgeTick({ tick, selected, onClick }) {
   const failed = tick.kind === 'verify' && tick.status !== 'passed' && tick.status !== 'skipped'
   const color = failed ? 'var(--violation)' : (TICK_KIND[tick.kind] || TICK_KIND.event).color
@@ -490,9 +615,10 @@ function StoryDrawer({ detail, epById, onClose, onSpotlightEpisode, onSpotlightC
   return <div className="tlv3-drawer">{body}</div>
 }
 
-function EpisodeBox({ node, isNow, cont, selected, onClick }) {
+function EpisodeBox({ node, isNow, cont, lane, selected, onClick }) {
+  const laneCls = lane === 'explore' ? ' lane-explore' : lane === 'abandoned' ? ' lane-abandoned' : ''
   return (
-    <div className={'tellmap-box' + (isNow ? ' now' : '') + (selected ? ' selected' : '') + (cont ? ' cont' : '')}
+    <div className={'tellmap-box' + (isNow ? ' now' : '') + (selected ? ' selected' : '') + (cont ? ' cont' : '') + laneCls}
          onClick={onClick}
          title={`${node.tag} · ${node.title}`}>
       <div className="tellmap-box-head">

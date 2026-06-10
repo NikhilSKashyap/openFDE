@@ -1385,6 +1385,38 @@
 .tlv3-tick.clickable:hover { background: var(--surface); }
 .tlv3-tick.more { color: var(--text-muted); }
 
+/* Narrative Graph — diagonal-forward branch board (derived, immutable, no drag) */
+.nv-board { position: relative; }
+.nv-svg { position: absolute; inset: 0; pointer-events: none; }
+.nv-abs { position: absolute; }
+.nv-edge { stroke: color-mix(in srgb, var(--accent) 55%, transparent); stroke-width: 1.7; fill: none; }
+.nv-edge.drops { stroke: color-mix(in srgb, #e56b6b 60%, transparent); }
+.nv-edge.concept { stroke: color-mix(in srgb, var(--dotted) 55%, transparent); stroke-dasharray: 4 3; stroke-width: 1.4; }
+.nv-edge.returns { stroke: color-mix(in srgb, var(--solid) 55%, transparent); stroke-dasharray: 7 5; }
+.nv-arrowhead { fill: color-mix(in srgb, var(--accent) 70%, transparent); }
+.nv-elabel {
+  font-size: 9.5px; font-family: ui-monospace, monospace; letter-spacing: 0.3px;
+  fill: var(--text-muted); pointer-events: auto; cursor: pointer;
+  paint-order: stroke; stroke: var(--surface); stroke-width: 3px;
+}
+.nv-ladder {
+  position: absolute; display: grid; grid-template-rows: 1fr 3px 1fr;
+  justify-items: center; padding: 0 10px; box-sizing: border-box;
+}
+.nv-ladder .tlv3-bridge-row { max-width: 100%; }
+.nv-line {
+  position: relative; width: calc(100% + 20px); margin: 0 -10px; height: 3px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.nv-line::after {
+  content: ""; position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  border-left: 9px solid color-mix(in srgb, var(--accent) 85%, transparent);
+  border-top: 6px solid transparent; border-bottom: 6px solid transparent;
+}
+.tellmap-box.lane-explore { border-style: dashed; border-color: var(--dotted); }
+.tellmap-box.lane-abandoned { border-color: color-mix(in srgb, #e56b6b 70%, transparent); }
+.tellmap-box.lane-abandoned .tellmap-title { text-decoration: line-through; opacity: 0.85; }
+
 /* Inline Story drawer — board details without leaving Story */
 .tlv3-drawer {
   flex-shrink: 0; width: 264px; overflow-y: auto;
