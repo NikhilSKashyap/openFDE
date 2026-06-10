@@ -25,8 +25,13 @@ Scope of v1 (honest):
     immediately. Claude Code is also **cwd-agnostic** (its tool_use carries clean file paths,
     so a session rooted elsewhere is captured when it edits this repo). Codex tool events are
     shell/``apply_patch`` (no clean ``file_path``), so Codex attribution is **dirty-set based**:
-    cwd-matched capture + the work-tree baseline diff + the quiet-window land. Honest, not
+    cwd-matched capture + the work-tree baseline diff. Honest, not
     perfect — a Codex session rooted elsewhere isn't auto-captured in v1.
+  - **Whole episodes over eager commits.** Passive episodes auto-land ONLY on the next
+    prompt boundary in the same session (reliable); otherwise they stay ``reviewing`` and
+    keep accumulating files until the user lands. The quiet-window idle land is opt-in
+    (``PASSIVE_IDLE_AUTOLAND``, default off) — silence cannot distinguish a finished turn
+    from a long tool call, and it split long agent turns twice in production use.
   - **Heuristic file attribution.** A prompt's touched files = the work-tree changes that
     appeared *after* the prompt (baseline diff), attributed to the newest open capture episode.
 """
@@ -544,9 +549,10 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
             # Attribute later work-tree edits to the newest open capture episode.
             if tick % 2 == 0:
                 await _link_changes(root, persistence, baselines, manager, last_change)
-            # Conservative Auto-Land: once a capture episode's files have settled for a
-            # quiet window AND its session's transcript has gone quiet too, commit them
-            # (scoped). Ambiguous sets stay needs_manual_land.
+            # Whole episodes beat eager commits: passive capture lands an episode on
+            # the NEXT prompt boundary (the reliable signal, above) or by manual Land.
+            # The idle quiet-window path is opt-in only (PASSIVE_IDLE_AUTOLAND) — it
+            # split long agent turns twice despite the double-quiet gate.
             if autoland:
                 await _maybe_autoland(root, persistence, manager, last_change, quiet_window,
                                       session_activity)
@@ -604,16 +610,31 @@ async def _land_active_capture(root, persistence, manager, last_change, session_
                 eid, result.get("status"), len(result.get("commits") or []))
 
 
+# Passive idle auto-land is OFF by default: **whole episodes beat eager commits.**
+# Even file-quiet + transcript-quiet misfires on long agent turns — one long tool
+# call (a 5-minute test run, a build, a screenshot wait, an executor-offloaded land)
+# appends NOTHING to the transcript while the agent is very much mid-turn, so
+# silence structurally cannot distinguish "thinking" from "done". CC/Codex
+# transcripts carry no reliable turn-complete marker mid-stream, so passive episodes
+# land on the NEXT prompt boundary in the same session (reliable) or by manual Land —
+# never on silence alone. Flip this constant (or pass allow_idle=True) to opt back in.
+PASSIVE_IDLE_AUTOLAND = False
+
+
 async def _maybe_autoland(root, persistence, manager, last_change, quiet_window,
-                          session_activity=None) -> None:
-    """Idle fallback for the *trailing* episode: land the newest reviewing capture episode once its
-    files have been quiet for ``quiet_window`` seconds **and** its session's transcript has gone
-    quiet too. File-quiet alone can't tell "turn is over" from "agent is thinking" — a long agent
-    turn (edit → minutes of reading/tests → edit) used to split here, landing the first file and
-    orphaning the rest. The transcript keeps appending while the agent works, so transcript-quiet
-    is the missing half of "the turn is actually over". The primary trigger remains the
-    turn-boundary land when the next prompt arrives (``_land_active_capture``); episodes without a
-    tracked session (no ``sessionId``) keep the old file-quiet-only behavior."""
+                          session_activity=None, allow_idle=None) -> None:
+    """OPT-IN idle land for the *trailing* episode — disabled by default
+    (``PASSIVE_IDLE_AUTOLAND``). History: quiet-window-only landing split long agent
+    turns (landed the first settled file, orphaned the rest); adding transcript-quiet
+    helped but still misfired whenever a single long tool call kept the transcript
+    silent past the window. With no reliable mid-stream turn-complete signal, the
+    default policy is to keep the episode ``reviewing`` (files keep accumulating via
+    ``_link_changes``) until the **next prompt boundary** lands it whole, or the user
+    lands manually. When opted in, the old double-quiet gate applies: files quiet for
+    ``quiet_window`` AND the session transcript quiet for the same window."""
+    enabled = PASSIVE_IDLE_AUTOLAND if allow_idle is None else allow_idle
+    if not enabled:
+        return                                  # whole episodes > eager commits
     active = next((e for e in persistence.load_episodes()
                    if e.get("source") == "openfde-capture"
                    and e.get("status") == "reviewing" and (e.get("files") or [])), None)

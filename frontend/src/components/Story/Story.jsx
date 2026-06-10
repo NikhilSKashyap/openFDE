@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { getPromptGraph } from '../../api/backend'
 
 /**
@@ -39,7 +39,11 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
   const [graph, setGraph]     = useState(null)
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState(null)
-  const [tellMode, setTellMode] = useState(false)   // Story Tell: the chronological episode map
+  const [tellMode, setTellMode] = useState(false)   // Story Tell: the merged narrative timeline
+  const [eventsOpen, setEventsOpen] = useState(false) // raw/technical Events layer inside Tell
+  // Inline detail drawer — everything on the board opens HERE, never by yanking the
+  // user to Canvas. Canvas spotlighting stays available as an explicit secondary action.
+  const [detail, setDetail] = useState(null)        // {kind, node?, tick?, branch?}
 
   // Fetch on mount and whenever the episode set changes (a new prompt / a Land).
   // Async IIFE + alive guard so setState only runs inside the async body.
@@ -82,10 +86,25 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
             {lanes.map(l => `${l.items.length} ${l.key}`).join(' · ')}
           </span>
         )}
+        {tellMode && (
+          <button
+            onClick={() => setEventsOpen(v => !v)}
+            title="Raw event-log layer — the technical timeline under the story"
+            style={{
+              padding: '3px 10px', fontSize: 11, fontFamily: 'inherit', fontWeight: 600,
+              cursor: 'pointer', borderRadius: 99,
+              color: eventsOpen ? 'var(--dotted)' : 'var(--text-muted)',
+              background: eventsOpen ? 'rgba(74,158,255,0.10)' : 'transparent',
+              border: `1px solid ${eventsOpen ? 'rgba(74,158,255,0.4)' : 'var(--border)'}`,
+            }}
+          >
+            Events
+          </button>
+        )}
         {concepts.length > 0 && (
           <button
             onClick={() => setTellMode(v => !v)}
-            title={tellMode ? 'Back to the concept columns' : 'Replay the development story as a chronological episode map'}
+            title={tellMode ? 'Back to the concept columns' : 'Replay the build as a narrative timeline — beats on a spine, what happened between them on the bridges'}
             style={{
               display: 'flex', alignItems: 'center', gap: 5, padding: '3px 10px',
               fontSize: 11, fontFamily: 'inherit', fontWeight: 600, cursor: 'pointer',
@@ -110,10 +129,9 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
                       flexShrink: 0, fontSize: 10, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
           <LegendSwatch color="var(--accent)"    label="episode" />
           <LegendSwatch color="var(--accent)"    filled label="now" />
-          <LegendSwatch color="var(--active)"    dashed label="deferred" />
-          <LegendSwatch color="var(--dotted)"    dashed label="watch" />
-          <LegendSwatch color="var(--violation)" label="abandoned" />
-          <span style={{ opacity: 0.7 }}>· left → right by sequence · click a beat to open it</span>
+          <span style={{ opacity: 0.85 }}>↑ watch · deferred · next</span>
+          <span style={{ opacity: 0.85 }}>↓ abandoned</span>
+          <span style={{ opacity: 0.7 }}>· receipts above the arrow, commits & files below · click anything to open it</span>
         </div>
       )}
 
@@ -126,8 +144,17 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
           ideas land in <b>next</b>, and ideas you watch, defer, or drop fill the other lanes.
         </div>
       ) : tellMode ? (
-        <StoryTellMap graph={graph} epById={epById}
-                      onSpotlightEpisode={onSpotlightEpisode} setActiveView={setActiveView} />
+        <div style={{ display: 'flex', flex: 1, minHeight: 0, gap: 10 }}>
+          <StoryTellMap graph={graph} eventsOpen={eventsOpen}
+                        detail={detail} setDetail={setDetail} />
+          {detail && (
+            <StoryDrawer detail={detail} epById={epById}
+                         onClose={() => setDetail(null)}
+                         onSpotlightEpisode={onSpotlightEpisode}
+                         onSpotlightCommit={onSpotlightCommit}
+                         setActiveView={setActiveView} />
+          )}
+        </div>
       ) : (
         <div style={{ display: 'flex', gap: 8, flex: 1, overflow: 'hidden', minHeight: 0 }}>
           {lanes.map(lane => {
@@ -159,79 +186,314 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
   )
 }
 
-// ── Story Tell map — chronological episode boxes ────────────────────────
-// Pure CSS layout (flex), driven entirely by the backend's `graph.storyMap`. We render a
-// bounded set of episode boxes + capped branches — never the (potentially 80+) concept
-// cards — so Tell mode stays light and there is nothing to measure.
-function StoryTellMap({ graph, epById, onSpotlightEpisode, setActiveView }) {
-  const map = graph?.storyMap
-  if (!map || !(map.spine || []).length) {
+// ── Story Timeline v3 — Story and Timeline merged into one narrative surface ──
+// A CSS grid with three rows: lifecycle branches ABOVE (watch / deferred / queued
+// next), the chronological episode spine in the CENTER, abandoned branches BELOW.
+// Between beats, a bridge line carries what actually happened — commits, verify
+// receipts, the PR, the linked issue — as compact clickable ticks. Driven entirely
+// by the backend's `graph.storyTimeline`; pure CSS, nothing measured.
+function StoryTellMap({ graph, eventsOpen, detail, setDetail }) {
+  const tl = graph?.storyTimeline
+  const scrollRef = useRef(null)
+  const spineLen = tl?.spine?.length || 0
+  // The latest beat is the landing point: chronology stays oldest→newest left→right,
+  // and the viewport opens at the right end so "now" is what you see first.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [spineLen])
+  if (!tl || !spineLen) {
     return (
       <div className="tellmap" style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12, lineHeight: 1.5 }}>
         No product episodes yet — prompts that change the product become the story beats here.
       </div>
     )
   }
-  const last = map.spine.length - 1
-  // Open a beat: spotlight its episode on the canvas (detail card + amber files) and take
-  // the user there to see it, since the spotlight surfaces on the whiteboard, not in Story.
-  // Self-sufficient: the storyMap node already carries the episode's identity + files, so a
-  // click works even before the heavier /api/review/episodes payload has populated `epById`.
-  const open = (node) => {
-    const ep = epById[node.episodeId] || {
-      episodeId: node.episodeId, tag: node.tag, title: node.title,
-      summary: node.summary, status: node.status, files: node.files || [], commits: [],
-    }
-    onSpotlightEpisode?.(ep)
-    setActiveView?.('whiteboard')
-  }
-  return (
-    <div className="tellmap">
-      <div className="tellmap-spine">
-        {map.spine.map((n, i) => (
-          <div className="tellmap-col" key={n.episodeId || i}>
-            <div className="tellmap-eprow">
-              <EpisodeBox node={n} isNow={i === last} onClick={() => open(n)} />
-              {i < last && <SpineArrow />}
-            </div>
-            {(n.deferred.length > 0 || n.abandoned.length > 0 || (n.watch || []).length > 0 || n.branchOverflow > 0) && (
-              <div className="tellmap-branches">
-                {n.deferred.map(b => <BranchBox key={b.conceptId} branch={b} kind="deferred" />)}
-                {(n.watch || []).map(b => <BranchBox key={b.conceptId} branch={b} kind="watch" />)}
-                {n.abandoned.map(b => <BranchBox key={b.conceptId} branch={b} kind="abandoned" />)}
-                {n.branchOverflow > 0 && <div className="tellmap-branch-more">+{n.branchOverflow} more</div>}
-              </div>
+  const spine = tl.spine
+  const bridges = tl.bridges || []
+  const last = spine.length - 1
+  const isSel = (kind, key) => detail && detail.kind === kind && detail.key === key
+
+  // grid-auto-flow: column with 3 rows → every triplet of children forms a column.
+  // Episode columns contribute [above, box, below]; bridge columns [gap, line, gap].
+  const cells = []
+  spine.forEach((n, i) => {
+    const ups = n.branchesAbove || []
+    const downs = n.branchesBelow || []
+    cells.push(
+      <div className={'tlv3-above' + (ups.length ? ' has-branches' : '') + (ups.length > 2 ? ' tlv3-cols2' : '')}
+           key={`a${n.episodeId}`}>
+        {ups.map(b => (
+          <TimelineBranch key={b.conceptId} branch={b}
+                          onClick={() => setDetail({ kind: 'branch', key: b.conceptId, branch: b, node: n })} />
+        ))}
+      </div>,
+      <div className="tlv3-mid" key={`m${n.episodeId}`}>
+        <EpisodeBox node={n} isNow={i === last} cont={i > 0} selected={isSel('episode', n.episodeId)}
+                    onClick={() => setDetail({ kind: 'episode', key: n.episodeId, node: n })} />
+      </div>,
+      <div className={'tlv3-below' + (downs.length ? ' has-branches' : '') + (downs.length > 2 ? ' tlv3-cols2' : '')}
+           key={`b${n.episodeId}`}>
+        {downs.map(b => (
+          <TimelineBranch key={b.conceptId} branch={b}
+                          onClick={() => setDetail({ kind: 'branch', key: b.conceptId, branch: b, node: n })} />
+        ))}
+      </div>,
+    )
+    if (i < last) {
+      const bridge = bridges.find(br => br.fromEpisodeId === n.episodeId) || { events: [] }
+      // Evidence ladder: receipts hang ABOVE the spine (verify / PR / issue — the
+      // trust-and-intent layer) and BELOW it (commits / files / raw events — the
+      // what-physically-happened layer), each chip on its own stem. The spine itself
+      // is one uninterrupted thick arrow drawn as a per-bridge underlay segment.
+      const indexed = (bridge.events || []).map((t, j) => ({ t, j }))
+      const evUp = indexed.filter(({ t }) => t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue')
+      const evDown = indexed.filter(({ t }) => !(t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue'))
+      const receipt = ({ t, j }, dir) => (
+        <span className={`tlv3-receipt ${dir}`} key={j}>
+          {dir === 'down' && <span className="tlv3-stem" />}
+          <BridgeTick tick={t} selected={isSel(t.kind, `${n.episodeId}:${j}`)}
+                      onClick={() => setDetail({ kind: t.kind, key: `${n.episodeId}:${j}`, tick: t, node: n })} />
+          {dir === 'up' && <span className="tlv3-stem" />}
+        </span>
+      )
+      cells.push(
+        <div className="tlv3-above" key={`ba${n.episodeId}`} />,
+        <div className="tlv3-bridge" key={`bm${n.episodeId}`}>
+          <div className="tlv3-bridge-row up">{evUp.map(e => receipt(e, 'up'))}</div>
+          <div className="tlv3-bridge-gap" />
+          <div className="tlv3-bridge-row down">
+            {evDown.map(e => receipt(e, 'down'))}
+            {bridge.overflow > 0 && (
+              <span className="tlv3-receipt down">
+                <span className="tlv3-stem" style={{ visibility: 'hidden' }} />
+                <span className="tlv3-tick more" title="more raw events on this stretch — the Events layer has them all">+{bridge.overflow}</span>
+              </span>
             )}
           </div>
-        ))}
+        </div>,
+        <div className="tlv3-below" key={`bb${n.episodeId}`} />,
+      )
+    }
+  })
+
+  return (
+    <div className="tellmap">
+      <div className="tlv3-scroll" ref={scrollRef}>
+        <div className="tlv3-grid">{cells}</div>
       </div>
 
-      {(map.parked || []).length > 0 && (
-        <div className="tellmap-parked">
-          <div className="tellmap-parked-label">Parked · source prompt unknown</div>
-          <div className="tellmap-parked-row">
-            {map.parked.map(b => (
-              <BranchBox key={b.conceptId} branch={b} parked
-                         kind={b.lifecycle === 'watch' ? 'watch'
-                           : b.status === 'abandoned' ? 'abandoned' : 'deferred'} />
-            ))}
-            {map.parkedOverflow > 0 && <div className="tellmap-branch-more">+{map.parkedOverflow} more</div>}
-          </div>
-        </div>
-      )}
-
-      {map.hiddenOps > 0 && (
-        <div className="tellmap-ops-note">
-          +{map.hiddenOps} operational/meta {map.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
+      {/* Events — the raw/technical timeline layer under the narrative. The
+          operational-episodes note lives HERE (it's meta, not story) so the
+          default board is nothing but the centered spine. */}
+      {eventsOpen && (
+        <div className="tlv3-events">
+          {tl.hiddenOps > 0 && (
+            <div className="tellmap-ops-note" style={{ marginTop: 0, marginBottom: 6 }}>
+              +{tl.hiddenOps} operational/meta {tl.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
+            </div>
+          )}
+          <div className="tlv3-events-head">Raw events · most recent {Math.min((tl.rawEvents || []).length, 60)}</div>
+          {(tl.rawEvents || []).slice().reverse().map((ev, i) => (
+            <div className="tlv3-event-row" key={i} title={ev.detail || ev.label}>
+              <span className="tlv3-event-time">{(ev.timestamp || '').slice(11, 19) || '—'}</span>
+              <span className="tlv3-event-type">{ev.type || 'event'}</span>
+              <span className="tlv3-event-label">{ev.label}</span>
+            </div>
+          ))}
+          {!(tl.rawEvents || []).length && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic', padding: '4px 2px' }}>
+              no raw events yet
+            </div>
+          )}
         </div>
       )}
     </div>
   )
 }
 
-function EpisodeBox({ node, isNow, onClick }) {
+// One bridge tick — a compact badge for something that happened between beats.
+// commit → opens the commit spotlight; pr/issue → opens GitHub; rest → tooltip.
+const TICK_KIND = {
+  commit: { color: 'var(--solid)' },
+  verify: { color: 'var(--solid)' },
+  pr:     { color: 'var(--accent)' },
+  issue:  { color: 'var(--accent)' },
+  files:  { color: 'var(--text-muted)' },
+  event:  { color: 'var(--dotted)' },
+}
+function BridgeTick({ tick, selected, onClick }) {
+  const failed = tick.kind === 'verify' && tick.status !== 'passed' && tick.status !== 'skipped'
+  const color = failed ? 'var(--violation)' : (TICK_KIND[tick.kind] || TICK_KIND.event).color
   return (
-    <div className={'tellmap-box' + (isNow ? ' now' : '')} onClick={onClick}
+    <span
+      className={'tlv3-tick clickable' + (selected ? ' selected' : '')}
+      style={{ color, borderColor: `color-mix(in srgb, ${color} 45%, transparent)` }}
+      title={tick.detail ? `${tick.label} — ${tick.detail}` : tick.label}
+      onClick={onClick}
+    >
+      {tick.label}
+    </span>
+  )
+}
+
+// A lifecycle branch above/below a beat, with its little connector stem.
+function TimelineBranch({ branch, onClick }) {
+  const kind = branch.lifecycle === 'abandoned' ? 'abandoned'
+    : branch.lifecycle === 'watch' ? 'watch'
+      : branch.lifecycle === 'next' ? 'next' : 'deferred'
+  const kindLabel = kind === 'abandoned' ? '✕ dropped' : kind
+  return (
+    <div className={`tellmap-branch tlv3-branch ${kind}`} onClick={onClick}
+         style={{ cursor: 'pointer' }}
+         title={branch.trigger ? `${branch.title} — revisit ${branch.trigger}` : branch.title}>
+      <span className="tellmap-branch-kind">{kindLabel}</span>
+      <span className="tellmap-branch-title">{branch.title}</span>
+    </div>
+  )
+}
+
+// ── Inline Story drawer — details open IN the board, never by switching views ──
+// Canvas spotlighting (amber files / commit impact) remains available as explicit
+// "→ canvas" secondary actions; the default click keeps the user in the story.
+function StoryDrawer({ detail, epById, onClose, onSpotlightEpisode, onSpotlightCommit, setActiveView }) {
+  const node = detail.node || {}
+  const ep = epById[node.episodeId]            // enriched episode (commits w/ titles) when loaded
+  const showOnCanvas = () => {
+    onSpotlightEpisode?.(ep || {
+      episodeId: node.episodeId, tag: node.tag, title: node.title,
+      summary: node.summary, status: node.status, files: node.files || [], commits: [],
+    })
+    setActiveView?.('whiteboard')
+  }
+
+  const head = (label) => (
+    <div className="tlv3-drawer-head">
+      <span className="tlv3-drawer-kind">{label}</span>
+      <span style={{ flex: 1 }} />
+      <button className="tlv3-drawer-close" onClick={onClose} title="Close">✕</button>
+    </div>
+  )
+  const row = (k, v) => v ? (
+    <div className="tlv3-drawer-row"><span className="tlv3-drawer-k">{k}</span><span className="tlv3-drawer-v">{v}</span></div>
+  ) : null
+  const canvasBtn = (label, fn) => (
+    <button className="tlv3-drawer-action" onClick={fn}>{label}</button>
+  )
+
+  let body
+  if (detail.kind === 'episode') {
+    const commits = (ep?.commits || [])
+    body = (
+      <>
+        {head(`${node.tag} · episode`)}
+        <div className="tlv3-drawer-title">{node.title}</div>
+        {node.summary && <div className="tlv3-drawer-summary">{node.summary}</div>}
+        {row('status', node.status)}
+        {node.verify && row('verification',
+          `${node.verify.status}${(node.verify.checks || []).length ? ' — ' + node.verify.checks.map(c => `${c.label} ${c.status === 'passed' ? '✓' : '✕'}`).join(' · ') : ''}`)}
+        {node.pr && row('pull request', <a href={node.pr.url} target="_blank" rel="noreferrer">PR #{node.pr.number} ↗</a>)}
+        {node.issue && row('issue', <a href={node.issue.url} target="_blank" rel="noreferrer">#{node.issue.number} ↗</a>)}
+        {commits.length > 0 && (
+          <div className="tlv3-drawer-section">
+            <div className="tlv3-drawer-k">commits</div>
+            {commits.slice(0, 8).map(c => (
+              <div key={c.sha} className="tlv3-drawer-row">
+                <span className="tlv3-mono">{c.shortSha}</span>
+                <span className="tlv3-drawer-v">{c.displayTitle || c.summary || ''}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {(node.files || []).length > 0 && (
+          <div className="tlv3-drawer-section">
+            <div className="tlv3-drawer-k">{node.fileCount} file{node.fileCount === 1 ? '' : 's'}</div>
+            {(node.files || []).slice(0, 10).map(f => (
+              <div key={f} className="tlv3-drawer-file">{f}</div>
+            ))}
+          </div>
+        )}
+        {canvasBtn('Show files on canvas →', showOnCanvas)}
+      </>
+    )
+  } else if (detail.kind === 'commit') {
+    body = (
+      <>
+        {head('commit')}
+        <div className="tlv3-drawer-title tlv3-mono">{(detail.tick.sha || '').slice(0, 12)}</div>
+        {detail.tick.detail && <div className="tlv3-drawer-summary">{detail.tick.detail}</div>}
+        {row('episode', `${node.tag} · ${node.title}`)}
+        {canvasBtn('Open impact on canvas →', () => { onSpotlightCommit?.(detail.tick.sha) })}
+      </>
+    )
+  } else if (detail.kind === 'pr' || detail.kind === 'issue') {
+    body = (
+      <>
+        {head(detail.kind === 'pr' ? 'pull request' : 'issue')}
+        <div className="tlv3-drawer-title">{detail.tick.label}</div>
+        {detail.tick.detail && <div className="tlv3-drawer-summary">{detail.tick.detail}</div>}
+        {row('episode', `${node.tag} · ${node.title}`)}
+        {detail.tick.url && row('link', <a href={detail.tick.url} target="_blank" rel="noreferrer">open on GitHub ↗</a>)}
+      </>
+    )
+  } else if (detail.kind === 'verify') {
+    const checks = node.verify?.checks || []
+    body = (
+      <>
+        {head('verification')}
+        <div className="tlv3-drawer-title">{node.verify?.status || detail.tick.status || '—'}</div>
+        {checks.map(c => (
+          <div key={c.id} className="tlv3-drawer-row">
+            <span style={{ color: c.status === 'passed' ? 'var(--solid)' : 'var(--violation)', fontWeight: 700 }}>
+              {c.status === 'passed' ? '✓' : '✕'}
+            </span>
+            <span className="tlv3-drawer-v">{c.label} — {c.summary || c.status}</span>
+          </div>
+        ))}
+        {!checks.length && detail.tick?.detail && <div className="tlv3-drawer-summary">{detail.tick.detail}</div>}
+        {row('episode', `${node.tag} · ${node.title}`)}
+      </>
+    )
+  } else if (detail.kind === 'files') {
+    body = (
+      <>
+        {head('files')}
+        <div className="tlv3-drawer-title">{node.fileCount} file{node.fileCount === 1 ? '' : 's'} in {node.tag}</div>
+        {(node.files || []).slice(0, 14).map(f => (
+          <div key={f} className="tlv3-drawer-file">{f}</div>
+        ))}
+        {canvasBtn('Show files on canvas →', showOnCanvas)}
+      </>
+    )
+  } else if (detail.kind === 'branch') {
+    const b = detail.branch
+    body = (
+      <>
+        {head(b.lifecycle)}
+        <div className="tlv3-drawer-title">{b.title}</div>
+        {b.trigger && row('revisit', b.trigger)}
+        {row('from beat', `${node.tag} · ${node.title}`)}
+      </>
+    )
+  } else {                                       // raw event tick
+    body = (
+      <>
+        {head('event')}
+        <div className="tlv3-drawer-title">{detail.tick?.label}</div>
+        {detail.tick?.detail && <div className="tlv3-drawer-summary">{detail.tick.detail}</div>}
+        {row('type', detail.tick?.type)}
+        {row('at', (detail.tick?.timestamp || '').slice(11, 19))}
+      </>
+    )
+  }
+
+  return <div className="tlv3-drawer">{body}</div>
+}
+
+function EpisodeBox({ node, isNow, cont, selected, onClick }) {
+  return (
+    <div className={'tellmap-box' + (isNow ? ' now' : '') + (selected ? ' selected' : '') + (cont ? ' cont' : '')}
+         onClick={onClick}
          title={`${node.tag} · ${node.title}`}>
       <div className="tellmap-box-head">
         <span className="tellmap-tag">{node.tag}</span>
@@ -245,31 +507,6 @@ function EpisodeBox({ node, isNow, onClick }) {
         {node.conceptCount > 0 && <span className="tellmap-chip" title={`${node.conceptCount} concept(s)`}>◆ {node.conceptCount}</span>}
       </div>
     </div>
-  )
-}
-
-function BranchBox({ branch, kind, parked }) {
-  const kindLabel = kind === 'abandoned' ? '✕ dropped' : kind === 'watch' ? 'watch' : 'deferred'
-  return (
-    <div className={`tellmap-branch ${kind}${parked ? ' parked' : ''}`}
-         title={branch.trigger ? `${branch.title} — revisit ${branch.trigger}` : branch.title}>
-      <span className="tellmap-branch-kind">
-        {kindLabel}
-        {parked && branch.fromTag ? ` · ${branch.fromTag}` : ''}
-      </span>
-      <span className="tellmap-branch-title">{branch.title}</span>
-    </div>
-  )
-}
-
-function SpineArrow() {
-  return (
-    <span className="tellmap-arrow" aria-hidden="true">
-      <svg width="30" height="12" viewBox="0 0 30 12">
-        <line x1="2" y1="6" x2="22" y2="6" stroke="var(--accent)" strokeWidth="1.6" opacity="0.7" />
-        <path d="M22,2 L28,6 L22,10 z" fill="var(--accent)" opacity="0.85" />
-      </svg>
-    </span>
   )
 }
 

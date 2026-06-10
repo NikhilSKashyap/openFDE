@@ -326,5 +326,158 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(by_title["Older Feature"]["lifecycle"], "next")
 
 
+class StoryTimelineTest(unittest.TestCase):
+    """Story Timeline v3 — the merged Story+Timeline structure (`storyTimeline`)."""
+
+    def _rich_ep(self, eid, seq, title, **over):
+        base = _ep(eid, seq, title)
+        base["createdAt"] = f"2026-06-09T0{seq}:00:00+00:00"
+        base["updatedAt"] = f"2026-06-09T0{seq}:30:00+00:00"
+        base.update(over)
+        return base
+
+    def test_spine_is_chronological_and_ops_excluded(self):
+        g = build_prompt_graph([
+            self._rich_ep("e3", 3, "Land As PR"),
+            self._rich_ep("e1", 1, "Verify Gate"),
+            {**self._rich_ep("e2", 2, "curl status"), "signal": "operational"},
+        ])
+        tl = g["storyTimeline"]
+        self.assertEqual([n["tag"] for n in tl["spine"]], ["P1", "P3"])
+        self.assertEqual(tl["hiddenOps"], 1)
+        self.assertEqual(len(tl["bridges"]), 1)               # N-1 bridges
+
+    def test_branches_split_above_and_below(self):
+        g = build_prompt_graph([
+            self._rich_ep("e1", 1, "Shipping Panel",
+                          prompt=("Watch: heatmap view someday maybe.\n"
+                                  "Deferred: PR state sync until webhooks land.\n"
+                                  "Next: auto ship mode.\n"
+                                  "Remove the global clean-tree rule.")),
+        ])
+        node = g["storyTimeline"]["spine"][0]
+        ups = {b["lifecycle"] for b in node["branchesAbove"]}
+        downs = {b["lifecycle"] for b in node["branchesBelow"]}
+        self.assertIn("deferred", ups)
+        self.assertIn("next", ups)                            # explicitly queued → above
+        self.assertEqual(downs, {"abandoned"})                # dropped → below
+        up_titles = " ".join(b["title"] for b in node["branchesAbove"]).lower()
+        self.assertIn("auto ship mode", up_titles)
+
+    def test_bridge_carries_commit_verify_pr_issue_and_files(self):
+        sha = "c" * 40
+        a = self._rich_ep("e1", 1, "Verify Gate",
+                          files=["openfde/verify.py"], commitShas=[sha],
+                          commitMeta={sha: {"title": "Gate Receipts"}},
+                          verify={"status": "failed", "ranAt": "2026-06-09T01:10:00+00:00",
+                                  "checks": [
+                                      {"id": "unit-tests", "label": "Unit tests",
+                                       "status": "passed", "summary": "OK"},
+                                      {"id": "frontend-lint", "label": "Frontend lint",
+                                       "status": "failed", "summary": "2 problems"}]},
+                          pr={"number": 7, "url": "https://github.com/a/r/pull/7",
+                              "state": "OPEN", "createdAt": "2026-06-09T01:20:00+00:00"},
+                          intentSource={"provider": "github", "issueNumber": 42,
+                                        "url": "https://github.com/a/r/issues/42"})
+        b = self._rich_ep("e2", 2, "Land As PR")
+        g = build_prompt_graph([b, a])
+        bridge = g["storyTimeline"]["bridges"][0]
+        self.assertEqual(bridge["fromEpisodeId"], "e1")
+        by_kind = {}
+        for t in bridge["events"]:
+            by_kind.setdefault(t["kind"], []).append(t)
+        self.assertEqual(by_kind["commit"][0]["label"], f"commit {sha[:7]}")
+        self.assertEqual(by_kind["commit"][0]["detail"], "Gate Receipts")
+        verify_labels = {t["label"] for t in by_kind["verify"]}
+        self.assertIn("tests ✓", verify_labels)               # pass + fail both tick
+        self.assertIn("lint ✕", verify_labels)
+        self.assertEqual(by_kind["pr"][0]["label"], "PR #7")
+        self.assertEqual(by_kind["pr"][0]["url"], "https://github.com/a/r/pull/7")
+        self.assertEqual(by_kind["issue"][0]["label"], "issue #42")
+        self.assertEqual(by_kind["files"][0]["label"], "1 file")   # everything displays
+        self.assertEqual(bridge["overflow"], 0)
+        # spine node carries the lite verify/pr/issue too
+        n = g["storyTimeline"]["spine"][0]
+        self.assertEqual(n["pr"]["number"], 7)
+        self.assertEqual(n["issue"]["number"], 42)
+        self.assertEqual(n["verify"]["status"], "failed")
+
+    def test_raw_events_bucket_between_beats(self):
+        a = self._rich_ep("e1", 1, "First")
+        b = self._rich_ep("e2", 2, "Second")
+        events = [
+            {"type": "task_moved", "payload": {"title": "Card to Done"},
+             "timestamp": "2026-06-09T01:45:00+00:00"},          # between e1 and e2
+            {"type": "task_moved", "payload": {"title": "Too late"},
+             "timestamp": "2026-06-09T09:00:00+00:00"},          # after e2 → no bridge
+            {"type": "commit_created", "payload": {"shortSha": "abc"},
+             "timestamp": "2026-06-09T01:50:00+00:00"},          # derived elsewhere → skipped
+        ]
+        g = build_prompt_graph([b, a], events=events)
+        bridge = g["storyTimeline"]["bridges"][0]
+        labels = [t["label"] for t in bridge["events"]]
+        self.assertIn("Card to Done", labels)
+        self.assertNotIn("Too late", labels)
+        self.assertFalse(any(t.get("type") == "commit_created" for t in bridge["events"]))
+        self.assertEqual(len(g["storyTimeline"]["rawEvents"]), 3)   # Events layer keeps all
+
+    def test_none_createdat_skips_bucketing_but_keeps_derived_ticks(self):
+        sha = "d" * 40
+        a = self._rich_ep("e1", 1, "Reconstructed", commitShas=[sha])
+        a["createdAt"] = None                                   # recovered episodes can lack it
+        b = self._rich_ep("e2", 2, "Next Beat")
+        events = [{"type": "task_moved", "payload": {"title": "X"},
+                   "timestamp": "2026-06-09T01:45:00+00:00"}]
+        g = build_prompt_graph([b, a], events=events)
+        bridge = g["storyTimeline"]["bridges"][0]
+        kinds = {t["kind"] for t in bridge["events"]}
+        self.assertIn("commit", kinds)                          # derived ticks survive
+        self.assertNotIn("event", kinds)                        # bucketing safely skipped
+
+    def test_derived_evidence_is_never_trimmed(self):
+        # Product rule: the storyline displays EVERYTHING — all 9 commits AND the
+        # files tick render (the old cap would have trimmed to 5); only bucketed
+        # raw event-log items are capped (the Events layer holds their tail).
+        shas = [f"{i:040x}" for i in range(9)]
+        a = self._rich_ep("e1", 1, "Busy", commitShas=shas, files=["x.py", "y.py"])
+        b = self._rich_ep("e2", 2, "After")
+        g = build_prompt_graph([b, a])
+        bridge = g["storyTimeline"]["bridges"][0]
+        self.assertEqual(len([t for t in bridge["events"] if t["kind"] == "commit"]), 9)
+        kinds = [t["kind"] for t in bridge["events"]]
+        self.assertIn("files", kinds)                           # nothing trimmed away
+        self.assertEqual(len(bridge["events"]), 10)             # 9 commits + files
+        self.assertEqual(bridge["overflow"], 0)
+
+    def test_branches_are_never_capped(self):
+        prompt = "\n".join(f"Deferred: parked idea number {i} here." for i in range(6))
+        g = build_prompt_graph([self._rich_ep("e1", 1, "Busy Beat", prompt=prompt)])
+        node = g["storyTimeline"]["spine"][0]
+        self.assertGreaterEqual(len(node["branchesAbove"]), 3)  # signal-cap only, no UI cap
+        self.assertEqual(node["branchOverflow"], 0)             # nothing hidden behind "+N"
+
+    def test_receipts_lead_the_bridge(self):
+        # The cap trims from the tail — verify/PR must survive a many-commit episode.
+        shas = [f"{i:040x}" for i in range(8)]
+        a = self._rich_ep("e1", 1, "Busy", commitShas=shas,
+                          verify={"status": "passed", "checks": [
+                              {"id": "unit-tests", "label": "Unit tests",
+                               "status": "passed", "summary": "OK"}]},
+                          pr={"number": 9, "url": "https://github.com/a/r/pull/9",
+                              "state": "OPEN"})
+        b = self._rich_ep("e2", 2, "After")
+        g = build_prompt_graph([b, a])
+        kinds = [t["kind"] for t in g["storyTimeline"]["bridges"][0]["events"]]
+        self.assertEqual(kinds[0], "verify")
+        self.assertEqual(kinds[1], "pr")
+        self.assertIn("commit", kinds[2:])
+
+    def test_empty_graph_safe(self):
+        tl = build_prompt_graph([])["storyTimeline"]
+        self.assertEqual(tl["spine"], [])
+        self.assertEqual(tl["bridges"], [])
+        self.assertEqual(tl["rawEvents"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

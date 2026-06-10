@@ -291,21 +291,24 @@ _KIND_STATUS = {"next": "active", "watch": "deferred"}
 _KIND_EDGE = {"abandoned": "drops", "deferred": "defers", "next": "queues", "watch": "watches"}
 
 
-def build_prompt_graph(episodes: list) -> dict:
+def build_prompt_graph(episodes: list, events: list = None) -> dict:
     """Derive the prompt story graph from enriched episodes.
 
     Args:
         episodes: list[dict] — episodes (newest-first) with sequence/tag/title/
             summary/prompt/status/files/commitShas (and optionally enriched commits).
+        events: optional list[dict] — recent event-log items ({type, payload,
+            timestamp}); when given, the storyTimeline buckets them onto bridges
+            and exposes a rawEvents tail (the Events layer).
 
     Returns:
-        dict — {ok, concepts[], episodes[], edges[], counts, lifecycleCounts, storyMap}.
-            Each concept carries the broad ``status`` (active/mixed/deferred/abandoned —
-            unchanged contract) plus a ``lifecycle`` lane for the UI: ``now`` (tied to
-            the latest product episode) / ``next`` (committed, queued) / ``watch``
-            (interesting, not committed) / ``deferred`` (parked, optional revisit
-            ``trigger``) / ``abandoned``. Ordered now → … → abandoned, newest prompt
-            first within a lane.
+        dict — {ok, concepts[], episodes[], edges[], counts, lifecycleCounts, storyMap,
+            storyTimeline}. Each concept carries the broad ``status`` (active/mixed/
+            deferred/abandoned — unchanged contract) plus a ``lifecycle`` lane for the
+            UI: ``now`` (tied to the latest product episode) / ``next`` (committed,
+            queued) / ``watch`` (interesting, not committed) / ``deferred`` (parked,
+            optional revisit ``trigger``) / ``abandoned``. Ordered now → … → abandoned,
+            newest prompt first within a lane.
     """
     episodes = episodes or []
     concepts: dict = {}
@@ -419,7 +422,8 @@ def build_prompt_graph(episodes: list) -> dict:
 
     return {"ok": True, "concepts": ordered, "episodes": ep_lite,
             "edges": edges, "counts": counts, "lifecycleCounts": life_counts,
-            "storyMap": build_story_map(episodes, ordered)}
+            "storyMap": build_story_map(episodes, ordered),
+            "storyTimeline": build_story_timeline(episodes, ordered, edges, events)}
 
 
 def build_story_map(episodes: list, concepts: list) -> dict:
@@ -508,3 +512,181 @@ def build_story_map(episodes: list, concepts: list) -> dict:
 
     return {"spine": spine, "parked": parked[:_MAX_PARKED],
             "parkedOverflow": max(0, len(parked) - _MAX_PARKED), "hiddenOps": hidden_ops}
+
+
+# ── Story Timeline v3 — Story and Timeline as ONE narrative surface ──────────
+# The spine is the chronological center: product episodes as boxes. Lifecycle
+# branches hang above (watch / deferred / queued-next) and below (abandoned).
+# BETWEEN boxes, a bridge carries what actually happened after a beat landed —
+# commits, verify receipts, the PR, the linked issue, file scope — as compact
+# ticks, with raw event-log items bucketed in when their timestamps fit. All
+# derived, deterministic, capped; no persistence, no measurement.
+
+_MAX_BRIDGE_TICKS = 5            # 3–5 meaningful ticks per bridge; receipts lead
+_MAX_RAW_EVENTS = 60
+_TICK_SHORT = {"unit-tests": "tests", "frontend-lint": "lint"}
+# Raw event types that duplicate derived ticks (commits come from commitShas).
+_RAW_SKIP = {"commit_created"}
+
+
+def _ts(value):
+    """ISO timestamp → datetime for ordering; None when absent/unparseable."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _verify_ticks(ep: dict) -> list:
+    v = ep.get("verify") or {}
+    ts = v.get("ranAt")
+    out = []
+    for c in (v.get("checks") or []):
+        name = _TICK_SHORT.get(c.get("id"), (c.get("id") or "check"))
+        ok = c.get("status") == "passed"
+        out.append({"kind": "verify", "label": f"{name} {'✓' if ok else '✕'}",
+                    "status": c.get("status") or "", "timestamp": ts,
+                    "detail": c.get("summary") or ""})
+    if not out and v.get("status") == "skipped":
+        out.append({"kind": "verify", "label": "no checks", "status": "skipped",
+                    "timestamp": ts, "detail": v.get("note") or ""})
+    return out
+
+
+def _episode_ticks(ep: dict) -> list:
+    """The derived bridge ticks for what a landed beat produced — ordered by how much
+    story each tick tells (the cap trims from the tail): verify receipts first, then
+    the PR, then commits, the linked issue, and the file scope."""
+    ticks = _verify_ticks(ep)
+    pr = ep.get("pr") or {}
+    if pr.get("number") is not None:
+        ticks.append({"kind": "pr", "label": f"PR #{pr['number']}", "url": pr.get("url") or "",
+                      "timestamp": pr.get("createdAt"), "detail": pr.get("title") or ""})
+    meta = ep.get("commitMeta") or {}
+    when = ep.get("updatedAt")
+    for sha in (ep.get("commitShas") or []):
+        if not sha:
+            continue
+        ticks.append({"kind": "commit", "label": f"commit {sha[:7]}", "sha": sha,
+                      "timestamp": when, "detail": (meta.get(sha) or {}).get("title") or ""})
+    src = ep.get("intentSource") or {}
+    if src.get("provider") == "github" and src.get("issueNumber") is not None:
+        ticks.append({"kind": "issue", "label": f"issue #{src['issueNumber']}",
+                      "url": src.get("url") or "", "timestamp": ep.get("createdAt"),
+                      "detail": src.get("title") or ""})
+    nfiles = len(ep.get("files") or [])
+    if nfiles:
+        ticks.append({"kind": "files", "label": f"{nfiles} file{'s' if nfiles != 1 else ''}",
+                      "timestamp": when, "detail": ", ".join((ep.get("files") or [])[:6])})
+    return ticks
+
+
+def _event_tick(ev: dict) -> dict:
+    payload = ev.get("payload") or {}
+    label = (payload.get("title") or payload.get("summary")
+             or (ev.get("type") or "event").replace("_", " "))
+    return {"kind": "event", "type": ev.get("type") or "", "label": str(label)[:40],
+            "timestamp": ev.get("timestamp"), "detail": str(payload.get("detail") or "")[:120]}
+
+
+def build_story_timeline(episodes: list, concepts: list, edges: list = None,
+                         events: list = None) -> dict:
+    """The merged Story+Timeline structure (v3): chronological spine + bridges.
+
+    Product (non-operational) episodes form the center spine ordered by sequence.
+    Lifecycle branches split by direction: **above** = watch / deferred / explicitly
+    queued next (the "queues" edge — older actives are not branches, they ARE other
+    beats); **below** = abandoned. Each consecutive pair gets a **bridge** whose
+    ticks are derived from the EARLIER episode's own evidence (its commits, verify
+    receipts, PR, linked issue, file scope) plus raw event-log items whose
+    timestamps fall between the two beats (skipped when either beat lacks a usable
+    timestamp — reconstructed episodes may have ``createdAt: None``). Everything is
+    capped; ``rawEvents`` carries the recent tail for the Events layer.
+
+    Returns:
+        dict — {spine[], bridges[], rawEvents[], hiddenOps}.
+    """
+    episodes = episodes or []
+    concepts = concepts or []
+    spine_eps = sorted((e for e in episodes if not is_operational_episode(e)),
+                       key=lambda e: e.get("sequence") or 0)
+    hidden_ops = sum(1 for e in episodes if is_operational_episode(e))
+    seq_of = {e.get("episodeId"): (e.get("sequence") or 0) for e in spine_eps}
+    queued = {e.get("to") for e in (edges or []) if e.get("label") == "queues"}
+
+    def _branch(c):
+        return {"conceptId": c.get("id"), "title": c.get("title") or "",
+                "lifecycle": c.get("lifecycle") or c.get("status") or "",
+                "trigger": c.get("trigger") or None}
+
+    above: dict = {}
+    below: dict = {}
+    for c in concepts:
+        life = c.get("lifecycle") or c.get("status")
+        if life in ("watch", "deferred") or (life == "next" and c.get("id") in queued):
+            bucket = above
+        elif life == "abandoned" or c.get("status") == "abandoned":
+            bucket = below
+        else:
+            continue
+        on_spine = [eid for eid in (c.get("episodeIds") or []) if eid in seq_of]
+        if on_spine:
+            host = max(on_spine, key=lambda eid: seq_of[eid])
+            bucket.setdefault(host, []).append(_branch(c))
+
+    spine = []
+    for e in spine_eps:
+        eid = e.get("episodeId")
+        # The storyline shows EVERYTHING at every beat (product rule — no "+N more"
+        # hiding decisions); the frontend's multi-column branch layout absorbs density.
+        ups = above.get(eid) or []
+        downs = below.get(eid) or []
+        overflow = 0
+        v = e.get("verify") or {}
+        pr = e.get("pr") or {}
+        src = e.get("intentSource") or {}
+        files = list(e.get("files") or [])
+        spine.append({
+            "episodeId": eid, "tag": e.get("tag") or "", "title": e.get("title") or "",
+            "summary": e.get("summary") or "", "sequence": e.get("sequence") or 0,
+            "createdAt": e.get("createdAt"), "updatedAt": e.get("updatedAt"),
+            "status": e.get("status") or "",
+            "files": files[:20], "fileCount": len(files),
+            "commitCount": len(e.get("commitShas") or []),
+            "verify": ({"status": v.get("status"),
+                        "checks": [{"id": c.get("id"), "label": c.get("label"),
+                                    "status": c.get("status"), "summary": c.get("summary")}
+                                   for c in (v.get("checks") or [])]} if v else None),
+            "pr": ({"number": pr.get("number"), "url": pr.get("url"),
+                    "state": pr.get("state")} if pr.get("number") is not None else None),
+            "issue": ({"number": src.get("issueNumber"), "url": src.get("url")}
+                      if src.get("provider") == "github" and src.get("issueNumber") is not None
+                      else None),
+            "branchesAbove": ups, "branchesBelow": downs, "branchOverflow": overflow,
+        })
+
+    events = [e for e in (events or []) if isinstance(e, dict)]
+    bridges = []
+    for a, b in zip(spine_eps, spine_eps[1:]):
+        # DERIVED evidence is never trimmed (display everything); only the bucketed
+        # raw event-log items are capped — the Events layer holds their full tail.
+        ticks = _episode_ticks(a)
+        raw_here = []
+        t_a, t_b = _ts(a.get("createdAt")), _ts(b.get("createdAt"))
+        if t_a and t_b:
+            for ev in events:
+                if ev.get("type") in _RAW_SKIP:
+                    continue
+                t = _ts(ev.get("timestamp"))
+                if t and t_a < t <= t_b:
+                    raw_here.append(_event_tick(ev))
+        bridges.append({"fromEpisodeId": a.get("episodeId"), "toEpisodeId": b.get("episodeId"),
+                        "events": ticks + raw_here[:_MAX_BRIDGE_TICKS],
+                        "overflow": max(0, len(raw_here) - _MAX_BRIDGE_TICKS)})
+
+    raw_tail = [_event_tick(ev) for ev in events[-_MAX_RAW_EVENTS:]]
+    return {"spine": spine, "bridges": bridges, "rawEvents": raw_tail,
+            "hiddenOps": hidden_ops}

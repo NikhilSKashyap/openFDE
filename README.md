@@ -129,6 +129,31 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
   `intentSource` so commits trace back to the ticket. Issues never enter the
   Story until an episode actually lands work. v1 rides the local `gh` CLI — no
   OAuth, no webhooks.
+- **Verify Gate — receipts before landing.** Before OpenFDE lands an episode it
+  runs the repo's local checks (auto-discovered: `unittest` when `tests/`
+  exists, `npm run lint` when the frontend defines it — or an explicit
+  `.openfde/verify.json`) and stores the evidence on the episode: command,
+  status, one-line summary, output tail, timing. **A failed required check
+  blocks auto-land**; an explicit user Land stays the escape hatch with the
+  failure recorded. No checks configured → explicit *skipped* evidence, never
+  silent success. Evidence shows as per-check rows on the episode card and as
+  `tests ✓ / lint ✓ / verify failed` badges on OpenPM cards.
+- **Ready to ship — a deterministic PR verdict.** Every episode carries a
+  readiness verdict computed from evidence and policy, never LLM judgment:
+  **ready** (landed commits, episode files clean, checks passed, commit not
+  already on the remote base, `gh` present — each shown as a ✓ receipt),
+  **blocked** (each blocker named, with its next action — unrelated in-progress
+  files don't block: a PR branches from the landed commit), or **created**
+  (the PR link). The episode card shows the verdict as a shipping panel; the
+  **Create Pull Request** button is enabled only when the gate says ready.
+- **Land as PR — the PR description is the episode's story.** One click turns a
+  landed episode into a branch (`openfde/p42-slug`) and a GitHub pull request
+  whose body is the captured story: summary, linked issue, commits with their
+  titles, changed files, and the Verify Gate receipts. Idempotent, guarded
+  against no-diff PRs (commits already on the base are refused), local `gh`
+  only. PR creation is **manual today**; a Claude-Code-style **Manual / Auto
+  ship toggle** is the next step — in Auto, the same deterministic gate ships
+  the PR the moment an episode becomes ready.
 
 ## Status
 
@@ -139,5 +164,12 @@ for Senior Dev**, with coding activity **streamed live on the canvas** and a
 end-to-end: select scope, describe intent, and the council implements, verifies
 against the real diff, and commits — within the boundaries you draw. Beyond
 execution, OpenFDE keeps a **development memory**: prompts are captured as
-episodes from the council, OpenFDE wrappers, or passive Claude Code capture,
-auto-committed with attributed scope, and replayable as a visual **Story**.
+episodes from the council, OpenFDE wrappers, or passive Claude Code/Codex
+capture, auto-committed with attributed scope, and replayable as a visual
+**Story**. The delivery chain now closes the loop end-to-end — *issue → prompt
+episode → verification receipts → clustered commits → ready-to-ship verdict →
+pull request whose description is the story* — dogfooded on this repository
+(its first PRs were created by OpenFDE, from episodes, through that exact
+chain). Hardened by use: atomic single-writer persistence, a per-repo instance
+lock, session-aware capture that doesn't split long agent turns, and
+cross-process episode dedup.

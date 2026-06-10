@@ -4,6 +4,7 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
     { id: 'dotted', label: 'Dotted box', icon: <IconDottedBox /> },
     { id: 'solid',  label: 'Solid box',  icon: <IconSolidBox /> },
     { id: 'arrow',  label: 'Arrow',      icon: <IconArrow /> },
+    { id: 'sarrow', label: 'Solid arrow', icon: <IconSolidArrow /> },
   ]
 
   return (
@@ -140,6 +141,15 @@ function IconArrow() {
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
       <line x1="2" y1="11" x2="10" y2="3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
       <polyline points="5,3 10,3 10,8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+    </svg>
+  )
+}
+
+function IconSolidArrow() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <line x1="2" y1="11" x2="8" y2="5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+      <path d="M5,2.2 L10.8,2.2 L10.8,8 z" fill="currentColor"/>
     </svg>
   )
 }

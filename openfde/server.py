@@ -1510,7 +1510,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """
         persistence.backfill_episode_meta()
         episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
-        return web.json_response(build_prompt_graph(episodes))
+        # Recent raw events feed the storyTimeline bridges + Events layer (capped).
+        return web.json_response(build_prompt_graph(episodes,
+                                                    events=persistence.load_events()[-200:]))
+
 
     async def post_summarize_episodes(request: web.Request) -> web.Response:
         """On-demand LLM story summary: upgrade up to ``limit`` eligible episodes (default 1)
