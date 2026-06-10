@@ -1226,7 +1226,9 @@
   transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;
 }
 .tellmap-box:hover { background: var(--surface); box-shadow: 0 0 0 3px rgba(124, 111, 247, 0.10); }
-.tellmap-box.now { background: rgba(124, 111, 247, 0.10); box-shadow: 0 0 14px rgba(124, 111, 247, 0.18); }
+/* OPAQUE accent tint (composited over the surface, not alpha over the board):
+   the now-box is the LAST beat, and the spine's underlay must never show through. */
+.tellmap-box.now { background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); box-shadow: 0 0 14px rgba(124, 111, 247, 0.18); }
 .tellmap-box-head { display: flex; align-items: center; gap: 6px; }
 .tellmap-tag {
   font-family: ui-monospace, monospace; font-size: 9px; font-weight: 700; color: var(--accent);
