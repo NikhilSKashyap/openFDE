@@ -1221,8 +1221,10 @@
 .tellmap-box {
   width: 176px; height: 96px; box-sizing: border-box; flex-shrink: 0;
   display: flex; flex-direction: column; gap: 3px;
-  background: var(--surface-2); border: 1.5px solid var(--accent);
-  border-radius: var(--radius-sm); padding: 7px 9px; cursor: pointer;
+  background: var(--surface-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 10px; padding: 8px 10px; cursor: pointer;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, 0.10);
   transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;
 }
 .tellmap-box:hover { background: var(--surface); box-shadow: 0 0 0 3px rgba(124, 111, 247, 0.10); }
@@ -1287,7 +1289,9 @@
    3-row grid, column flow: every triplet of children is one column. Episode
    columns hold [branches-above, box, branches-below]; bridge columns hold an
    empty cell, the tick line, an empty cell. Pure CSS, horizontal scroll. */
-.tlv3-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px 10px; display: flex; }
+/* short boards center vertically in the viewport; tall ones scroll from the top */
+.tlv3-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px 10px;
+               display: flex; align-items: safe center; }
 .tlv3-grid {
   display: grid;
   /* 1fr zones above/below keep the episode spine vertically CENTERED in the board —
@@ -1385,20 +1389,37 @@
 .tlv3-tick.clickable:hover { background: var(--surface); }
 .tlv3-tick.more { color: var(--text-muted); }
 
-/* Narrative Graph — diagonal-forward branch board (derived, immutable, no drag) */
-.nv-board { position: relative; }
+/* Narrative storyboard — episodes move, decisions orbit, receipts ride the spine.
+   Derived, immutable, no drag. Curves are calm; labels live on hover + drawer. */
+.nv-board { position: relative; flex-shrink: 0; margin: auto 0; }
 .nv-svg { position: absolute; inset: 0; pointer-events: none; }
+.nv-svg path { pointer-events: stroke; }
 .nv-abs { position: absolute; }
-.nv-edge { stroke: color-mix(in srgb, var(--accent) 55%, transparent); stroke-width: 1.7; fill: none; }
-.nv-edge.drops { stroke: color-mix(in srgb, #e56b6b 60%, transparent); }
-.nv-edge.concept { stroke: color-mix(in srgb, var(--dotted) 55%, transparent); stroke-dasharray: 4 3; stroke-width: 1.4; }
-.nv-edge.returns { stroke: color-mix(in srgb, var(--solid) 55%, transparent); stroke-dasharray: 7 5; }
-.nv-arrowhead { fill: color-mix(in srgb, var(--accent) 70%, transparent); }
-.nv-elabel {
-  font-size: 9.5px; font-family: ui-monospace, monospace; letter-spacing: 0.3px;
-  fill: var(--text-muted); pointer-events: auto; cursor: pointer;
-  paint-order: stroke; stroke: var(--surface); stroke-width: 3px;
+.nv-edge { stroke: color-mix(in srgb, var(--accent) 42%, transparent); stroke-width: 1.8; fill: none; opacity: 0.9; }
+.nv-edge.explores { stroke: color-mix(in srgb, var(--accent) 48%, transparent); }
+.nv-edge.drops { stroke: color-mix(in srgb, #e56b6b 42%, transparent); }
+.nv-edge.returns { stroke: color-mix(in srgb, var(--solid) 40%, transparent); stroke-dasharray: 7 6; }
+.nv-arrowhead { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* decision-note halos — compact chips hugging their episode, never graph paths */
+.nv-halo {
+  position: absolute; left: -22px; width: 220px; display: flex; flex-wrap: wrap;
+  gap: 3px 6px; z-index: 2;
 }
+.nv-halo.up { align-content: flex-end; }
+.nv-chip {
+  font-size: 9px; font-family: ui-monospace, monospace; line-height: 1.7;
+  padding: 0 8px; border-radius: 99px; cursor: pointer; white-space: nowrap;
+  max-width: 205px; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text-muted); background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--text-muted) 35%, transparent);
+  transition: color 0.12s, border-color 0.12s;
+}
+.nv-chip:hover { color: var(--text); }
+.nv-chip.watch { border-color: color-mix(in srgb, var(--dotted) 45%, transparent); }
+.nv-chip.deferred, .nv-chip.next { border-color: color-mix(in srgb, #d8a657 45%, transparent); }
+.nv-chip.dropped { border-color: color-mix(in srgb, #e56b6b 40%, transparent); }
+.nv-chip.selected { color: var(--text); border-style: solid; }
 .nv-ladder {
   position: absolute; display: grid; grid-template-rows: 1fr 3px 1fr;
   justify-items: center; padding: 0 10px; box-sizing: border-box;
