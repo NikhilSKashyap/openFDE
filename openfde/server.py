@@ -75,6 +75,7 @@ from openfde.prompt_story import build_prompt_graph
 from openfde.episode_summary import commit_display, is_bad_title, repair_episode_tasks
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
+from openfde.prs import create_episode_pr
 from openfde import episode_llm_summary
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
@@ -534,6 +535,40 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         persistence.save_tasks(tasks)
         await manager.broadcast({"type": "tasks_updated"})
         return web.json_response({"ok": True, "task": task, "created": created})
+
+    # ================================================================== #
+    #  REST — Land as PR v1 (episode → branch → GitHub PR via local gh)   #
+    # ================================================================== #
+
+    async def post_episode_pr(request: web.Request) -> web.Response:
+        """Open a GitHub PR for a landed episode — the PR body IS the episode's
+        story + Verify receipts. Manual action only (nothing auto-PRs in v1).
+
+        Guardrails live in ``prs.create_episode_pr``: clean worktree required,
+        idempotent on an existing ``episode.pr``, structured errors when gh is
+        missing/unauthenticated or push/create fails (episode left untouched).
+
+        Returns:
+            web.Response — {ok, pr, episodeId, existing} | {ok: false, error, …}
+                (soft 200 so the Review UI can show the error inline; 404 only
+                for an unknown episode).
+        """
+        eid = request.match_info.get("episodeId", "")
+        ep = persistence.get_episode(eid)
+        if ep is None:
+            return web.json_response({"ok": False, "error": "unknown episode"}, status=404)
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, lambda: create_episode_pr(path, ep))
+        if not res.get("ok"):
+            return web.json_response({"ok": False, "error": res.get("error") or "PR failed",
+                                      **{k: res[k] for k in ("branch", "pushed") if k in res}})
+        if not res.get("existing"):
+            ep["pr"] = res["pr"]
+            ep["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            persistence.upsert_episode(ep)
+            await manager.broadcast({"type": "episode_updated", "episode": ep})
+        return web.json_response({"ok": True, "pr": res["pr"], "episodeId": eid,
+                                  "existing": bool(res.get("existing"))})
 
     # ================================================================== #
     #  REST — /api/verify  (Verify Gate Evidence v1 — local receipts)     #
@@ -2967,6 +3002,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/review/episodes/summarize", post_summarize_episodes)
     app.router.add_post("/api/review/episodes", post_review_episode_create)
     app.router.add_post("/api/review/episodes/{episodeId}/land", post_review_episode_land)
+    app.router.add_post("/api/review/episodes/{episodeId}/pr",   post_episode_pr)
     app.router.add_post("/api/report",                post_report)
     app.router.add_get( "/api/plan",                  get_plan)
     app.router.add_get( "/api/archgraph",             get_archgraph)

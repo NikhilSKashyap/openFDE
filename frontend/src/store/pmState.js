@@ -107,6 +107,7 @@ function pmReducer(state, action) {
             commitSha: c.commitSha, shortSha: c.shortSha || (c.commitSha || '').slice(0, 7),
             source: 'openfde-episode', files: c.files || [], promptLabel: c.promptLabel || '',
             verify: c.verify || null,       // Verify Gate receipts (lite) → evidence badges
+            pr: c.pr || null,               // Land-as-PR metadata (lite) → PR #N badge
           })
           continue
         }
@@ -119,12 +120,14 @@ function pmReducer(state, action) {
         const newPT = t.promptTitle || c.promptTitle || ''
         const newSeq = t.sequence || c.sequence || 0
         const newVerify = c.verify || t.verify || null     // receipts can arrive late
+        const newPr = c.pr || t.pr || null                 // …and so can the PR
         if (newTitle !== t.title || newDesc !== t.description || newTag !== t.episodeTag
             || newPT !== t.promptTitle || newSeq !== t.sequence
-            || JSON.stringify(newVerify) !== JSON.stringify(t.verify || null)) {
+            || JSON.stringify(newVerify) !== JSON.stringify(t.verify || null)
+            || JSON.stringify(newPr) !== JSON.stringify(t.pr || null)) {
           clone()[idx] = { ...t, title: newTitle, description: newDesc,
                            episodeTag: newTag, promptTitle: newPT, sequence: newSeq,
-                           verify: newVerify }
+                           verify: newVerify, pr: newPr }
         }
       }
       if (additions.length) clone().push(...additions)

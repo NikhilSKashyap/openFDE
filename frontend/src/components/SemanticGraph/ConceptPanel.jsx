@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
 import { cardTitleFor as commitDisplayTitle } from '../../store/pmState'
-import { runVerify } from '../../api/backend'
+import { createEpisodePr, runVerify } from '../../api/backend'
 
 // Friendly labels for the normalized episode lifecycle states (Auto-Land).
 const EP_STATUS_LABEL = {
@@ -63,6 +63,20 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
     const res = await runVerify(spotlight.episodeId ? { episodeId: spotlight.episodeId } : {})
     setVerifyBusy(false)
     if (res?.ok && res.verify) setVerifyLocal(res.verify)
+  }
+
+  // Land as PR (manual, v1): branch + push + gh pr create with the story as the body.
+  const [prLocal, setPrLocal] = useState(null)
+  const [prBusy, setPrBusy] = useState(false)
+  const [prErr, setPrErr] = useState('')
+  const pr = prLocal || spotlight.pr || null
+
+  async function landAsPr() {
+    setPrBusy(true); setPrErr('')
+    const res = await createEpisodePr(spotlight.episodeId)
+    setPrBusy(false)
+    if (res?.ok && res.pr) setPrLocal(res.pr)
+    else setPrErr(res?.error || 'PR failed')
   }
 
   const concepts = spotlight.concepts || []
@@ -286,6 +300,51 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                 {verify.note || 'verification not configured'}
               </div>
             )}
+
+            {/* Land as PR (manual, v1) — turn the landed episode into a branch + GitHub
+                PR whose body is the story + receipts. Idempotent: shows the PR link
+                once one exists. Needs landed commits and a clean worktree (the
+                backend enforces both; errors surface inline). */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 6px 2px' }}>
+              {pr?.url ? (
+                <a
+                  href={pr.url} target="_blank" rel="noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  title={`${pr.title || 'Pull request'} — ${pr.branch || ''}`}
+                  style={{
+                    fontSize: 10.5, fontWeight: 700, fontFamily: 'ui-monospace, monospace',
+                    color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
+                    border: '1px solid rgba(124,111,247,0.35)', padding: '2px 9px',
+                    borderRadius: 99, textDecoration: 'none',
+                  }}
+                >
+                  PR #{pr.number} ↗
+                </a>
+              ) : (
+                <button
+                  onClick={landAsPr}
+                  disabled={prBusy || episodeCommits.length === 0}
+                  title={episodeCommits.length === 0
+                    ? 'Needs landed commits first'
+                    : 'Create a branch from this episode’s commits and open a GitHub PR (gh)'}
+                  style={{
+                    padding: '2px 10px', borderRadius: 99, fontFamily: 'inherit', fontSize: 10.5,
+                    cursor: prBusy ? 'wait' : episodeCommits.length === 0 ? 'not-allowed' : 'pointer',
+                    color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
+                    border: '1px solid rgba(124,111,247,0.35)',
+                    opacity: episodeCommits.length === 0 ? 0.5 : 1,
+                  }}
+                >
+                  {prBusy ? 'Opening PR…' : '⇪ Land as PR'}
+                </button>
+              )}
+              {prErr && (
+                <span title={prErr} style={{ fontSize: 10, color: 'var(--violation)', maxWidth: 220,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {prErr}
+                </span>
+              )}
+            </div>
           </div>
         )}
 

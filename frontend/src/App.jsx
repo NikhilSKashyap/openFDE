@@ -202,6 +202,8 @@ export default function App() {
         status: ep.verify.status,
         checks: (ep.verify.checks || []).map(ch => ({ id: ch.id, label: ch.label, status: ch.status })),
       } : null,
+      // Land-as-PR metadata (lite) — drives the PR #N badge on OpenPM cards.
+      pr: ep.pr ? { number: ep.pr.number, url: ep.pr.url } : null,
     })))
     if (commits.length) pmDispatch({ type: 'SYNC_EPISODE_COMMITS', commits })
   }
@@ -222,6 +224,7 @@ export default function App() {
       fileEntries: files.map(p => ({ path: p, status: '' })),
       commits: ep.commits || [], epKind: ep.kind || 'agent',
       verify: ep.verify || null,
+      pr: ep.pr || null,
     })
     setActiveView('whiteboard')
   }

@@ -510,6 +510,23 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
             no verify
           </span>
         )}
+        {/* Land-as-PR evidence — the episode's pull request. */}
+        {task.pr?.number && (
+          <a
+            href={task.pr.url || undefined}
+            target="_blank" rel="noreferrer"
+            onClick={e => e.stopPropagation()}
+            title={`Pull request #${task.pr.number} — open on GitHub`}
+            style={{
+              fontSize: 9.5, fontWeight: 700, fontFamily: 'ui-monospace, monospace',
+              color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
+              border: '1px solid rgba(124,111,247,0.3)', padding: '1px 6px',
+              borderRadius: 99, textDecoration: 'none',
+            }}
+          >
+            PR #{task.pr.number}
+          </a>
+        )}
         {task.linkedBoxIds.length === 0 && !sha ? (
           <span style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic', opacity: 0.6 }}>
             No linked boxes
