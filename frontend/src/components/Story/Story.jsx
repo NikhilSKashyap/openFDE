@@ -131,7 +131,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
           <LegendSwatch color="var(--accent)"    filled label="now" />
           <span style={{ opacity: 0.85 }}>↑ watch · deferred · next</span>
           <span style={{ opacity: 0.85 }}>↓ abandoned</span>
-          <span style={{ opacity: 0.7 }}>· bridges carry commits / checks / PRs between beats · click a beat to open it</span>
+          <span style={{ opacity: 0.7 }}>· receipts above the arrow, commits & files below · click anything to open it</span>
         </div>
       )}
 
@@ -229,7 +229,7 @@ function StoryTellMap({ graph, eventsOpen, detail, setDetail }) {
         ))}
       </div>,
       <div className="tlv3-mid" key={`m${n.episodeId}`}>
-        <EpisodeBox node={n} isNow={i === last} selected={isSel('episode', n.episodeId)}
+        <EpisodeBox node={n} isNow={i === last} cont={i > 0} selected={isSel('episode', n.episodeId)}
                     onClick={() => setDetail({ kind: 'episode', key: n.episodeId, node: n })} />
       </div>,
       <div className={'tlv3-below' + (downs.length ? ' has-branches' : '') + (downs.length > 2 ? ' tlv3-cols2' : '')}
@@ -238,21 +238,39 @@ function StoryTellMap({ graph, eventsOpen, detail, setDetail }) {
           <TimelineBranch key={b.conceptId} branch={b}
                           onClick={() => setDetail({ kind: 'branch', key: b.conceptId, branch: b, node: n })} />
         ))}
-        {n.branchOverflow > 0 && <div className="tellmap-branch-more">+{n.branchOverflow} more</div>}
       </div>,
     )
     if (i < last) {
       const bridge = bridges.find(br => br.fromEpisodeId === n.episodeId) || { events: [] }
+      // Evidence ladder: receipts hang ABOVE the spine (verify / PR / issue — the
+      // trust-and-intent layer) and BELOW it (commits / files / raw events — the
+      // what-physically-happened layer), each chip on its own stem. The spine itself
+      // is one uninterrupted thick arrow drawn as a per-bridge underlay segment.
+      const indexed = (bridge.events || []).map((t, j) => ({ t, j }))
+      const evUp = indexed.filter(({ t }) => t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue')
+      const evDown = indexed.filter(({ t }) => !(t.kind === 'verify' || t.kind === 'pr' || t.kind === 'issue'))
+      const receipt = ({ t, j }, dir) => (
+        <span className={`tlv3-receipt ${dir}`} key={j}>
+          {dir === 'down' && <span className="tlv3-stem" />}
+          <BridgeTick tick={t} selected={isSel(t.kind, `${n.episodeId}:${j}`)}
+                      onClick={() => setDetail({ kind: t.kind, key: `${n.episodeId}:${j}`, tick: t, node: n })} />
+          {dir === 'up' && <span className="tlv3-stem" />}
+        </span>
+      )
       cells.push(
         <div className="tlv3-above" key={`ba${n.episodeId}`} />,
         <div className="tlv3-bridge" key={`bm${n.episodeId}`}>
-          <span className="tlv3-line" />
-          {(bridge.events || []).map((t, j) => (
-            <BridgeTick key={j} tick={t} selected={isSel(t.kind, `${n.episodeId}:${j}`)}
-                        onClick={() => setDetail({ kind: t.kind, key: `${n.episodeId}:${j}`, tick: t, node: n })} />
-          ))}
-          {bridge.overflow > 0 && <span className="tlv3-tick more" title="more happened here — open the episode for everything">+{bridge.overflow}</span>}
-          <span className="tlv3-line arrow" />
+          <div className="tlv3-bridge-row up">{evUp.map(e => receipt(e, 'up'))}</div>
+          <div className="tlv3-bridge-gap" />
+          <div className="tlv3-bridge-row down">
+            {evDown.map(e => receipt(e, 'down'))}
+            {bridge.overflow > 0 && (
+              <span className="tlv3-receipt down">
+                <span className="tlv3-stem" style={{ visibility: 'hidden' }} />
+                <span className="tlv3-tick more" title="more raw events on this stretch — the Events layer has them all">+{bridge.overflow}</span>
+              </span>
+            )}
+          </div>
         </div>,
         <div className="tlv3-below" key={`bb${n.episodeId}`} />,
       )
@@ -265,15 +283,16 @@ function StoryTellMap({ graph, eventsOpen, detail, setDetail }) {
         <div className="tlv3-grid">{cells}</div>
       </div>
 
-      {tl.hiddenOps > 0 && (
-        <div className="tellmap-ops-note">
-          +{tl.hiddenOps} operational/meta {tl.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
-        </div>
-      )}
-
-      {/* Events — the raw/technical timeline layer under the narrative. */}
+      {/* Events — the raw/technical timeline layer under the narrative. The
+          operational-episodes note lives HERE (it's meta, not story) so the
+          default board is nothing but the centered spine. */}
       {eventsOpen && (
         <div className="tlv3-events">
+          {tl.hiddenOps > 0 && (
+            <div className="tellmap-ops-note" style={{ marginTop: 0, marginBottom: 6 }}>
+              +{tl.hiddenOps} operational/meta {tl.hiddenOps === 1 ? 'episode' : 'episodes'} hidden from the story
+            </div>
+          )}
           <div className="tlv3-events-head">Raw events · most recent {Math.min((tl.rawEvents || []).length, 60)}</div>
           {(tl.rawEvents || []).slice().reverse().map((ev, i) => (
             <div className="tlv3-event-row" key={i} title={ev.detail || ev.label}>
@@ -471,9 +490,10 @@ function StoryDrawer({ detail, epById, onClose, onSpotlightEpisode, onSpotlightC
   return <div className="tlv3-drawer">{body}</div>
 }
 
-function EpisodeBox({ node, isNow, selected, onClick }) {
+function EpisodeBox({ node, isNow, cont, selected, onClick }) {
   return (
-    <div className={'tellmap-box' + (isNow ? ' now' : '') + (selected ? ' selected' : '')} onClick={onClick}
+    <div className={'tellmap-box' + (isNow ? ' now' : '') + (selected ? ' selected' : '') + (cont ? ' cont' : '')}
+         onClick={onClick}
          title={`${node.tag} · ${node.title}`}>
       <div className="tellmap-box-head">
         <span className="tellmap-tag">{node.tag}</span>

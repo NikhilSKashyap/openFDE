@@ -416,11 +416,14 @@ export default function WhiteboardCanvas({
       return
     }
 
-    if (portBoxId && portSide && activeTool === 'arrow') {
+    if (portBoxId && portSide && (activeTool === 'arrow' || activeTool === 'sarrow')) {
       const srcBox = boxesRef.current.find(b => b.id === portBoxId)
       if (!srcBox) return
-      interaction.current = { mode: 'arrow-drawing', fromBox: portBoxId, fromPort: portSide, arrowType: srcBox.type, pointerId: e.pointerId }
-      setPendingArrow({ fromBox: portBoxId, fromPort: portSide, curX: pos.x, curY: pos.y, arrowType: srcBox.type })
+      // 'arrow' inherits the source box's style (existing behavior); 'sarrow' is
+      // explicitly solid — the toolbar's Solid arrow tool.
+      const arrowType = activeTool === 'sarrow' ? 'solid' : srcBox.type
+      interaction.current = { mode: 'arrow-drawing', fromBox: portBoxId, fromPort: portSide, arrowType, pointerId: e.pointerId }
+      setPendingArrow({ fromBox: portBoxId, fromPort: portSide, curX: pos.x, curY: pos.y, arrowType })
       svgRef.current.setPointerCapture(e.pointerId)
       e.preventDefault()
       return
@@ -617,7 +620,7 @@ export default function WhiteboardCanvas({
 
   const cursor = activeTool === 'select' ? 'default' : 'crosshair'
   const isEmpty = boxes.length === 0
-  const showPorts = activeTool === 'arrow'
+  const showPorts = activeTool === 'arrow' || activeTool === 'sarrow'
 
   // Live-run overlay: pulse the most-specific *visible* node per scoped target.
   const nodeStates = runNodeStates || {}
