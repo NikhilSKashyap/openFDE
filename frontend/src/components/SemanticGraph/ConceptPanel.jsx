@@ -1,7 +1,20 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
 import { cardTitleFor as commitDisplayTitle } from '../../store/pmState'
 import { createEpisodePr, getPrReadiness, runVerify } from '../../api/backend'
+
+// Each shipping blocker carries its next action — the panel must answer "so what
+// do I click?" without the user asking (user-feel defect #2).
+const BLOCKER_HINTS = [
+  [/no landed commits/i, 'Land these changes first (⤓ above)'],
+  [/uncommitted files/i, 'Land these changes to commit them'],
+  [/verification has not run/i, 'Run checks (Verification, above)'],
+  [/verification failed/i, 'fix the failures, then Run checks again'],
+  [/already on .+ no PR needed/i, 'already merged — nothing to ship'],
+  [/gh CLI/i, 'install GitHub CLI: brew install gh'],
+  [/operational\/meta/i, 'operational episodes never ship'],
+]
+const blockerHint = (row) => (BLOCKER_HINTS.find(([re]) => re.test(row)) || [])[1]
 
 // Friendly labels for the normalized episode lifecycle states (Auto-Land).
 const EP_STATUS_LABEL = {
@@ -56,13 +69,21 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   // Verify Gate receipts: fresh local run wins over the evidence the episode arrived with.
   const [verifyLocal, setVerifyLocal] = useState(null)
   const [verifyBusy, setVerifyBusy] = useState(false)
+  const [verifyErr, setVerifyErr] = useState('')
   const verify = verifyLocal || spotlight.verify || null
 
   async function runChecks() {
-    setVerifyBusy(true)
+    setVerifyBusy(true); setVerifyErr('')
     const res = await runVerify(spotlight.episodeId ? { episodeId: spotlight.episodeId } : {})
     setVerifyBusy(false)
     if (res?.ok && res.verify) setVerifyLocal(res.verify)
+    else setVerifyErr('checks did not return — server may still be running them; retry shortly')
+    // The shipping verdict consumes this evidence — refresh it so a "verification
+    // has not run" blocker clears the moment the checks finish, not on card reopen.
+    if (spotlight.episodeId) {
+      const r = await getPrReadiness(spotlight.episodeId)
+      if (r?.ok && r.readiness) setReadyLocal({ eid: spotlight.episodeId, data: r.readiness })
+    }
   }
 
   // Land as PR (manual, v1): branch + push + gh pr create with the story as the body.
@@ -97,6 +118,24 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
     })()
     return () => { alive = false }
   }, [isEpisode, spotlight.episodeId])
+
+  // A Land finishing (`landing` true → false) changes everything the verdict reads
+  // (commits exist, tree is clean) — and the re-spotlight that follows carries no
+  // readiness and won't re-fire the mount effect for the same episode. Re-verdict here.
+  const prevLandingRef = useRef(false)
+  useEffect(() => {
+    const justFinished = prevLandingRef.current && !landing
+    prevLandingRef.current = landing
+    if (!justFinished || !isEpisode || !spotlight.episodeId) return undefined
+    let alive = true
+    ;(async () => {
+      const r = await getPrReadiness(spotlight.episodeId)
+      if (alive && r?.ok && r.readiness) {
+        setReadyLocal({ eid: spotlight.episodeId, data: r.readiness })
+      }
+    })()
+    return () => { alive = false }
+  }, [landing, isEpisode, spotlight.episodeId])
 
   const concepts = spotlight.concepts || []
   // Only cross-layer rename-coupled (high-signal) concepts may need review.
@@ -293,6 +332,11 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                 {verifyBusy ? 'Running…' : 'Run checks'}
               </button>
             </div>
+            {verifyErr && (
+              <div style={{ padding: '2px 6px', fontSize: 10, color: 'var(--violation)' }}>
+                {verifyErr}
+              </div>
+            )}
             {verify && (verify.checks || []).map(ch => (
               <div key={ch.id} title={ch.outputTail || ch.summary || ch.label} style={{
                 display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px',
@@ -357,17 +401,25 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                         : 'Checking readiness…'}
                   </div>
                   {(readiness?.status === 'ready' ? readiness.reasons : readiness?.blockedBy || [])
-                    .map(row => (
-                      <div key={row} style={{ display: 'flex', alignItems: 'baseline', gap: 6,
-                                              fontSize: 10.5, lineHeight: 1.6,
-                                              color: 'var(--text-muted)' }}>
-                        <span style={{ flexShrink: 0, fontWeight: 700,
-                                       color: readiness?.status === 'ready' ? 'var(--solid)' : 'var(--violation)' }}>
-                          {readiness?.status === 'ready' ? '✓' : '✕'}
-                        </span>
-                        <span>{row}</span>
-                      </div>
-                    ))}
+                    .map(row => {
+                      const hint = readiness?.status === 'blocked' ? blockerHint(row) : null
+                      return (
+                        <div key={row} style={{ display: 'flex', alignItems: 'baseline', gap: 6,
+                                                fontSize: 10.5, lineHeight: 1.6,
+                                                color: 'var(--text-muted)' }}>
+                          <span style={{ flexShrink: 0, fontWeight: 700,
+                                         color: readiness?.status === 'ready' ? 'var(--solid)' : 'var(--violation)' }}>
+                            {readiness?.status === 'ready' ? '✓' : '✕'}
+                          </span>
+                          <span>
+                            {row}
+                            {hint && (
+                              <span style={{ opacity: 0.7, fontStyle: 'italic' }}> — {hint}</span>
+                            )}
+                          </span>
+                        </div>
+                      )
+                    })}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
                     <button
                       onClick={landAsPr}

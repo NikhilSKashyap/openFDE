@@ -18,9 +18,15 @@ already carries ``pr.url``, an **already-merged guard** (a head commit reachable
 the remote default branch returns "no PR needed" instead of pushing a no-diff branch),
 and structured errors (gh missing/unauthenticated, push or PR failure) that never
 mutate the episode.
+
+v1.1 adds :func:`pr_readiness` — the same policy as a deterministic, read-only
+**verdict** (ready / blocked / created, with receipts and blockers), so the UI can
+show "Ready to ship" before anyone clicks. Evidence decides; an LLM may narrate
+readiness someday, but never decides it.
 """
 
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 
@@ -124,6 +130,105 @@ def _ok(proc) -> bool:
 def _err(proc, fallback: str) -> str:
     msg = (getattr(proc, "stderr", "") or "").strip() or (getattr(proc, "stdout", "") or "").strip()
     return (msg or fallback)[:300]
+
+
+def pr_readiness(root, episode: dict, *, runner=None, which=None, _ctx=None) -> dict:
+    """Deterministic, **read-only** ready-for-PR verdict for an episode.
+
+    Evidence + policy decide readiness — never an LLM. Mirrors the guards
+    ``create_episode_pr`` enforces, without creating, pushing, or calling gh:
+
+      - ``created`` — the episode already carries ``pr.url`` (action: open it).
+      - ``blocked`` — any of: operational/meta episode, no landed commits, dirty
+        worktree, verification failed, verification missing/skipped while the repo
+        HAS checks configured (conservative v1.1), head commit already reachable
+        from the remote default branch, gh CLI not installed.
+      - ``ready`` — clean tree + landed commits + required checks passed + head not
+        on base; ``reasons`` lists the receipts ("1 landed commit", "worktree
+        clean", "unit tests passed", …).
+
+    gh *auth* is deliberately NOT checked here (slow-ish; creation re-checks and
+    can still fail then). Readiness reads local refs only — no fetch.
+
+    Args:
+        root: Path — repository root.
+        episode: dict — the episode to judge.
+        runner: optional subprocess.run stand-in (tests).
+        which: optional shutil.which stand-in (tests).
+        _ctx: optional shared batch context — {"clean": bool, "base": str|None,
+            "on_base": (sha)->bool, "gh_ok": bool} — so a caller judging many
+            episodes pays for `git status`/base resolution once.
+
+    Returns:
+        dict — {status: ready|blocked|created, suggestedAction: create_pr|
+            fix_and_rerun|open_pr, reasons: [...], blockedBy: [...], pr?}.
+    """
+    existing = episode.get("pr") or {}
+    if existing.get("url"):
+        num = existing.get("number")
+        return {"status": "created", "suggestedAction": "open_pr",
+                "reasons": [f"PR #{num} already created" if num else "PR already created"],
+                "blockedBy": [], "pr": existing}
+
+    reasons, blocked = [], []
+
+    from openfde.prompt_story import is_operational_episode
+    if is_operational_episode(episode):
+        blocked.append("operational/meta episode — not a product change")
+
+    shas = [s for s in (episode.get("commitShas") or []) if s]
+    if shas:
+        reasons.append(f"{len(shas)} landed commit{'s' if len(shas) != 1 else ''}")
+    else:
+        blocked.append("no landed commits")
+
+    if _ctx is not None:
+        clean = _ctx.get("clean")
+    else:
+        st = _run(["git", "status", "--porcelain"], root, runner)
+        clean = _ok(st) and not (st.stdout or "").strip()
+    if clean:
+        reasons.append("worktree clean")
+    else:
+        blocked.append("worktree has uncommitted files")
+
+    v = episode.get("verify") or {}
+    vstatus = v.get("status")
+    if vstatus == "passed":
+        for c in (v.get("checks") or []):
+            label = (c.get("label") or c.get("id") or "check").lower()
+            reasons.append(f"{label} {c.get('status') or 'passed'}")
+    elif vstatus == "failed":
+        blocked.append("verification failed")
+    else:                                   # missing or skipped — conservative,
+        from openfde.verify import discover_checks      # unless nothing is configured
+        if discover_checks(root):
+            blocked.append("verification has not run — run checks first")
+        else:
+            reasons.append("no checks configured — verification skipped")
+
+    if shas:                                # on-base guard needs a head commit
+        head_sha = shas[-1]
+        if _ctx is not None:
+            base, on_base = _ctx.get("base"), _ctx.get("on_base")
+            already = bool(base and on_base and on_base(head_sha))
+        else:
+            base = _base_ref(root, runner)
+            anc = _run(["git", "merge-base", "--is-ancestor", head_sha, base],
+                       root, runner) if base else None
+            already = bool(base and anc is not None and _ok(anc))
+        if already:
+            blocked.append(f"commit {head_sha[:7]} already on {base} — no PR needed")
+
+    gh_ok = _ctx.get("gh_ok") if _ctx is not None else bool((which or shutil.which)("gh"))
+    if not gh_ok:
+        blocked.append("gh CLI not installed")
+
+    if blocked:
+        return {"status": "blocked", "suggestedAction": "fix_and_rerun",
+                "reasons": [], "blockedBy": blocked}
+    return {"status": "ready", "suggestedAction": "create_pr",
+            "reasons": reasons, "blockedBy": []}
 
 
 def create_episode_pr(root, episode: dict, *, runner=None, now=None) -> dict:
