@@ -52,7 +52,9 @@ http://127.0.0.1:7420
   Claude Code prompts become episodes, auto-committed with attributed scope and
   replayable as a **Story** and an **OpenPM** board (below).
 - Respects scope: **dotted = agent-editable**, **solid = locked** (protected files
-  force an approval gate before anything touches them).
+  force an approval gate before anything touches them). The toolbar draws both box
+  styles plus arrows — the **Arrow** tool inherits the source box's style, the
+  **Solid arrow** tool always draws solid.
 
 ## Running the Council
 
@@ -116,9 +118,15 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
   (interesting, not committed), **Deferred** (parked, with the revisit trigger
   when you wrote one — "until passive capture lands"), and **Abandoned**. Each
   concept links back to its prompts, commits, and files. Press **Tell** to replay
-  the work as a chronological episode map: prompt beats left-to-right by
-  sequence, with deferred / watch / dropped ideas branching off the beat that
-  produced them.
+  the work as a narrative timeline: prompt beats left-to-right on a center spine
+  (opens at the latest beat), deferred / watch / next ideas branching above and
+  dropped paths ✕-struck below, and between beats an **evidence ladder** — the
+  spine arrow carries receipts on stems, trust above (`tests ✓ · PR #2`) and
+  mechanics below (`commit abc1234 · 3 files`). Everything displays at every
+  stage (no "+N more" hiding); clicking anything opens an inline drawer without
+  leaving Story. The Story is **immutable by design** — a derived, read-only
+  record, so a team always sees the same history; an **Events** toggle exposes
+  the raw event-log layer underneath.
 - **OpenPM.** Landed prompts surface as Done cards on a Kanban board, tagged and
   grouped by their episode, so the board mirrors the same prompt → commit story.
 - **GitHub Issues become durable intent.** Import an issue (the board's
