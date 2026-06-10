@@ -44,6 +44,7 @@ class ScopedCommitTest(unittest.TestCase):
     def _landed_files(self):
         return self._g("show", "--name-only", "--format=", "HEAD").stdout.split()
 
+
     # 1) git_commit_paths stages only the listed paths (incl. deletion + new file).
     def test_commit_paths_isolates_listed_paths(self):
         (self.root / "a.py").write_text("a2\n")
