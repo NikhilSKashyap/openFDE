@@ -420,10 +420,12 @@ def build_prompt_graph(episodes: list, events: list = None) -> dict:
                 "title": e.get("title"), "status": e.get("status"),
                 "sequence": e.get("sequence")} for e in episodes]
 
+    timeline = build_story_timeline(episodes, ordered, edges, events)
     return {"ok": True, "concepts": ordered, "episodes": ep_lite,
             "edges": edges, "counts": counts, "lifecycleCounts": life_counts,
             "storyMap": build_story_map(episodes, ordered),
-            "storyTimeline": build_story_timeline(episodes, ordered, edges, events)}
+            "storyTimeline": timeline,
+            "storyNarrative": build_story_narrative(episodes, events, timeline)}
 
 
 def build_story_map(episodes: list, concepts: list) -> dict:
@@ -690,3 +692,206 @@ def build_story_timeline(episodes: list, concepts: list, edges: list = None,
     raw_tail = [_event_tick(ev) for ev in events[-_MAX_RAW_EVENTS:]]
     return {"spine": spine, "bridges": bridges, "rawEvents": raw_tail,
             "hiddenOps": hidden_ops}
+
+
+# ── Narrative Graph v1 — the story as a branching path, not a flat line ──────
+#
+# Chronology stays in the data; PLACEMENT tells the narrative: the main build
+# spine runs forward, explorations branch diagonally forward off the beat they
+# grew from, dropped paths fall below, and a superseded exploration points back
+# at the beat that returned to the main direction. Fully deterministic (v1):
+# revert-language supersession is the strong signal, exploration wording the
+# weak one, and the latest beat is always "now" on the spine.
+
+_EXPLORE_RE = re.compile(
+    r"\b(?:experiment\w*|compar(?:e|ison|ing)\w*|alternative\w*|explor\w*|"
+    r"prototype|spike|proof[- ]of[- ]concept|poc)\b", re.I)
+_REVERT_RE = re.compile(
+    r"\b(?:revert\w*|restor\w*|roll(?:ed|ing)?[- ]?back|undo(?:ing)?|go(?:ing)? back to|"
+    r"previous (?:layout|implementation|version|approach))\b", re.I)
+_NARR_TEXT_CHARS = 300           # title + prompt head only — spec bodies quote keywords
+
+
+def _nv_text(ep: dict) -> str:
+    return f"{ep.get('title') or ''} {(ep.get('prompt') or '')[:_NARR_TEXT_CHARS]}"
+
+
+def _nv_node(ep: dict, lane: str, reason: str, confidence: str) -> dict:
+    v = ep.get("verify") or {}
+    pr = ep.get("pr") or {}
+    src = ep.get("intentSource") or {}
+    return {
+        "episodeId": ep.get("episodeId"), "tag": ep.get("tag") or "",
+        "title": ep.get("title") or "", "summary": ep.get("summary") or "",
+        "sequence": ep.get("sequence") or 0, "createdAt": ep.get("createdAt"),
+        "status": ep.get("status") or "",
+        "files": list(ep.get("files") or []),
+        "commitShas": list(ep.get("commitShas") or []),
+        "verify": ({"status": v.get("status"),
+                    "checks": [{"id": c.get("id"), "label": c.get("label"),
+                                "status": c.get("status"), "summary": c.get("summary")}
+                               for c in (v.get("checks") or [])]} if v else None),
+        "pr": ({"number": pr.get("number"), "url": pr.get("url"),
+                "state": pr.get("state")} if pr.get("number") is not None else None),
+        "issue": ({"number": src.get("issueNumber"), "url": src.get("url")}
+                  if src.get("provider") == "github" and src.get("issueNumber") is not None
+                  else None),
+        "lane": lane, "parentEpisodeId": None, "continuesEpisodeId": None,
+        "narrativeReason": reason, "confidence": confidence,
+    }
+
+
+def build_story_narrative(episodes: list, events: list = None,
+                          timeline: dict = None) -> dict:
+    """Derive the narrative graph: spine vs branch episodes + explaining edges.
+
+    Deterministic heuristics, in strength order:
+      1. The latest product episode is always the spine's "now" beat.
+      2. **Supersession** (high confidence): a later episode whose title/prompt-head
+         reads as a revert marks its strongest-file-overlap earlier neighbour as a
+         dropped exploration (lane ``abandoned``, edge ``drops``, plus a ``returns``
+         edge to the reverting beat when that beat sits on the spine).
+      3. **Exploration wording** (medium): experiment/compare/alternative/explore/
+         prototype/spike in the title or prompt head → lane ``explore``.
+      4. Nothing landed AND verification failed (medium) → lane ``abandoned``.
+      5. Everything else continues the main build on the spine.
+    Branch parents: nearest earlier product episode with the strongest shared-file
+    overlap (ties → nearest); zero overlap falls back to the immediately previous
+    product episode. Consecutive spine pairs get ``continues`` edges that CARRY the
+    evidence-ladder ticks (same shape as storyTimeline bridges), so the visual
+    spine keeps its receipts even where it skips a branched episode. Concept
+    lifecycle branches ride along as ``defers`` / ``watches`` / ``drops`` edges
+    (``toConceptId``) sourced from the provided ``timeline``.
+
+    Returns:
+        dict — {nodes[], edges[], spineEpisodeIds[], branchEpisodeIds[],
+                confidence: "deterministic"}.
+    """
+    eps = sorted((e for e in (episodes or []) if not is_operational_episode(e)),
+                 key=lambda e: e.get("sequence") or 0)
+    if not eps:
+        return {"nodes": [], "edges": [], "spineEpisodeIds": [],
+                "branchEpisodeIds": [], "confidence": "deterministic"}
+    last_id = eps[-1].get("episodeId")
+
+    # 2 — supersession scan (the strong signal)
+    dropped: dict = {}           # episodeId -> {"by": ep, "shared": n}
+    for ridx, r in enumerate(eps):
+        if not _REVERT_RE.search(_nv_text(r)):
+            continue
+        rfiles = set(r.get("files") or [])
+        best, shared = None, 0
+        for cand in eps[max(0, ridx - 4):ridx]:          # near horizon, nearest wins ties
+            ov = len(rfiles & set(cand.get("files") or []))
+            if ov >= shared and ov > 0:
+                best, shared = cand, ov
+        if best is not None:
+            dropped.setdefault(best.get("episodeId"), {"by": r, "shared": shared})
+
+    lanes, reasons, conf = {}, {}, {}
+    for e in eps:
+        eid = e.get("episodeId")
+        if eid == last_id:
+            lanes[eid], reasons[eid], conf[eid] = "spine", "current beat", "high"
+        elif eid in dropped:
+            d = dropped[eid]
+            lanes[eid] = "abandoned"
+            reasons[eid] = (f"superseded by {d['by'].get('tag')} "
+                            f"(revert language + {d['shared']} shared files)")
+            conf[eid] = "high"
+        elif _EXPLORE_RE.search(_nv_text(e)):
+            lanes[eid], conf[eid] = "explore", "medium"
+            reasons[eid] = "exploration language in the prompt"
+        elif not (e.get("commitShas") or []) and (e.get("verify") or {}).get("status") == "failed":
+            lanes[eid], conf[eid] = "abandoned", "medium"
+            reasons[eid] = "nothing landed and verification failed"
+        else:
+            lanes[eid], reasons[eid], conf[eid] = "spine", "continues the main build", "high"
+
+    spine_eps = [e for e in eps if lanes[e.get("episodeId")] == "spine"]
+    if not spine_eps:                                    # degenerate: keep it tellable
+        spine_eps = eps
+        for e in eps:
+            lanes[e.get("episodeId")] = "spine"
+
+    nodes = [_nv_node(e, lanes[e.get("episodeId")],
+                      reasons[e.get("episodeId")], conf[e.get("episodeId")]) for e in eps]
+    node_by_id = {n["episodeId"]: n for n in nodes}
+
+    # 5 — branch parents: strongest shared-file overlap among NEARBY earlier
+    # episodes (a near horizon — global max-overlap would hand every branch to
+    # some giant ancient episode that touched everything; a branch grows from
+    # its narrative neighbourhood, not from history's biggest beat)
+    edges: list = []
+    for idx, e in enumerate(eps):
+        eid = e.get("episodeId")
+        if lanes[eid] == "spine":
+            continue
+        efiles = set(e.get("files") or [])
+        best, shared = None, 0
+        for cand in eps[max(0, idx - 6):idx]:
+            ov = len(efiles & set(cand.get("files") or []))
+            if ov >= shared and ov > 0:
+                best, shared = cand, ov
+        evidence = {"sharedFiles": shared}
+        if best is None and idx:                         # weak evidence → previous beat
+            best = eps[idx - 1]
+            evidence["fallback"] = "previous product episode"
+        if best is None:
+            continue
+        pid = best.get("episodeId")
+        node_by_id[eid]["parentEpisodeId"] = pid
+        kind = "drops" if lanes[eid] == "abandoned" else "explores"
+        label = "dropped" if kind == "drops" else "explored"
+        if eid in dropped:
+            evidence["supersededBy"] = dropped[eid]["by"].get("tag")
+        edges.append({"fromEpisodeId": pid, "toEpisodeId": eid, "kind": kind,
+                      "label": label, "confidence": conf[eid], "evidence": evidence})
+        if eid in dropped:
+            r_id = dropped[eid]["by"].get("episodeId")
+            if lanes.get(r_id) == "spine":               # the path that came back
+                edges.append({"fromEpisodeId": eid, "toEpisodeId": r_id,
+                              "kind": "returns", "label": "returned",
+                              "confidence": "high",
+                              "evidence": {"sharedFiles": dropped[eid]["shared"]}})
+
+    # spine continuity — continues edges CARRY the evidence ladder
+    events = [ev for ev in (events or []) if isinstance(ev, dict)]
+    for a, b in zip(spine_eps, spine_eps[1:]):
+        a_id, b_id = a.get("episodeId"), b.get("episodeId")
+        node_by_id[a_id]["continuesEpisodeId"] = b_id
+        ticks = _episode_ticks(a)
+        raw_here = []
+        t_a, t_b = _ts(a.get("createdAt")), _ts(b.get("createdAt"))
+        if t_a and t_b:
+            for ev in events:
+                if ev.get("type") in _RAW_SKIP:
+                    continue
+                t = _ts(ev.get("timestamp"))
+                if t and t_a < t <= t_b:
+                    raw_here.append(_event_tick(ev))
+        edges.append({"fromEpisodeId": a_id, "toEpisodeId": b_id, "kind": "continues",
+                      "label": "", "confidence": "high",
+                      "evidence": {"sharedFiles": len(set(a.get("files") or [])
+                                                      & set(b.get("files") or []))},
+                      "events": ticks + raw_here[:_MAX_BRIDGE_TICKS],
+                      "overflow": max(0, len(raw_here) - _MAX_BRIDGE_TICKS)})
+
+    # concept lifecycle branches (from the timeline) as narrative edges
+    _KIND_BY_LIFE = {"deferred": ("defers", "deferred"), "watch": ("watches", "watch"),
+                     "next": ("watches", "next"), "abandoned": ("drops", "dropped")}
+    for sn in (timeline or {}).get("spine") or []:
+        host = sn.get("episodeId")
+        for b in (sn.get("branchesAbove") or []) + (sn.get("branchesBelow") or []):
+            kind, label = _KIND_BY_LIFE.get(b.get("lifecycle") or "", ("watches", "watch"))
+            edges.append({"fromEpisodeId": host, "toEpisodeId": None,
+                          "toConceptId": b.get("conceptId"), "kind": kind,
+                          "label": label, "confidence": "high",
+                          "evidence": {"lifecycle": b.get("lifecycle"),
+                                       "trigger": b.get("trigger")}})
+
+    return {"nodes": nodes, "edges": edges,
+            "spineEpisodeIds": [e.get("episodeId") for e in spine_eps],
+            "branchEpisodeIds": [e.get("episodeId") for e in eps
+                                 if lanes[e.get("episodeId")] != "spine"],
+            "confidence": "deterministic"}

@@ -90,7 +90,10 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   const [prLocal, setPrLocal] = useState(null)
   const [prBusy, setPrBusy] = useState(false)
   const [prErr, setPrErr] = useState('')
-  const pr = (prLocal?.eid === spotlight.episodeId ? prLocal.data : null) || spotlight.pr || null
+  // Key match must REQUIRE an episodeId: on episode-less spotlights (worktree /
+  // commit) both sides are undefined, the === holds, and `null.data` crashes.
+  const pr = (spotlight.episodeId && prLocal?.eid === spotlight.episodeId ? prLocal.data : null)
+    || spotlight.pr || null
 
   async function landAsPr() {
     setPrBusy(true); setPrErr('')
@@ -104,7 +107,7 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   // a fresh read-only check replaces it when the card opens (worktree state moves).
   // Results are keyed by episode so a stale fetch never leaks across spotlights.
   const [readyLocal, setReadyLocal] = useState(null)
-  const readiness = (readyLocal?.eid === spotlight.episodeId ? readyLocal.data : null)
+  const readiness = (spotlight.episodeId && readyLocal?.eid === spotlight.episodeId ? readyLocal.data : null)
     || spotlight.prReadiness || null
 
   useEffect(() => {

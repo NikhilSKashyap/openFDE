@@ -479,5 +479,98 @@ class StoryTimelineTest(unittest.TestCase):
         self.assertEqual(tl["rawEvents"], [])
 
 
+class NarrativeGraphTest(unittest.TestCase):
+    """Narrative Graph v1 — spine vs branch lanes, parents, explaining edges."""
+
+    def _ep(self, eid, seq, title, **over):
+        base = _ep(eid, seq, title)
+        base["createdAt"] = f"2026-06-09T0{seq}:00:00+00:00"
+        base.update(over)
+        return base
+
+    def test_spine_skips_exploration_between_beats(self):
+        # P69 mainline, P70 keyword-exploration sharing files, P71 continuation:
+        # spine = 69 -> 71; 69 --explores--> 70 hangs off it.
+        eps = [
+            self._ep("e69", 1, "Story Board", files=["story.py"], commitShas=["a" * 40]),
+            self._ep("e70", 2, "Explore an alternative spine layout",
+                     prompt="Let's prototype an alternative approach.",
+                     files=["story.py"], commitShas=["b" * 40]),
+            self._ep("e71", 3, "Story Board Polish", files=["story.py"], commitShas=["c" * 40]),
+        ]
+        nv = build_prompt_graph(list(reversed(eps)))["storyNarrative"]
+        self.assertEqual(nv["spineEpisodeIds"], ["e69", "e71"])
+        self.assertEqual(nv["branchEpisodeIds"], ["e70"])
+        n70 = next(n for n in nv["nodes"] if n["episodeId"] == "e70")
+        self.assertEqual(n70["lane"], "explore")
+        self.assertEqual(n70["parentEpisodeId"], "e69")
+        ex = next(e for e in nv["edges"] if e["kind"] == "explores")
+        self.assertEqual((ex["fromEpisodeId"], ex["toEpisodeId"]), ("e69", "e70"))
+        cont = next(e for e in nv["edges"] if e["kind"] == "continues")
+        self.assertEqual((cont["fromEpisodeId"], cont["toEpisodeId"]), ("e69", "e71"))
+        self.assertTrue(any(t["kind"] == "commit" for t in cont["events"]))
+
+    def test_superseded_episode_drops_below_and_returns(self):
+        # A later revert beat marks its overlap-neighbour as dropped (high
+        # confidence) and the dropped path points back at the returning beat.
+        eps = [
+            self._ep("e1", 1, "Evidence Ladder", files=["story.jsx"], commitShas=["a" * 40]),
+            self._ep("e2", 2, "Persistent Canvas Tools", files=["story.jsx"], commitShas=["b" * 40]),
+            self._ep("e3", 3, "Collaborative Layout",
+                     prompt="i liked it before - revert back to the previous implementation",
+                     files=["story.jsx"], commitShas=["c" * 40]),
+        ]
+        nv = build_prompt_graph(list(reversed(eps)))["storyNarrative"]
+        self.assertEqual(nv["spineEpisodeIds"], ["e1", "e3"])
+        n2 = next(n for n in nv["nodes"] if n["episodeId"] == "e2")
+        self.assertEqual(n2["lane"], "abandoned")
+        self.assertEqual(n2["confidence"], "high")
+        self.assertIn("superseded", n2["narrativeReason"])
+        drop = next(e for e in nv["edges"] if e["kind"] == "drops" and e["toEpisodeId"] == "e2")
+        self.assertEqual(drop["fromEpisodeId"], "e1")
+        ret = next(e for e in nv["edges"] if e["kind"] == "returns")
+        self.assertEqual((ret["fromEpisodeId"], ret["toEpisodeId"]), ("e2", "e3"))
+
+    def test_concept_branches_become_forward_edges(self):
+        eps = [
+            self._ep("e1", 1, "Build Auth",
+                     prompt="Build login.\nDeferred: full OAuth integration until launch lands."),
+            self._ep("e2", 2, "Polish Auth"),
+        ]
+        nv = build_prompt_graph(list(reversed(eps)))["storyNarrative"]
+        defers = [e for e in nv["edges"] if e["kind"] == "defers"]
+        self.assertTrue(defers)
+        self.assertEqual(defers[0]["fromEpisodeId"], "e1")        # parent = its episode
+        self.assertIsNone(defers[0]["toEpisodeId"])               # concept, not episode
+        self.assertTrue(defers[0]["toConceptId"])
+        self.assertEqual(defers[0]["label"], "deferred")
+
+    def test_weak_evidence_falls_back_to_previous_episode(self):
+        eps = [
+            self._ep("e1", 1, "Backend Work", files=["api.py"], commitShas=["a" * 40]),
+            self._ep("e2", 2, "Compare frontend frameworks",
+                     prompt="comparison spike", files=["notes.md"]),   # zero overlap
+            self._ep("e3", 3, "Backend Work II", files=["api.py"], commitShas=["b" * 40]),
+        ]
+        nv = build_prompt_graph(list(reversed(eps)))["storyNarrative"]
+        n2 = next(n for n in nv["nodes"] if n["episodeId"] == "e2")
+        self.assertEqual(n2["lane"], "explore")
+        self.assertEqual(n2["parentEpisodeId"], "e1")             # previous product ep
+        ex = next(e for e in nv["edges"] if e["kind"] == "explores")
+        self.assertEqual(ex["evidence"].get("fallback"), "previous product episode")
+
+    def test_latest_episode_always_on_spine(self):
+        # Even with exploration wording, the current beat is "now", never a branch.
+        eps = [self._ep("e1", 1, "Mainline", commitShas=["a" * 40]),
+               self._ep("e2", 2, "Explore narrative graph prototypes",
+                        prompt="explore alternatives, prototype")]
+        nv = build_prompt_graph(list(reversed(eps)))["storyNarrative"]
+        n2 = next(n for n in nv["nodes"] if n["episodeId"] == "e2")
+        self.assertEqual(n2["lane"], "spine")
+        self.assertEqual(n2["narrativeReason"], "current beat")
+        self.assertEqual(nv["spineEpisodeIds"], ["e1", "e2"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
