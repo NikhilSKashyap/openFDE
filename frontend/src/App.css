@@ -1335,12 +1335,14 @@
 /* the bridge as an EVIDENCE LADDER: receipts above (verify / PR / issue) and
    below (commits / files / events) a single uninterrupted thick spine arrow,
    each chip connected by its own vertical stem — never pills inside the line. */
-/* ONE continuous spine: an underlay line through the vertical center of the grid
-   (the 1fr/1fr zones keep the mid row centered, so 50% IS the box centers). Boxes
-   and chips paint above it — the line always "touches" because it passes beneath. */
-.tlv3-grid { position: relative; }
-.tlv3-grid::before {
-  content: ""; position: absolute; left: 14px; right: 8px; top: 50%;
+/* The spine exists BETWEEN beats: each bridge draws an underlay segment that
+   extends ±120px under its neighboring boxes (bounded: branch zones cap at 380px,
+   boxes are ~190 — 120 always reaches under the box, never past its far edge).
+   Boxes paint above, so the line visually terminates exactly at box edges — no
+   stub pokes out before the first or after the last beat. */
+.tlv3-bridge { position: relative; }
+.tlv3-bridge::before {
+  content: ""; position: absolute; left: -120px; right: -120px; top: 50%;
   height: 3px; transform: translateY(-50%);
   background: color-mix(in srgb, var(--accent) 55%, transparent);
   z-index: 0; pointer-events: none;
