@@ -94,11 +94,13 @@
 }
 .toolbar-brand:hover { color: var(--text); }
 
+/* the brand mark IS the orange box — a tiny box, not a dot */
 .brand-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
+  border-radius: 2px;
+  background: var(--accent-orange);
+  box-shadow: 0 0 6px var(--accent-orange-glow);
   flex-shrink: 0;
 }
 
@@ -148,9 +150,16 @@
   color: var(--accent);
 }
 
+/* The two voices at the highest level: building (violet) vs reading the
+   record (orange). One glance at the top bar says which half you're in. */
 .btn.view-active {
   background: var(--surface-2);
-  color: var(--text);
+  color: var(--accent);
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.btn.view-record.view-active {
+  color: var(--accent-orange);
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent-orange) 60%, transparent);
 }
 
 .btn svg { flex-shrink: 0; }
@@ -1233,11 +1242,12 @@
 .tellmap-col { display: flex; flex-direction: column; flex-shrink: 0; }
 .tellmap-eprow { display: flex; align-items: center; }   /* the spine arrow auto-centers on the box */
 
+/* recorded beats live in the orange voice — calm border, not a glow */
 .tellmap-box {
   width: 176px; height: 96px; box-sizing: border-box; flex-shrink: 0;
   display: flex; flex-direction: column; gap: 3px;
   background: var(--surface-2);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--accent-orange) 38%, var(--border));
   border-radius: 10px; padding: 8px 10px; cursor: pointer;
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.10);
   transition: background 0.12s, box-shadow 0.12s, border-color 0.12s;
@@ -1415,11 +1425,11 @@
 .nv-svg { position: absolute; inset: 0; pointer-events: none; }
 .nv-svg path { pointer-events: stroke; }
 .nv-abs { position: absolute; }
-.nv-edge { stroke: color-mix(in srgb, var(--accent) 42%, transparent); stroke-width: 1.8; fill: none; opacity: 0.9; }
-.nv-edge.explores { stroke: color-mix(in srgb, var(--accent) 48%, transparent); }
+.nv-edge { stroke: color-mix(in srgb, var(--accent-orange) 40%, transparent); stroke-width: 1.8; fill: none; opacity: 0.9; }
+.nv-edge.explores { stroke: color-mix(in srgb, var(--accent-orange) 50%, transparent); }
 .nv-edge.drops { stroke: color-mix(in srgb, #e56b6b 42%, transparent); }
 .nv-edge.returns { stroke: color-mix(in srgb, var(--solid) 40%, transparent); stroke-dasharray: 7 6; }
-.nv-arrowhead { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+.nv-arrowhead { fill: color-mix(in srgb, var(--accent-orange) 60%, transparent); }
 
 /* decision-note halos — compact chips hugging their episode, never graph paths */
 .nv-halo {
@@ -1436,7 +1446,7 @@
   transition: color 0.12s, border-color 0.12s;
 }
 .nv-chip:hover { color: var(--text); }
-.nv-chip.watch { border-color: color-mix(in srgb, var(--dotted) 45%, transparent); }
+.nv-chip.watch { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }  /* watch = intent-note → violet voice */
 .nv-chip.deferred, .nv-chip.next { border-color: color-mix(in srgb, #d8a657 45%, transparent); }
 .nv-chip.dropped { border-color: color-mix(in srgb, #e56b6b 40%, transparent); }
 .nv-chip.selected { color: var(--text); border-style: solid; border-color: var(--accent-orange); }
@@ -1455,7 +1465,7 @@
   border-left: 9px solid color-mix(in srgb, var(--accent-orange) 80%, transparent);
   border-top: 6px solid transparent; border-bottom: 6px solid transparent;
 }
-.tellmap-box.lane-explore { border-style: dashed; border-color: var(--dotted); }
+.tellmap-box.lane-explore { border-style: dashed; border-color: color-mix(in srgb, var(--accent-orange) 60%, var(--border)); }
 .tellmap-box.lane-abandoned { border-color: color-mix(in srgb, #e56b6b 70%, transparent); }
 .tellmap-box.lane-abandoned .tellmap-title { text-decoration: line-through; opacity: 0.85; }
 
@@ -2506,7 +2516,8 @@
   border-radius: 8px; padding: 0 6px; color: var(--text-muted);
   background: var(--surface-2); border: 1px solid var(--border); }
 .concept-ep-status.st-landed { color: var(--solid); border-color: color-mix(in srgb, var(--solid) 35%, var(--border)); }
-.concept-ep-status.st-auto_landing { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.concept-ep-status.st-reviewing { color: var(--accent-orange); border-color: var(--accent-orange-border); }
+.concept-ep-status.st-auto_landing { color: var(--accent-orange); border-color: var(--accent-orange-border); }
 .concept-ep-status.st-needs_manual_land { color: var(--active); border-color: color-mix(in srgb, var(--active) 40%, var(--border)); }
 .concept-ep-status.st-failed { color: var(--violation); border-color: color-mix(in srgb, var(--violation) 35%, var(--border)); }
 .concept-ai-badge { font-size: 9px; color: var(--accent); letter-spacing: 0.04em;
@@ -2723,3 +2734,6 @@
 .agentset-btn:hover:not(:disabled) { border-color: var(--accent); }
 .agentset-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .agentset-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* the drawer is the recorder readout — orange edge where it meets the board */
+.tlv3-drawer { border-left: 2px solid var(--accent-orange-border); }

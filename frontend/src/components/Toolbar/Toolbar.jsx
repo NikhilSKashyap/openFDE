@@ -68,7 +68,7 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
           <span>Canvas</span>
         </button>
         <button
-          className={`btn${activeView === 'pm' ? ' view-active' : ''}`}
+          className={`btn view-record${activeView === 'pm' ? ' view-active' : ''}`}
           onClick={() => setActiveView('pm')}
           title="OpenPM — work items grouped by prompt"
         >
@@ -76,7 +76,7 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
           <span>OpenPM</span>
         </button>
         <button
-          className={`btn${activeView === 'story' ? ' view-active' : ''}`}
+          className={`btn view-record${activeView === 'story' ? ' view-active' : ''}`}
           onClick={() => setActiveView('story')}
           title="Story — the conceptual narrative built from prompts"
         >
@@ -84,7 +84,7 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
           <span>Story</span>
         </button>
         <button
-          className={`btn${activeView === 'timeline' ? ' view-active' : ''}`}
+          className={`btn view-record${activeView === 'timeline' ? ' view-active' : ''}`}
           onClick={() => setActiveView('timeline')}
           title="Timeline"
         >
