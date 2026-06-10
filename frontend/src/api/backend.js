@@ -133,6 +133,17 @@ export const getVerifyStatus = () => apiFetch('/api/verify/status')
 export const runVerify = (payload = {}) =>
   apiFetch('/api/verify/run', { method: 'POST', body: JSON.stringify(payload) })
 
+// ── Land as PR (episode → branch → GitHub PR via local gh) ───────────────
+
+/**
+ * Open a GitHub PR for a landed episode (manual action; idempotent).
+ *
+ * @param {string} episodeId
+ * @returns {Promise<{ok: boolean, pr?: Object, existing?: boolean, error?: string}|null>}
+ */
+export const createEpisodePr = (episodeId) =>
+  apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr`, { method: 'POST', body: '{}' })
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 /**
