@@ -408,7 +408,13 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                   </div>
                   {(readiness?.status === 'ready' ? readiness.reasons : readiness?.blockedBy || [])
                     .map(row => {
-                      const hint = readiness?.status === 'blocked' ? blockerHint(row) : null
+                      let hint = readiness?.status === 'blocked' ? blockerHint(row) : null
+                      // On a card with no Land button (already-landed episode), dirty
+                      // files are OTHER work — pointing at "the ⤓ button above" that
+                      // isn't there sent the user hunting (observed live).
+                      if (hint && !canLand && /uncommitted files/i.test(row)) {
+                        hint = 'other work in progress — it lands from its own episode’s card'
+                      }
                       return (
                         <div key={row} style={{ display: 'flex', alignItems: 'baseline', gap: 6,
                                                 fontSize: 10.5, lineHeight: 1.6,

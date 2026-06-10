@@ -404,7 +404,17 @@ export default function App() {
     if (!s) return null
     return askConcept(question, {
       kind: s.kind, label: s.label, summary: s.summary || '', sha: s.sha || null,
-      files: s.files || [], concepts: s.concepts || [],
+      // Episode spotlights keep their files in amberFiles (files: [] drives the
+      // canvas dim) — sending the empty list told the model "appears in 0 files"
+      // and it concluded the work was never implemented. Send the real list.
+      files: (s.files && s.files.length ? s.files : s.amberFiles) || [],
+      concepts: s.concepts || [],
+      // Episode grounding: the record of what actually happened.
+      tag: s.tag || null, status: s.status || null,
+      prompt: s.kind === 'episode' ? (s.prompt || '').slice(0, 1500) : null,
+      commits: s.kind === 'episode'
+        ? (s.commits || []).slice(0, 8).map(c => ({ sha: c.shortSha || c.sha, title: c.displayTitle || '' }))
+        : null,
       focusConcept: concept ? concept.identifier : null,
     })
   }

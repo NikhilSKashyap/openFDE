@@ -184,13 +184,20 @@ def pr_readiness(root, episode: dict, *, runner=None, which=None, _ctx=None) -> 
 
     if _ctx is not None:
         clean = _ctx.get("clean")
+        dirty_names = list(_ctx.get("dirtyFiles") or [])
     else:
         st = _run(["git", "status", "--porcelain"], root, runner)
         clean = _ok(st) and not (st.stdout or "").strip()
+        dirty_names = [ln[3:].strip() for ln in (st.stdout or "").splitlines() if ln.strip()] \
+            if not clean else []
     if clean:
         reasons.append("worktree clean")
     else:
-        blocked.append("worktree has uncommitted files")
+        # Name the files: on an already-landed episode the dirt is OTHER work, and
+        # "uncommitted files" with no names sent the user hunting (observed live).
+        shown = ", ".join(dirty_names[:3]) + ("…" if len(dirty_names) > 3 else "")
+        blocked.append("worktree has uncommitted files"
+                       + (f" ({shown})" if shown else ""))
 
     v = episode.get("verify") or {}
     vstatus = v.get("status")
