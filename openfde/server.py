@@ -330,6 +330,16 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     openfde_dir = path / ".openfde"
     openfde_dir.mkdir(exist_ok=True)
 
+    # One watcher per repo. Two live processes (the restart-overlap window) tore
+    # episodes.json via a shared tmp and captured duplicate episode pairs — refuse
+    # loudly instead. Stale locks (dead pid) are swept automatically.
+    from openfde.instance_lock import WatchLockHeld, acquire_watch_lock, release_watch_lock
+    try:
+        watch_lock = acquire_watch_lock(openfde_dir)
+    except WatchLockHeld as exc:
+        logging.getLogger("openfde").error("%s", exc)
+        return
+
     persistence = Persistence(openfde_dir)
     manager     = ConnectionManager()
 
@@ -1465,6 +1475,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return False
 
         readiness_ctx = {"clean": not (st.get("dirty") or []), "base": base_ref,
+                         "dirtyFiles": list(st.get("dirty") or []),
                          "on_base": _on_base, "gh_ok": shutil.which("gh") is not None}
 
         enriched = []
@@ -1693,6 +1704,27 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 lines.append("Affected concepts: " + "; ".join(
                     f"{c['identifier']} ({c.get('touched')}/{c.get('total')}"
                     f"{' PARTIAL' if c.get('partial') else ''})" for c in cs[:12]))
+        elif ctx.get("kind") == "episode":
+            # A prompt episode is a RECORD of work that happened — ground the answer
+            # in its prompt/summary/commits/files, never in concept-grep framing
+            # (an episode title naturally "appears in 0 files"; saying so made the
+            # model conclude the work was never implemented — observed live).
+            lines.append(f"Prompt episode {ctx.get('tag') or ''}: {ctx.get('label')}".strip())
+            if ctx.get("status"):
+                lines.append(f"Status: {ctx['status']}")
+            if ctx.get("summary"):
+                lines.append(f"Summary: {ctx['summary']}")
+            commits = ctx.get("commits") or []
+            if commits:
+                lines.append("Landed commits: " + "; ".join(
+                    f"{(c.get('sha') or '')[:7]} {c.get('title') or ''}".strip()
+                    for c in commits[:8]))
+            files = ctx.get("files", [])
+            if files:
+                lines.append(f"Files attributed ({len(files)}): {', '.join(files[:20])}")
+            if ctx.get("prompt"):
+                lines.append("Original prompt (excerpt):")
+                lines.append(str(ctx["prompt"])[:1200])
         else:
             files = ctx.get("files", [])
             lines.append(f"Concept: {ctx.get('label')} ({ctx.get('kind') or 'identifier'})")
@@ -1742,8 +1774,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         answer, source = "", ""
         if caller:
             sys_prompt = (f"You are the {_ROLE_HUMAN.get(used_role, used_role)} in OpenFDE. Answer the "
-                          "question about this concept/commit at the architecture level — concise, plain "
-                          "language, 2-5 sentences, NO code dumps.")
+                          "question about this concept/commit/prompt-episode at the architecture level — "
+                          "concise, plain language, 2-5 sentences, NO code dumps. Ground the answer ONLY "
+                          "in the provided context; when it is insufficient, say what is missing instead "
+                          "of speculating about unbuilt features.")
             user = _concept_prompt(question, ctx)
             try:
                 loop = asyncio.get_event_loop()
@@ -3171,3 +3205,4 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         await runner.cleanup()
+        release_watch_lock(watch_lock)

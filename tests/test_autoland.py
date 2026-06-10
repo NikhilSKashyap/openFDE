@@ -188,6 +188,23 @@ class ScopedCommitTest(unittest.TestCase):
         self.assertTrue(res["committed"])
         self.assertEqual(self.p.get_episode("e_skip")["verify"]["status"], "skipped")
 
+    # 11b) Evidence overrides classification: landing real commits clears the
+    #      operational mislabel (it hid episodes from the rail and blocked their
+    #      PR readiness — a landed diff is product work by definition).
+    def test_land_reclassifies_operational_episode(self):
+        (self.root / "a.py").write_text("a-reclass\n")
+        ep = self.p.upsert_episode({"episodeId": "e_op", "prompt": "real work", "status": "reviewing",
+                                    "signal": "operational",
+                                    "storyFacts": {"operational": True, "concepts": []},
+                                    "files": ["a.py"], "commitShas": []})
+        res = autoland.land_episode(self.root, self.p, ep, auto=True,
+                                    run_verify=lambda root: self._verify_result("skipped"))
+        self.assertTrue(res["committed"])
+        saved = self.p.get_episode("e_op")
+        self.assertEqual(saved["signal"], "product")
+        self.assertFalse(saved["storyFacts"]["operational"])
+        self.assertEqual(saved["reclassifiedBy"], "landed-commits")
+
     # 11) Passing checks ride the episode into the landed state.
     def test_passing_verify_recorded_on_land(self):
         (self.root / "a.py").write_text("a-pass\n")

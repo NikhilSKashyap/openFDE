@@ -126,11 +126,19 @@ class CreatePrTest(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("no landed commits", res["error"])
 
-    def test_dirty_worktree_blocks(self):
-        run = scripted_runner([FakeProc(stdout=" M openfde/server.py\n")])
+    def test_own_dirty_files_block(self):
+        run = scripted_runner([FakeProc(stdout=" M openfde/verify.py\n")])
         res = create_episode_pr("/r", _episode(), runner=run)
         self.assertFalse(res["ok"])
-        self.assertIn("dirty", res["error"])
+        self.assertIn("this episode's files have uncommitted edits", res["error"])
+        self.assertIn("openfde/verify.py", res["error"])
+
+    def test_unrelated_dirt_does_not_block_creation(self):
+        run = scripted_runner([FakeProc(stdout=" M somewhere/else.py\n"), *GUARD,
+                               AUTH_OK, NO_BRANCH, MK_OK, PUSH_OK, PR_OK])
+        res = create_episode_pr("/r", _episode(), runner=run)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["pr"]["number"], 123)
 
     def test_gh_missing_is_structured_error(self):
         run = scripted_runner([CLEAN, *GUARD, FileNotFoundError("gh")])
@@ -261,20 +269,32 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(r["reasons"], [])
         self.assertIn("no landed commits", r["blockedBy"])
 
-    def test_blocked_dirty_worktree_names_the_files(self):
-        run = scripted_runner([FakeProc(stdout=" M a.py\n?? b.py\n"), SYMREF, NOT_MERGED])
+    def test_blocked_when_own_files_dirty(self):
+        # Dirt that overlaps THIS episode's files = its work isn't fully landed.
+        run = scripted_runner([FakeProc(stdout=" M openfde/verify.py\n?? b.py\n"),
+                               SYMREF, NOT_MERGED])
         r = pr_readiness("/r", _episode(), runner=run, which=GH_OK)
         self.assertEqual(r["status"], "blocked")
-        # Named files: on an already-landed card the dirt is OTHER work — the user
-        # needs to see WHICH files, not just "uncommitted files" (observed live).
-        self.assertTrue(any(b.startswith("worktree has uncommitted files (a.py, b.py")
+        self.assertTrue(any(b.startswith("this episode's files have uncommitted edits (openfde/verify.py")
                             for b in r["blockedBy"]), r["blockedBy"])
 
-    def test_batch_ctx_dirty_names_flow_through(self):
+    def test_unrelated_dirt_does_not_block(self):
+        # The perpetual-block bug (observed live): one stray file from OTHER work
+        # blocked every episode. A PR branches from the landed commit — unrelated
+        # dirt is ignored, named, and the verdict stays ready.
         ctx = {"clean": False, "dirtyFiles": ["x.py", "y.py", "z.py", "w.py"],
                "base": "origin/main", "on_base": lambda sha: False, "gh_ok": True}
         r = pr_readiness("/r", _episode(), runner=scripted_runner([]), _ctx=ctx)
-        self.assertTrue(any("(x.py, y.py, z.py…" in b for b in r["blockedBy"]), r["blockedBy"])
+        self.assertEqual(r["status"], "ready")
+        self.assertTrue(any("unrelated edits ignored (x.py, y.py, z.py…" in x
+                            for x in r["reasons"]), r["reasons"])
+
+    def test_batch_ctx_own_dirty_blocks(self):
+        ctx = {"clean": False, "dirtyFiles": ["openfde/autoland.py"],
+               "base": "origin/main", "on_base": lambda sha: False, "gh_ok": True}
+        r = pr_readiness("/r", _episode(), runner=scripted_runner([]), _ctx=ctx)
+        self.assertEqual(r["status"], "blocked")
+        self.assertTrue(any("openfde/autoland.py" in b for b in r["blockedBy"]))
 
     def test_blocked_verify_failed(self):
         run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])

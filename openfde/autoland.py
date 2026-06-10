@@ -203,6 +203,14 @@ def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: boo
     episode["commitShas"] = list(dict.fromkeys((episode.get("commitShas") or []) + new_shas))
     episode["files"] = sorted(set(files + committed_files))
     episode["status"] = LANDED
+    # Evidence overrides classification: an episode that lands real commits is not
+    # operational chatter, whatever the LLM summarizer guessed — the mislabel hid
+    # episodes from the rail and hard-blocked their PR readiness (observed live).
+    if episode.get("signal") == "operational" or (episode.get("storyFacts") or {}).get("operational"):
+        episode["signal"] = "product"
+        if isinstance(episode.get("storyFacts"), dict):
+            episode["storyFacts"]["operational"] = False
+        episode["reclassifiedBy"] = "landed-commits"
     episode["updatedAt"] = _now()
     persistence.upsert_episode(episode)
 

@@ -211,6 +211,15 @@ def read_new_prompts(path: Path, start_offset: int):
     return [_prompt_record(e) for e in entries if is_human_prompt(e)], off
 
 
+def capture_key_exists(persistence, key: str) -> bool:
+    """True when ANY persisted episode already carries this captureKey — the
+    cross-process dedup check (in-memory `known` sets are per-process; the store is
+    the shared truth). Cheap at capture frequency (human prompts, not ticks)."""
+    if not key:
+        return False
+    return any((e.get("captureKey") or "") == key for e in persistence.load_episodes())
+
+
 def make_capture_episode(repo_root, prompt: dict, files=None, status="open",
                          kind="claude-code") -> dict:
     """Build a capture episode (Prompt Story Rail shape) from a parsed prompt.
@@ -468,6 +477,12 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
 
     async def _capture(rec, files):
         if not rec.get("key") or rec["key"] in known:
+            return
+        # Belt-and-braces cross-process dedup: the in-memory `known` set can't see a
+        # sibling process's capture (restart-overlap windows created duplicate episode
+        # pairs with identical captureKeys — observed live). The store is authoritative.
+        if capture_key_exists(persistence, rec["key"]):
+            known.add(rec["key"])
             return
         known.add(rec["key"])
         pending.pop(rec.get("sessionId"), None)
