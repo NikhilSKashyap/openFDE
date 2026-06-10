@@ -46,7 +46,7 @@ function patchLineClass(ln) {
  * @param {Function} props.onFocusConcept - (concept|null) => void  (highlight on canvas)
  * @param {Function} props.onClose
  */
-export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard, onFocusConcept, onClose, onLand, landing = false, onSpotlightCommit }) {
+export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard, onFocusConcept, onClose, onLand, landing = false, landNote = null, onSpotlightCommit }) {
   const isCommit = spotlight.kind === 'commit'
   const isWorktree = spotlight.kind === 'worktree'
   const isEpisode = spotlight.kind === 'episode'
@@ -263,10 +263,16 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
             episode still under review. Calm, obvious, one click. */}
         {canLand && (
           <div className="concept-land">
-            <button className="concept-land-btn" disabled={landing} onClick={() => onLand()}>
+            <button className="concept-land-btn" disabled={landing}
+                    onClick={() => onLand(isEpisode ? spotlight.episodeId : undefined)}>
               {landing ? 'Landing…' : '⤓ Land these changes'}
             </button>
             <span className="concept-land-hint">OpenFDE creates the commit and links it to this prompt.</span>
+            {landNote && !landing && (
+              <div style={{ fontSize: 10, color: 'var(--active)', marginTop: 4, lineHeight: 1.5 }}>
+                {landNote}
+              </div>
+            )}
           </div>
         )}
 
