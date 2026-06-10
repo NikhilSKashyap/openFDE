@@ -522,7 +522,7 @@ def build_story_map(episodes: list, concepts: list) -> dict:
 # ticks, with raw event-log items bucketed in when their timestamps fit. All
 # derived, deterministic, capped; no persistence, no measurement.
 
-_MAX_BRIDGE_TICKS = 6
+_MAX_BRIDGE_TICKS = 5            # 3–5 meaningful ticks per bridge; receipts lead
 _MAX_RAW_EVENTS = 60
 _TICK_SHORT = {"unit-tests": "tests", "frontend-lint": "lint"}
 # Raw event types that duplicate derived ticks (commits come from commitShas).
@@ -557,8 +557,14 @@ def _verify_ticks(ep: dict) -> list:
 
 
 def _episode_ticks(ep: dict) -> list:
-    """The derived bridge ticks for what a landed beat produced."""
-    ticks = []
+    """The derived bridge ticks for what a landed beat produced — ordered by how much
+    story each tick tells (the cap trims from the tail): verify receipts first, then
+    the PR, then commits, the linked issue, and the file scope."""
+    ticks = _verify_ticks(ep)
+    pr = ep.get("pr") or {}
+    if pr.get("number") is not None:
+        ticks.append({"kind": "pr", "label": f"PR #{pr['number']}", "url": pr.get("url") or "",
+                      "timestamp": pr.get("createdAt"), "detail": pr.get("title") or ""})
     meta = ep.get("commitMeta") or {}
     when = ep.get("updatedAt")
     for sha in (ep.get("commitShas") or []):
@@ -566,11 +572,6 @@ def _episode_ticks(ep: dict) -> list:
             continue
         ticks.append({"kind": "commit", "label": f"commit {sha[:7]}", "sha": sha,
                       "timestamp": when, "detail": (meta.get(sha) or {}).get("title") or ""})
-    ticks += _verify_ticks(ep)
-    pr = ep.get("pr") or {}
-    if pr.get("number") is not None:
-        ticks.append({"kind": "pr", "label": f"PR #{pr['number']}", "url": pr.get("url") or "",
-                      "timestamp": pr.get("createdAt"), "detail": pr.get("title") or ""})
     src = ep.get("intentSource") or {}
     if src.get("provider") == "github" and src.get("issueNumber") is not None:
         ticks.append({"kind": "issue", "label": f"issue #{src['issueNumber']}",

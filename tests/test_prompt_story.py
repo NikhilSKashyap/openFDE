@@ -394,7 +394,9 @@ class StoryTimelineTest(unittest.TestCase):
         self.assertEqual(by_kind["pr"][0]["label"], "PR #7")
         self.assertEqual(by_kind["pr"][0]["url"], "https://github.com/a/r/pull/7")
         self.assertEqual(by_kind["issue"][0]["label"], "issue #42")
-        self.assertEqual(by_kind["files"][0]["label"], "1 file")
+        # 6 candidate ticks, cap 5 — the least-telling (files) trims into overflow.
+        self.assertNotIn("files", by_kind)
+        self.assertEqual(bridge["overflow"], 1)
         # spine node carries the lite verify/pr/issue too
         n = g["storyTimeline"]["spine"][0]
         self.assertEqual(n["pr"]["number"], 7)
@@ -439,8 +441,24 @@ class StoryTimelineTest(unittest.TestCase):
         b = self._rich_ep("e2", 2, "After")
         g = build_prompt_graph([b, a])
         bridge = g["storyTimeline"]["bridges"][0]
-        self.assertEqual(len(bridge["events"]), 6)              # _MAX_BRIDGE_TICKS
-        self.assertGreaterEqual(bridge["overflow"], 3)
+        self.assertEqual(len(bridge["events"]), 5)              # _MAX_BRIDGE_TICKS (3–5 rule)
+        self.assertGreaterEqual(bridge["overflow"], 4)
+
+    def test_receipts_lead_the_bridge(self):
+        # The cap trims from the tail — verify/PR must survive a many-commit episode.
+        shas = [f"{i:040x}" for i in range(8)]
+        a = self._rich_ep("e1", 1, "Busy", commitShas=shas,
+                          verify={"status": "passed", "checks": [
+                              {"id": "unit-tests", "label": "Unit tests",
+                               "status": "passed", "summary": "OK"}]},
+                          pr={"number": 9, "url": "https://github.com/a/r/pull/9",
+                              "state": "OPEN"})
+        b = self._rich_ep("e2", 2, "After")
+        g = build_prompt_graph([b, a])
+        kinds = [t["kind"] for t in g["storyTimeline"]["bridges"][0]["events"]]
+        self.assertEqual(kinds[0], "verify")
+        self.assertEqual(kinds[1], "pr")
+        self.assertIn("commit", kinds[2:])
 
     def test_empty_graph_safe(self):
         tl = build_prompt_graph([])["storyTimeline"]
