@@ -7,8 +7,8 @@ actual diff, commits, and records the work — inside the permission boundaries 
 set.
 
 It also **remembers**. Prompts run through the council, OpenFDE wrappers, or
-passive Claude Code capture become *episodes*, committed with their own attributed
-scope and woven into a replayable **Story** of how the codebase came to be.
+passive Claude Code/Codex capture become *episodes*, committed with their own
+attributed scope and woven into a replayable **Story** of how the codebase came to be.
 Codex can handle the thinking roles, Claude Code can handle the coding role, and
 OpenFDE keeps the work visible, scoped, reviewed, and narrated.
 
@@ -49,7 +49,7 @@ http://127.0.0.1:7420
   the touched nodes, then surfaces **what changed** (files, affected concepts, diff)
   once the work settles.
 - **Remembers the path**: council prompts, OpenFDE wrapper prompts, and passive
-  Claude Code prompts become episodes, auto-committed with attributed scope and
+  Claude Code/Codex prompts become episodes, auto-committed with attributed scope and
   replayable as a **Story** and an **OpenPM** board (below).
 - Respects scope: **dotted = agent-editable**, **solid = locked** (protected files
   force an approval gate before anything touches them). The toolbar draws both box
@@ -118,15 +118,15 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
   (interesting, not committed), **Deferred** (parked, with the revisit trigger
   when you wrote one — "until passive capture lands"), and **Abandoned**. Each
   concept links back to its prompts, commits, and files. Press **Tell** to replay
-  the work as a narrative timeline: prompt beats left-to-right on a center spine
-  (opens at the latest beat), deferred / watch / next ideas branching above and
-  dropped paths ✕-struck below, and between beats an **evidence ladder** — the
-  spine arrow carries receipts on stems, trust above (`tests ✓ · PR #2`) and
-  mechanics below (`commit abc1234 · 3 files`). Everything displays at every
-  stage (no "+N more" hiding); clicking anything opens an inline drawer without
-  leaving Story. The Story is **immutable by design** — a derived, read-only
-  record, so a team always sees the same history; an **Events** toggle exposes
-  the raw event-log layer underneath.
+  the work as a narrative storyboard: mainline episodes move across a center
+  spine, real exploratory episodes branch forward as smooth paths, and local
+  decisions orbit their source episode as compact halo chips (`watch`,
+  `deferred`, `✕ dropped`). Between mainline beats, an **evidence ladder** rides
+  the spine: trust above (`tests ✓ · PR #2`) and mechanics below
+  (`commit abc1234 · 3 files`). Clicking any episode, halo, receipt, PR, commit,
+  or file opens an inline drawer without leaving Story. The Story is **immutable
+  by design** — a derived, read-only record, so a team always sees the same
+  history; an **Events** toggle exposes the raw event-log layer underneath.
 - **OpenPM.** Landed prompts surface as Done cards on a Kanban board, tagged and
   grouped by their episode, so the board mirrors the same prompt → commit story.
 - **GitHub Issues become durable intent.** Import an issue (the board's
@@ -165,7 +165,7 @@ OpenFDE doesn't just run changes — it remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.4.1**, the local-first council can
+OpenFDE is early and moving fast. As of **0.4.5**, the local-first council can
 run with **Codex local CLI for Architect/Verifier** and **Claude Code local CLI
 for Senior Dev**, with coding activity **streamed live on the canvas** and a
 **stop control** to halt any run. The architecture-to-execution loop runs
@@ -174,7 +174,9 @@ against the real diff, and commits — within the boundaries you draw. Beyond
 execution, OpenFDE keeps a **development memory**: prompts are captured as
 episodes from the council, OpenFDE wrappers, or passive Claude Code/Codex
 capture, auto-committed with attributed scope, and replayable as a visual
-**Story**. The delivery chain now closes the loop end-to-end — *issue → prompt
+**Story**: episode movement on the spine, explorations as branches, decisions as
+halos, and verification/commit/PR receipts in the drawer. The delivery chain now
+closes the loop end-to-end — *issue → prompt
 episode → verification receipts → clustered commits → ready-to-ship verdict →
 pull request whose description is the story* — dogfooded on this repository
 (its first PRs were created by OpenFDE, from episodes, through that exact
