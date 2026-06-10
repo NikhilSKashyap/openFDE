@@ -1,10 +1,18 @@
 # OpenFDE
 
-OpenFDE is an architecture-first coding environment. Point it at a repo, see the
-code as a living canvas, select the part you want to change, describe the change
-in plain English, and run an Agent Council that plans, implements, reviews the
-actual diff, commits, and records the work — inside the permission boundaries you
-set.
+**FDE — Forward-Deployed Engineer.** A great FDE embeds with you, works inside
+your boundaries, tests what they ship, files the PR with a writeup, and leaves a
+record of what was tried, dropped, and delivered. OpenFDE is the open layer that
+makes **any coding agent behave like one** — Claude Code, Codex, a future fleet:
+point it at a repo and every agent's work becomes scoped, verified, shippable,
+and remembered.
+
+It is **not an IDE** — there's no editor inside, and it doesn't replace yours.
+It sits *above* editors and agents as the **system of record for agent-built
+software**: see the code as a living canvas, select the part you want changed,
+describe it in English, and run an Agent Council that plans, implements, reviews
+the actual diff, commits, and records the work — inside the permission
+boundaries you set.
 
 It also **remembers**. Prompts run through the council, OpenFDE wrappers, or
 passive Claude Code/Codex capture become *episodes*, committed with their own
