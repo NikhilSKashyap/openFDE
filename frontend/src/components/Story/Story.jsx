@@ -129,7 +129,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, margin: '-4px 0 10px',
                       flexShrink: 0, fontSize: 10, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
           <LegendSwatch color="var(--accent)"    label="episode" />
-          <LegendSwatch color="var(--accent)"    filled label="now" />
+          <LegendSwatch color="var(--accent-orange)" filled label="now" />
           <span style={{ opacity: 0.85 }}>↗ explored · ↘ dropped paths</span>
           <span style={{ opacity: 0.7 }}>· decision notes orbit their episode · receipts ride the spine · click anything to open it</span>
         </div>
