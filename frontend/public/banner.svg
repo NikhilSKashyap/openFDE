@@ -1,0 +1,17 @@
+<svg width="1280" height="320" viewBox="0 0 1280 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OpenFDE — the orange box for agentic development">
+  <!-- Hero: the lockup on the editor-dark panel. One flourish only — the intent
+       line entering the recorder from the left; the record needs no exit wound. -->
+  <rect width="1280" height="320" rx="24" fill="#0d0d0d"/>
+  <line x1="64" y1="160" x2="468" y2="160" stroke="#7c6ff7" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+
+  <g transform="translate(476, 116)">
+    <rect width="88" height="88" rx="20" fill="#ff8a3d"/>
+    <rect x="29" y="29" width="30" height="30" rx="7" fill="none" stroke="#7a3208" stroke-width="6"/>
+  </g>
+
+  <text x="596" y="192" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="84" font-weight="600">
+    <tspan fill="#e8e8e8">open</tspan><tspan fill="#ff8a3d">fde</tspan>
+  </text>
+
+  <text x="640" y="262" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="26" fill="#8a8a8a" letter-spacing="0.5">the orange box for agentic development</text>
+</svg>

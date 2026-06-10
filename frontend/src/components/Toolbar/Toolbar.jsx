@@ -10,7 +10,7 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
   return (
     <div className="toolbar">
       <button className="toolbar-brand" onClick={() => onHome?.()} title="Back to the architecture canvas">
-        <span className="brand-dot" />
+        <img src="/logo.svg" className="brand-logo" alt="" />
         openfde
       </button>
 
@@ -73,7 +73,7 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
           title="OpenPM — work items grouped by prompt"
         >
           <IconOpenPM />
-          <span>OpenPM</span>
+          <span>openpm</span>
         </button>
         <button
           className={`btn view-record${activeView === 'story' ? ' view-active' : ''}`}

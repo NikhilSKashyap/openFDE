@@ -1,24 +1,64 @@
+<p align="center">
+  <img src="frontend/public/banner.svg" alt="OpenFDE — the orange box for agentic development" width="100%" />
+</p>
+
 # OpenFDE
+
+**The orange box for agentic development.**
+
+Flight recorders were never black — they're painted orange so the record can be
+*found*. OpenFDE is that box for your codebase: **a local memory and
+orchestration layer that records how your codebase got built** — prompts, file
+changes, tasks, commits, checks, PRs, decisions, and the story they add up to.
 
 **FDE — Forward-Deployed Engineer.** A great FDE embeds with you, works inside
 your boundaries, tests what they ship, files the PR with a writeup, and leaves a
 record of what was tried, dropped, and delivered. OpenFDE is the open layer that
-makes **any coding agent behave like one** — Claude Code, Codex, a future fleet:
-point it at a repo and every agent's work becomes scoped, verified, shippable,
-and remembered.
+makes **any coding agent behave like one** — and every deployment carries the
+orange box.
 
-It is **not an IDE** — there's no editor inside, and it doesn't replace yours.
-It sits *above* editors and agents as the **system of record for agent-built
-software**: see the code as a living canvas, select the part you want changed,
-describe it in English, and run an Agent Council that plans, implements, reviews
-the actual diff, commits, and records the work — inside the permission
-boundaries you set.
+It is **not an editor and doesn't replace yours.** Bring your own agent and
+editor — Claude Code, Codex, Cursor, VS Code, a plain terminal — OpenFDE sits
+*above* them as the **system of record for agent-built software**: see the code
+as a living canvas, select the part you want changed, describe it in English,
+and run an Agent Council that plans, implements, reviews the actual diff,
+commits, and records the work — inside the permission boundaries you set.
 
 It also **remembers**. Prompts run through the council, OpenFDE wrappers, or
 passive Claude Code/Codex capture become *episodes*, committed with their own
 attributed scope and woven into a replayable **Story** of how the codebase came to be.
 Codex can handle the thinking roles, Claude Code can handle the coding role, and
 OpenFDE keeps the work visible, scoped, reviewed, and narrated.
+
+## The orange box theory
+
+Agentic coding is a black box today. Prompts vanish into terminal scrollback,
+agents commit without context, and the *why* evaporates the moment the session
+closes. The code remains; the reasoning doesn't. Six months later — or six
+minutes later, when a fleet of agents is building in parallel — nobody can say
+what was tried, what was dropped, or why the survivor won.
+
+The theory: **when agents do the building, the scarce artifact is no longer the
+code — it's the record of how the code came to be.** Whoever holds the record
+holds the understanding. So the record needs a recorder, and the recorder must
+be built the way flight recorders are built:
+
+1. **Always on.** It watches passively — any agent, any editor, no wrapper, no
+   ceremony. A record you must remember to keep is a record you won't have.
+2. **Evidence-grade.** Receipts, not vibes: every episode carries its prompt,
+   files, commits, check results, and pull request. A failed test is recorded
+   as honestly as a passing one.
+3. **Immutable.** The story is derived testimony — nobody can drag history into
+   a nicer shape. A team reads one record, and the dropped paths stay visible
+   as dropped paths.
+4. **Readable in ten seconds.** A log is not a record anyone consults. The
+   telemetry renders as a story — beats on a spine, explorations branching,
+   decisions orbiting the work that made them.
+
+In the UI the theory is a color: **violet is intent flowing in; orange is the
+record flowing out.** And the wager underneath it all: in the fleet era — one
+architect directing many agents — the record is the only thing that scales
+trust. You build; the narrative is free.
 
 ## Quick Start
 

@@ -1,0 +1,6 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OpenFDE — the orange box">
+  <!-- The orange box: flight recorders are orange so the record can be found.
+       One mark, no traffic — the aperture is the recorder looking at your repo. -->
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#ff8a3d"/>
+  <rect x="22" y="22" width="20" height="20" rx="5" fill="none" stroke="#7a3208" stroke-width="4.5"/>
+</svg>
