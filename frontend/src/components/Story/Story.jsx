@@ -130,9 +130,8 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
                       flexShrink: 0, fontSize: 10, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
           <LegendSwatch color="var(--accent)"    label="episode" />
           <LegendSwatch color="var(--accent)"    filled label="now" />
-          <span style={{ opacity: 0.85 }}>↗ explored · watch · deferred</span>
-          <span style={{ opacity: 0.85 }}>↘ dropped</span>
-          <span style={{ opacity: 0.7 }}>· branches move forward, not parked · receipts ride the spine · click anything to open it</span>
+          <span style={{ opacity: 0.85 }}>↗ explored · ↘ dropped paths</span>
+          <span style={{ opacity: 0.7 }}>· decision notes orbit their episode · receipts ride the spine · click anything to open it</span>
         </div>
       )}
 
@@ -197,11 +196,15 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
 const NV = {
   XP: 470,   // spine pitch (box + evidence ladder)
   W: 176, H: 96,                 // episode box (matches .tellmap-box)
-  DX: 200, DY: 168,              // first diagonal step off a parent
-  FANX: 52, FANY: 104,           // stagger for siblings on the same side
-  CH: 64,                        // concept card approx height (line endpoints)
-  PAD: 84, LH: 150,              // board padding; ladder row height
+  DX: 210, DY: 172,              // first curved step off a parent
+  FANX: 56, FANY: 110,           // stagger for siblings on the same side
+  HALO: 22,                      // halo chip row height (estimate; chips wrap ~2/row)
+  PAD: 64, LH: 150,              // board padding; ladder row height
 }
+
+// Estimated halo stack height — decision notes orbit their episode, so the
+// board reserves room for them without measuring the DOM (≈2 chips per row).
+const haloH = n => (n > 0 ? Math.ceil(n / 2) * NV.HALO + 8 : 0)
 
 function layoutNarrative(nv, tl) {
   const pos = {}                                     // episodeId -> {x, y} (y rel. to spine=0)
@@ -220,29 +223,18 @@ function layoutNarrative(nv, tl) {
                          y: p.y + side * (NV.DY + k * NV.FANY) }
   }
 
-  const cpos = []                                    // concept cards join the same fans
-  for (const sn of (tl?.spine || [])) {
-    const at = pos[sn.episodeId]
-    if (!at) continue
-    for (const b of (sn.branchesAbove || [])) {
-      const k = take(sn.episodeId, -1) - 1
-      cpos.push({ branch: b, parentId: sn.episodeId, side: -1,
-                  x: at.x + NV.DX + k * NV.FANX, y: at.y - (NV.DY + k * NV.FANY) })
-    }
-    for (const b of (sn.branchesBelow || [])) {
-      const k = take(sn.episodeId, 1) - 1
-      cpos.push({ branch: b, parentId: sn.episodeId, side: 1,
-                  x: at.x + NV.DX + k * NV.FANX, y: at.y + NV.DY + k * NV.FANY })
-    }
-  }
-
+  // Bounds include each episode's halo stacks (decision notes hug their box).
+  const tlById = Object.fromEntries((tl?.spine || []).map(n => [n.episodeId, n]))
   let minY = 0, maxY = NV.H, maxX = NV.W
-  for (const p of Object.values(pos)) { minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y + NV.H); maxX = Math.max(maxX, p.x + NV.W) }
-  for (const p of cpos)               { minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y + NV.CH); maxX = Math.max(maxX, p.x + NV.W) }
+  for (const [id, p] of Object.entries(pos)) {
+    const sn = tlById[id] || {}
+    minY = Math.min(minY, p.y - haloH((sn.branchesAbove || []).length))
+    maxY = Math.max(maxY, p.y + NV.H + haloH((sn.branchesBelow || []).length))
+    maxX = Math.max(maxX, p.x + NV.W)
+  }
   const offY = NV.PAD - minY
   const shifted = Object.fromEntries(Object.entries(pos).map(([id, p]) => [id, { x: p.x + NV.PAD, y: p.y + offY }]))
-  const cshift = cpos.map(p => ({ ...p, x: p.x + NV.PAD, y: p.y + offY }))
-  return { pos: shifted, cpos: cshift, width: maxX + 2 * NV.PAD,
+  return { pos: shifted, width: maxX + 2 * NV.PAD,
            height: maxY - minY + 2 * NV.PAD, spineY: offY }
 }
 
@@ -307,14 +299,16 @@ function StoryNarrative({ graph, eventsOpen, detail, setDetail }) {
   }
   const openEpisode = (n) => setDetail({ kind: 'episode', key: n.episodeId, node: tlById[n.episodeId] || n })
 
-  // SVG connector endpoints — diagonal forward, parent corner → child left-middle.
-  const edgeLine = (e) => {
+  // Smooth forward connector: parent right-middle eases out horizontally, then
+  // bends into the child's left-middle — a calm S-curve, never backward motion.
+  const curve = (e) => {
     const p = L.pos[e.fromEpisodeId], c = L.pos[e.toEpisodeId]
     if (!p || !c) return null
-    const down = c.y > p.y
-    const x1 = p.x + NV.W - 18, y1 = down ? p.y + NV.H - 4 : p.y + 4
+    const side = c.y > p.y ? 1 : -1
+    const x1 = p.x + NV.W - 2, y1 = p.y + NV.H / 2 + side * 24
     const x2 = c.x - 3, y2 = c.y + NV.H / 2
-    return { x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 }
+    const bend = Math.max(48, (x2 - x1) * 0.45)
+    return { d: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}` }
   }
 
   return (
@@ -328,47 +322,26 @@ function StoryNarrative({ graph, eventsOpen, detail, setDetail }) {
               </marker>
             </defs>
             {branchEdges.map((e, i) => {
-              const g = edgeLine(e)
+              const g = curve(e)
               if (!g) return null
-              const target = (nv.nodes || []).find(n => n.episodeId === e.toEpisodeId)
               return (
-                <g key={`be${i}`}>
-                  <line x1={g.x1} y1={g.y1} x2={g.x2} y2={g.y2}
-                        className={`nv-edge ${e.kind}`} markerEnd="url(#nv-arrow)" />
-                  <text x={g.mx} y={g.my - 5} className="nv-elabel" textAnchor="middle"
-                        onClick={() => target && openEpisode(target)}>{e.label}</text>
-                </g>
+                <path key={`be${i}`} d={g.d} className={`nv-edge ${e.kind}`} markerEnd="url(#nv-arrow)">
+                  <title>{e.label}{e.evidence?.sharedFiles ? ` · ${e.evidence.sharedFiles} shared files` : ''}</title>
+                </path>
               )
             })}
             {returnEdges.map((e, i) => {
               const p = L.pos[e.fromEpisodeId], c = L.pos[e.toEpisodeId]
               if (!p || !c) return null
-              const x1 = p.x + NV.W, y1 = p.y + NV.H / 2
-              const down = c.y + NV.H < p.y                    // target above → exit upward
-              const x2 = c.x + 24, y2 = down ? c.y + NV.H + 3 : c.y - 3
+              const x1 = p.x + NV.W - 2, y1 = p.y + NV.H / 2
+              const up = c.y < p.y                             // rejoin from below or above
+              const x2 = c.x + NV.W * 0.3, y2 = up ? c.y + NV.H + 3 : c.y - 3
+              const bend = Math.max(60, (x2 - x1) * 0.5)
+              const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2} ${y2 + (up ? bend * 0.5 : -bend * 0.5)}, ${x2} ${y2}`
               return (
-                <g key={`re${i}`}>
-                  <line x1={x1} y1={y1} x2={x2} y2={y2}
-                        className="nv-edge returns" markerEnd="url(#nv-arrow)" />
-                  <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 5} className="nv-elabel" textAnchor="middle">returned</text>
-                </g>
-              )
-            })}
-            {L.cpos.map((c, i) => {
-              const p = L.pos[c.parentId]
-              if (!p) return null
-              const x1 = p.x + NV.W - 18, y1 = c.side > 0 ? p.y + NV.H - 4 : p.y + 4
-              const x2 = c.x - 3, y2 = c.y + NV.CH / 2
-              const label = c.branch.lifecycle === 'abandoned' ? 'dropped' : (c.branch.lifecycle || 'watch')
-              return (
-                <g key={`ce${i}`}>
-                  <line x1={x1} y1={y1} x2={x2} y2={y2}
-                        className="nv-edge concept" markerEnd="url(#nv-arrow)" />
-                  <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 5} className="nv-elabel" textAnchor="middle"
-                        onClick={() => setDetail({ kind: 'branch', key: c.branch.conceptId, branch: c.branch, node: tlById[c.parentId] })}>
-                    {label}
-                  </text>
-                </g>
+                <path key={`re${i}`} d={d} className="nv-edge returns" markerEnd="url(#nv-arrow)">
+                  <title>returned to the main direction</title>
+                </path>
               )
             })}
           </svg>
@@ -388,23 +361,34 @@ function StoryNarrative({ graph, eventsOpen, detail, setDetail }) {
             const p = L.pos[n.episodeId]
             if (!p) return null
             const tlNode = tlById[n.episodeId] || n
+            const ups = tlNode.branchesAbove || []
+            const downs = tlNode.branchesBelow || []
+            const chip = (b, j) => (
+              <span key={j}
+                    className={`nv-chip ${b.lifecycle === 'abandoned' ? 'dropped' : (b.lifecycle || 'watch')}` +
+                               (isSel('branch', b.conceptId) ? ' selected' : '')}
+                    title={`${b.lifecycle || ''}${b.trigger ? ` — revisit ${b.trigger}` : ''}: ${b.title}`}
+                    onClick={() => setDetail({ kind: 'branch', key: b.conceptId, branch: b, node: tlNode })}>
+                {b.lifecycle === 'abandoned' ? '✕ ' : ''}{b.title}
+              </span>
+            )
             return (
               <div className="nv-abs" key={n.episodeId} style={{ left: p.x, top: p.y }}>
+                {/* decision notes orbit the episode that produced them */}
+                {ups.length > 0 && (
+                  <div className="nv-halo up" style={{ bottom: NV.H + 7 }}>{ups.map(chip)}</div>
+                )}
                 <EpisodeBox node={tlNode} isNow={n.episodeId === lastSpine}
                             cont={n.lane === 'spine' && n.episodeId !== spineIds[0]}
                             lane={n.lane}
                             selected={isSel('episode', n.episodeId)}
                             onClick={() => openEpisode(n)} />
+                {downs.length > 0 && (
+                  <div className="nv-halo down" style={{ top: NV.H + 7 }}>{downs.map(chip)}</div>
+                )}
               </div>
             )
           })}
-
-          {L.cpos.map((c, i) => (
-            <div className="nv-abs" key={`c${i}`} style={{ left: c.x, top: c.y }}>
-              <TimelineBranch branch={c.branch}
-                              onClick={() => setDetail({ kind: 'branch', key: c.branch.conceptId, branch: c.branch, node: tlById[c.parentId] })} />
-            </div>
-          ))}
         </div>
       </div>
 
@@ -463,21 +447,6 @@ function BridgeTick({ tick, selected, onClick }) {
 }
 
 // A lifecycle branch above/below a beat, with its little connector stem.
-function TimelineBranch({ branch, onClick }) {
-  const kind = branch.lifecycle === 'abandoned' ? 'abandoned'
-    : branch.lifecycle === 'watch' ? 'watch'
-      : branch.lifecycle === 'next' ? 'next' : 'deferred'
-  const kindLabel = kind === 'abandoned' ? '✕ dropped' : kind
-  return (
-    <div className={`tellmap-branch tlv3-branch ${kind}`} onClick={onClick}
-         style={{ cursor: 'pointer' }}
-         title={branch.trigger ? `${branch.title} — revisit ${branch.trigger}` : branch.title}>
-      <span className="tellmap-branch-kind">{kindLabel}</span>
-      <span className="tellmap-branch-title">{branch.title}</span>
-    </div>
-  )
-}
-
 // ── Inline Story drawer — details open IN the board, never by switching views ──
 // Canvas spotlighting (amber files / commit impact) remains available as explicit
 // "→ canvas" secondary actions; the default click keeps the user in the story.
