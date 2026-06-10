@@ -44,6 +44,30 @@ class ScopedCommitTest(unittest.TestCase):
     def _landed_files(self):
         return self._g("show", "--name-only", "--format=", "HEAD").stdout.split()
 
+
+    # Landed commits sign themselves — the orange box appears as co-author.
+    def test_landed_commit_carries_openfde_coauthor(self):
+        (self.root / "a.py").write_text("a-co\n")
+        ep = {"episodeId": "ep_co", "tag": "P9", "title": "Co Author", "prompt": "p",
+              "status": "reviewing", "files": ["a.py"], "commitShas": []}
+        self.p.upsert_episode(ep)
+        res = autoland.land_episode(self.root, self.p, ep, auto=False)
+        self.assertTrue(res["committed"])
+        msg = self._g("log", "-1", "--pretty=%B").stdout
+        self.assertIn("Co-Authored-By: openfde <openfde@openfde.invalid>", msg)
+
+    def test_coauthor_overridden_from_agent_settings(self):
+        (self.root / ".openfde").mkdir(exist_ok=True)
+        (self.root / ".openfde" / "agent_settings.json").write_text(
+            '{"coauthor": "openfde <99+openfde-box@users.noreply.github.com>"}')
+        (self.root / "a.py").write_text("a-co2\n")
+        ep = {"episodeId": "ep_co2", "tag": "P10", "title": "Co Author Cfg", "prompt": "p",
+              "status": "reviewing", "files": ["a.py"], "commitShas": []}
+        self.p.upsert_episode(ep)
+        autoland.land_episode(self.root, self.p, ep, auto=False)
+        msg = self._g("log", "-1", "--pretty=%B").stdout
+        self.assertIn("Co-Authored-By: openfde <99+openfde-box@users.noreply.github.com>", msg)
+
     # 1) git_commit_paths stages only the listed paths (incl. deletion + new file).
     def test_commit_paths_isolates_listed_paths(self):
         (self.root / "a.py").write_text("a2\n")
