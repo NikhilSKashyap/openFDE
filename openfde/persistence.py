@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -271,15 +272,27 @@ class Persistence:
         Raises:
             OSError — if the temp write or rename fails
         """
-        tmp = path.with_suffix(".tmp")
+        # Unique tmp per write: a FIXED tmp name ("episodes.tmp") let two writers —
+        # a dying and a starting server, or two executor threads — interleave bytes
+        # in the SAME tmp file, and os.replace() then promoted the splice (observed
+        # live: torn episodes.json). pid+tid+nonce makes each write's tmp private;
+        # os.replace stays the atomic publish.
+        tmp = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp")
         try:
             # Self-heal: recreate the .openfde dir if it was removed mid-session.
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
         except OSError as exc:
             logger.error("Failed to write %s: %s", path.name, exc)
+            try:
+                tmp.unlink(missing_ok=True)        # never leave private tmps behind
+            except OSError:
+                pass
             raise
 
     # ------------------------------------------------------------------ #

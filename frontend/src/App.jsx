@@ -115,6 +115,8 @@ export default function App() {
   const [episodes, setEpisodes] = useState([])
   const [outsideBucket, setOutsideBucket] = useState(null)
   const [landing, setLanding] = useState(false)
+  // Why the last Land was a no-op ("no dirty files attributed…") — shown on the card.
+  const [landNote, setLandNote] = useState(null)
   // Live follow — when ON, the canvas camera centers the file an agent is editing
   // and follows as it moves on. Watch glow is ALWAYS on; this only controls the
   // camera. Persisted in localStorage (theme pattern); default ON.
@@ -179,9 +181,9 @@ export default function App() {
   // Done card grouped/labeled by its prompt. Idempotent (SYNC_EPISODE_COMMITS only
   // adds commits not already represented), so frequent polls don't churn the board.
   const refreshEpisodes = async () => {
-    if (document.hidden) return
+    if (document.hidden) return null
     const res = await getReviewEpisodes()
-    if (!res?.ok) return
+    if (!res?.ok) return null
     const eps = Array.isArray(res.episodes) ? res.episodes : []
     setEpisodes(eps)
     setOutsideBucket(res.outside || null)
@@ -204,8 +206,11 @@ export default function App() {
       } : null,
       // Land-as-PR metadata (lite) — drives the PR #N badge on OpenPM cards.
       pr: ep.pr ? { number: ep.pr.number, url: ep.pr.url } : null,
+      // Deterministic readiness verdict (server-embedded) → "ready for PR" badge.
+      prReady: ep.prReadiness?.status === 'ready',
     })))
     if (commits.length) pmDispatch({ type: 'SYNC_EPISODE_COMMITS', commits })
+    return eps     // enriched list — onLandChanges re-spotlights the landed episode from it
   }
 
   // Click a prompt chip → spotlight that episode: its edited files turn AMBER on
@@ -225,6 +230,7 @@ export default function App() {
       commits: ep.commits || [], epKind: ep.kind || 'agent',
       verify: ep.verify || null,
       pr: ep.pr || null,
+      prReadiness: ep.prReadiness || null,
     })
     setActiveView('whiteboard')
   }
@@ -266,21 +272,35 @@ export default function App() {
   // Land: OpenFDE creates the commit for the reviewed worktree changes and links
   // it to the active prompt episode (or a fresh "Manual changes" one). The only
   // user-facing commit path.
-  async function onLandChanges() {
+  async function onLandChanges(preferredEpisodeId) {
     if (landing) return
     setLanding(true)
+    setLandNote(null)
     try {
-      // Prefer the episode awaiting review (reviewing or auto-land-held); else manual.
-      const reviewing = episodes.find(e => (e.status === 'reviewing' || e.status === 'needs_manual_land') && (e.files || []).length)
+      // Land THE episode whose card was clicked when given (the button says "these
+      // changes"); else the first awaiting review (worktree-card path); else manual.
+      const preferred = typeof preferredEpisodeId === 'string'
+        ? episodes.find(e => e.episodeId === preferredEpisodeId) : null
+      const reviewing = preferred
+        || episodes.find(e => (e.status === 'reviewing' || e.status === 'needs_manual_land') && (e.files || []).length)
       const episodeId = reviewing?.episodeId || 'manual'
       const res = await landEpisode(episodeId, {})
-      await Promise.all([refreshEpisodes(), (async () => {
+      const [freshEps] = await Promise.all([refreshEpisodes(), (async () => {
         const commits = await getGitTimeline(); if (Array.isArray(commits)) setGitCommits(commits)
       })(), refreshWorktree()])
       if (res?.committed && res.episode) {
-        onSpotlightEpisode(res.episode)        // switch the spotlight to the landed prompt
-      } else {
+        // Spotlight the ENRICHED episode (carries .commits) so the Land button
+        // becomes the clickable commit chips in place — the raw land response has
+        // commitShas but no enriched commit rows, which read as "nothing happened".
+        const enriched = (Array.isArray(freshEps) ? freshEps : [])
+          .find(e => e.episodeId === res.episode.episodeId)
+        onSpotlightEpisode(enriched || res.episode)
+      } else if (res && !res.committed) {
+        // Honest no-op: say WHY nothing landed instead of silently doing nothing.
+        setLandNote(res.reason || res.status || 'nothing to commit for this episode')
         setCanvasSpotlight(s => (s?.kind === 'worktree' ? null : s))
+      } else {
+        setLandNote('land did not return — the server may still be working; the rail will refresh')
       }
     } finally {
       setLanding(false)
@@ -384,7 +404,17 @@ export default function App() {
     if (!s) return null
     return askConcept(question, {
       kind: s.kind, label: s.label, summary: s.summary || '', sha: s.sha || null,
-      files: s.files || [], concepts: s.concepts || [],
+      // Episode spotlights keep their files in amberFiles (files: [] drives the
+      // canvas dim) — sending the empty list told the model "appears in 0 files"
+      // and it concluded the work was never implemented. Send the real list.
+      files: (s.files && s.files.length ? s.files : s.amberFiles) || [],
+      concepts: s.concepts || [],
+      // Episode grounding: the record of what actually happened.
+      tag: s.tag || null, status: s.status || null,
+      prompt: s.kind === 'episode' ? (s.prompt || '').slice(0, 1500) : null,
+      commits: s.kind === 'episode'
+        ? (s.commits || []).slice(0, 8).map(c => ({ sha: c.shortSha || c.sha, title: c.displayTitle || '' }))
+        : null,
       focusConcept: concept ? concept.identifier : null,
     })
   }
@@ -1681,6 +1711,7 @@ export default function App() {
                 onClose={() => setCanvasSpotlight(null)}
                 onLand={onLandChanges}
                 landing={landing}
+                landNote={landNote}
                 onSpotlightCommit={onSpotlightCommit}
               />
             )}

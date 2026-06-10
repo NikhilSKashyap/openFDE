@@ -113,7 +113,9 @@ export const listGithubIssues = () => apiFetch('/api/issues/github/list')
  * @returns {Promise<{ok: boolean, task?: Object, created?: boolean, error?: string}|null>}
  */
 export const importGithubIssue = (payload) =>
-  apiFetch('/api/issues/github/import', { method: 'POST', body: JSON.stringify(payload) })
+  // Shells the local gh CLI (~1–5s); headroom over the 4s default.
+  apiFetch('/api/issues/github/import',
+    { method: 'POST', body: JSON.stringify(payload), _timeout: 30_000 })
 
 // ── Verify Gate (local receipts) ──────────────────────────────────────────
 
@@ -131,7 +133,9 @@ export const getVerifyStatus = () => apiFetch('/api/verify/status')
  * @returns {Promise<{ok: boolean, verify?: Object}|null>}
  */
 export const runVerify = (payload = {}) =>
-  apiFetch('/api/verify/run', { method: 'POST', body: JSON.stringify(payload) })
+  // The checks ARE the latency (suite + lint ≈ 20s here; each check may take up
+  // to 300s server-side) — wait for the receipts instead of aborting at 4s.
+  apiFetch('/api/verify/run', { method: 'POST', body: JSON.stringify(payload), _timeout: 300_000 })
 
 // ── Land as PR (episode → branch → GitHub PR via local gh) ───────────────
 
@@ -142,7 +146,18 @@ export const runVerify = (payload = {}) =>
  * @returns {Promise<{ok: boolean, pr?: Object, existing?: boolean, error?: string}|null>}
  */
 export const createEpisodePr = (episodeId) =>
-  apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr`, { method: 'POST', body: '{}' })
+  // Branch push + `gh pr create` are network ops (5–20s) — don't abort at 4s.
+  apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr`,
+    { method: 'POST', body: '{}', _timeout: 120_000 })
+
+/**
+ * Fresh, read-only ready-for-PR verdict (deterministic evidence + policy).
+ *
+ * @param {string} episodeId
+ * @returns {Promise<{ok: boolean, readiness?: Object}|null>}
+ */
+export const getPrReadiness = (episodeId) =>
+  apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr/readiness`)
 
 // ── Events ────────────────────────────────────────────────────────────────
 
@@ -284,8 +299,9 @@ export const postGitCommit = (payload) =>
 /** Commit diff (metadata, files, stat, capped patch). @returns {Promise<Object|null>} */
 export const getGitDiff = (sha) => apiFetch(`/api/git/commit/${encodeURIComponent(sha)}/diff`)
 
-/** Generate + write + commit REPORT.md. @returns {Promise<{ok, markdown, commit?}|null>} */
-export const postReport = () => apiFetch('/api/report', { method: 'POST', body: JSON.stringify({}) })
+/** Generate + write + commit REPORT.md (LLM-backed — minutes, not 4s). @returns {Promise<{ok, markdown, commit?}|null>} */
+export const postReport = () =>
+  apiFetch('/api/report', { method: 'POST', body: JSON.stringify({}), _timeout: 300_000 })
 
 // ── Execution backends + Claude Code workflow bridge (Step 19) ──────────────
 
@@ -510,7 +526,9 @@ export const getPromptGraph = () => apiFetch('/api/story/prompt-graph')
  * @returns {Promise<{ok, providers:Array, upgraded:number}|null>}
  */
 export const summarizeEpisodes = (limit = 1) =>
-  apiFetch('/api/review/episodes/summarize', { method: 'POST', body: JSON.stringify({ limit }) })
+  // LLM summarizer subprocess — give it the same long leash as the other model calls.
+  apiFetch('/api/review/episodes/summarize',
+    { method: 'POST', body: JSON.stringify({ limit }), _timeout: 300_000 })
 
 /**
  * Land the current meaningful worktree changes through OpenFDE — the only
@@ -519,8 +537,11 @@ export const summarizeEpisodes = (limit = 1) =>
  * @returns {Promise<{ok, committed, sha?, shortSha?, reason?, episode}|null>}
  */
 export const landEpisode = (episodeId, payload = {}) =>
+  // Landing runs the Verify Gate + LLM clustering server-side — minutes, not the
+  // default 4s. A short abort here LOOKS like "nothing happened" while the server
+  // lands anyway (observed live in the v1.1 feel-test).
   apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/land`,
-    { method: 'POST', body: JSON.stringify(payload) })
+    { method: 'POST', body: JSON.stringify(payload), _timeout: 300_000 })
 
 /**
  * Ask a question about the active concept/commit; routed to Architect or Senior
@@ -531,7 +552,9 @@ export const landEpisode = (episodeId, payload = {}) =>
  * @returns {Promise<{ok, answer, role, source}|null>}
  */
 export const askConcept = (question, context) =>
-  apiFetch('/api/concept/ask', { method: 'POST', body: JSON.stringify({ question, context }) })
+  // Routed through the Architect/Sr Dev LLM — answers take 10–60s, never 4s.
+  apiFetch('/api/concept/ask',
+    { method: 'POST', body: JSON.stringify({ question, context }), _timeout: 300_000 })
 
 /** List saved concept cards (newest-first). @returns {Promise<{ok, cards}|null>} */
 export const getConceptCards = () => apiFetch('/api/concept-cards')

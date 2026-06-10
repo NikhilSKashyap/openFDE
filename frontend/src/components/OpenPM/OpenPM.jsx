@@ -510,6 +510,16 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
             no verify
           </span>
         )}
+        {/* Ready-for-PR (deterministic gate) — only until the PR exists. */}
+        {!task.pr?.number && task.prReady && (
+          <span title="Deterministic gate: landed, clean tree, checks passed, not on base — ready to ship" style={{
+            fontSize: 9.5, fontWeight: 600, color: 'var(--solid)',
+            border: '1px dashed rgba(61,186,110,0.45)', background: 'rgba(61,186,110,0.06)',
+            padding: '1px 6px', borderRadius: 99,
+          }}>
+            ready for PR
+          </span>
+        )}
         {/* Land-as-PR evidence — the episode's pull request. */}
         {task.pr?.number && (
           <a
