@@ -100,7 +100,7 @@ export default function Whiteboard({
   return (
     <div className="wb-shell">
       <div className="arch-header">
-        <span className="arch-header-title">openArchitect</span>
+        <span className="arch-header-title">openarchitect</span>
         {/* Canvas-native commit lens (Step 37a Slice 3) — click a chip to see
             what changed; never replaces the Timeline tab. */}
         <CommitChipRail

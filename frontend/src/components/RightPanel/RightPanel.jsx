@@ -1946,7 +1946,7 @@ function LedgerMode() {
         {!loading && !err && hasEntries && <SpecRenderer markdown={md} />}
         {!loading && !err && !hasEntries && (
           <div style={{ color: 'var(--text-muted)', fontSize: 11, paddingTop: 8, lineHeight: 1.6 }}>
-            No ledger entries yet. Press <strong>Execute</strong> on the canvas to record the
+            No ledger entries yet. Press <strong>Run</strong> on the canvas to record the
             first architect / sr-dev exchange into <code style={{ fontSize: 10 }}>project.md</code>.
           </div>
         )}

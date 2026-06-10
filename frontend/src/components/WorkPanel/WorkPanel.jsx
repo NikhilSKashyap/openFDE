@@ -69,7 +69,7 @@ export default function WorkPanel({
         {moment === 'orient' && (
           <Section title="Start work">
             <PromptBox value={intent} onChange={setIntent} onSubmit={submit}
-              placeholder="e.g. Add login to the auth module" action="Execute" disabled={!onExecute} />
+              placeholder="e.g. Add login to the auth module" action="Run" disabled={!onExecute} />
             <p className="work-hint">Select a module on the canvas to understand it, or describe a change above.</p>
           </Section>
         )}
@@ -86,7 +86,7 @@ export default function WorkPanel({
             </Section>
             <Section title="Change this">
               <PromptBox value={intent} onChange={setIntent} onSubmit={submit}
-                placeholder={`Change ${scope || 'this'}…`} action="Execute" disabled={!onExecute} />
+                placeholder={`Change ${scope || 'this'}…`} action="Run" disabled={!onExecute} />
             </Section>
             {story?.steps?.length > 0 && (
               <Details label="How it works (story)">
@@ -105,7 +105,7 @@ export default function WorkPanel({
               <div className="work-scope">{scope || 'Repository-level'}</div>
               <PermissionSummary selectionContext={selectionContext} />
               <PromptBox value={intent} onChange={setIntent} onSubmit={submit}
-                placeholder="Describe the change…" action="Execute" disabled={!onExecute} />
+                placeholder="Describe the change…" action="Run" disabled={!onExecute} />
             </Section>
             {specMarkdown && (
               <Details label="Compiled scope (details)">
