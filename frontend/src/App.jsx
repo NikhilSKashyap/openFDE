@@ -210,6 +210,7 @@ export default function App() {
       prReady: ep.prReadiness?.status === 'ready',
     })))
     if (commits.length) pmDispatch({ type: 'SYNC_EPISODE_COMMITS', commits })
+    return eps     // enriched list — onLandChanges re-spotlights the landed episode from it
   }
 
   // Click a prompt chip → spotlight that episode: its edited files turn AMBER on
