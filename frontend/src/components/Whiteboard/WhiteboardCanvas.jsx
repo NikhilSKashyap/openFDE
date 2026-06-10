@@ -943,7 +943,7 @@ export default function WhiteboardCanvas({
           {executing ? 'Compiling…' : (
             <>
               <span className="canvas-execute-glyph" aria-hidden="true">▶</span>
-              Execute
+              Run
               <span className="canvas-execute-scope">{selectedIds.size > 0 ? `${selectedIds.size} selected` : 'whole repo'}</span>
             </>
           )}

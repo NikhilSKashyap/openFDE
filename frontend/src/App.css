@@ -94,13 +94,12 @@
 }
 .toolbar-brand:hover { color: var(--text); }
 
-/* the brand mark IS the orange box — a tiny box, not a dot */
-.brand-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: var(--accent-orange);
-  box-shadow: 0 0 6px var(--accent-orange-glow);
+/* the brand mark IS the orange box — the real logo, softly lit */
+.brand-logo {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  box-shadow: 0 0 7px var(--accent-orange-glow);
   flex-shrink: 0;
 }
 
@@ -1407,7 +1406,7 @@
 .tlv3-receipt { display: flex; flex-direction: column; align-items: center; }
 .tlv3-stem {
   width: 1px; height: 9px; flex-shrink: 0;
-  background: color-mix(in srgb, var(--accent-orange) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 .tlv3-tick {
   font-size: 9.5px; font-family: ui-monospace, monospace; line-height: 1.5;
@@ -1425,11 +1424,11 @@
 .nv-svg { position: absolute; inset: 0; pointer-events: none; }
 .nv-svg path { pointer-events: stroke; }
 .nv-abs { position: absolute; }
-.nv-edge { stroke: color-mix(in srgb, var(--accent-orange) 40%, transparent); stroke-width: 1.8; fill: none; opacity: 0.9; }
-.nv-edge.explores { stroke: color-mix(in srgb, var(--accent-orange) 50%, transparent); }
+.nv-edge { stroke: color-mix(in srgb, var(--accent) 40%, transparent); stroke-width: 1.8; fill: none; opacity: 0.9; }
+.nv-edge.explores { stroke: color-mix(in srgb, var(--accent) 50%, transparent); }
 .nv-edge.drops { stroke: color-mix(in srgb, #e56b6b 42%, transparent); }
 .nv-edge.returns { stroke: color-mix(in srgb, var(--solid) 40%, transparent); stroke-dasharray: 7 6; }
-.nv-arrowhead { fill: color-mix(in srgb, var(--accent-orange) 60%, transparent); }
+.nv-arrowhead { fill: color-mix(in srgb, var(--accent) 60%, transparent); }
 
 /* decision-note halos — compact chips hugging their episode, never graph paths */
 .nv-halo {
@@ -1455,14 +1454,15 @@
   justify-items: center; padding: 0 10px; box-sizing: border-box;
 }
 .nv-ladder .tlv3-bridge-row { max-width: 100%; }
-/* receipt ladder rail — telemetry track between flight points: orange */
+/* the spine rail is SIGNAL flowing in (violet, like the banner's intent line);
+   the beats and receipts it connects are the record (orange) */
 .nv-line {
   position: relative; width: calc(100% + 20px); margin: 0 -10px; height: 3px;
-  background: color-mix(in srgb, var(--accent-orange) 48%, transparent);
+  background: color-mix(in srgb, var(--accent) 48%, transparent);
 }
 .nv-line::after {
   content: ""; position: absolute; right: 0; top: 50%; transform: translateY(-50%);
-  border-left: 9px solid color-mix(in srgb, var(--accent-orange) 80%, transparent);
+  border-left: 9px solid color-mix(in srgb, var(--accent) 80%, transparent);
   border-top: 6px solid transparent; border-bottom: 6px solid transparent;
 }
 .tellmap-box.lane-explore { border-style: dashed; border-color: color-mix(in srgb, var(--accent-orange) 60%, var(--border)); }
@@ -1551,12 +1551,12 @@
   background: var(--surface);
   flex-shrink: 0;
 }
+/* brand-family names are lowercase everywhere; openarchitect speaks intent (violet) */
 .arch-header-title {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.3px;
-  color: var(--text-muted);
-  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--accent);
 }
 .arch-header-actions { display: flex; gap: 6px; align-items: center; }
 
