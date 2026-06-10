@@ -1328,17 +1328,29 @@
 .tellmap-branch.next { border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); background: rgba(124,111,247,0.06); }
 .tellmap-branch.next .tellmap-branch-kind { color: var(--accent); }
 
-/* the bridge: a line carrying compact ticks between two beats */
-.tlv3-bridge {
-  display: flex; align-items: center; gap: 5px; padding: 0 4px;
-  min-width: 70px; max-width: 420px; flex-wrap: wrap; justify-content: center;
+/* the bridge as an EVIDENCE LADDER: receipts above (verify / PR / issue) and
+   below (commits / files / events) a single uninterrupted thick spine arrow,
+   each chip connected by its own vertical stem — never pills inside the line. */
+.tlv3-bridge-lane {
+  display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 0 10px;
+  min-width: 90px; max-width: 340px; align-self: stretch;
+  justify-content: center; align-items: flex-end; align-content: flex-end;
 }
-.tlv3-line { flex: 1 0 14px; height: 1.6px; background: color-mix(in srgb, var(--accent) 55%, transparent); min-width: 14px; }
-.tlv3-line.arrow { position: relative; }
-.tlv3-line.arrow::after {
-  content: ""; position: absolute; right: -1px; top: 50%; transform: translateY(-50%);
-  border-left: 6px solid color-mix(in srgb, var(--accent) 75%, transparent);
-  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+.tlv3-bridge-lane.down { align-items: flex-start; align-content: flex-start; }
+.tlv3-receipt { display: flex; flex-direction: column; align-items: center; }
+.tlv3-stem {
+  width: 1px; height: 10px; flex-shrink: 0;
+  background: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.tlv3-bridgeline {
+  position: relative; height: 3px; border-radius: 2px; align-self: center;
+  background: color-mix(in srgb, var(--accent) 60%, transparent);
+  margin: 0 1px;
+}
+.tlv3-bridgeline::after {
+  content: ""; position: absolute; right: -2px; top: 50%; transform: translateY(-50%);
+  border-left: 8px solid color-mix(in srgb, var(--accent) 85%, transparent);
+  border-top: 5px solid transparent; border-bottom: 5px solid transparent;
 }
 .tlv3-tick {
   font-size: 9.5px; font-family: ui-monospace, monospace; line-height: 1.5;
