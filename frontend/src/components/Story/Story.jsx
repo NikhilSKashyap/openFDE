@@ -94,9 +94,9 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
             style={{
               padding: '3px 10px', fontSize: 11, fontFamily: 'inherit', fontWeight: 600,
               cursor: 'pointer', borderRadius: 99,
-              color: eventsOpen ? 'var(--dotted)' : 'var(--text-muted)',
-              background: eventsOpen ? 'rgba(74,158,255,0.10)' : 'transparent',
-              border: `1px solid ${eventsOpen ? 'rgba(74,158,255,0.4)' : 'var(--border)'}`,
+              color: eventsOpen ? 'var(--accent-orange)' : 'var(--text-muted)',
+              background: eventsOpen ? 'var(--accent-orange-soft)' : 'transparent',
+              border: `1px solid ${eventsOpen ? 'var(--accent-orange-border)' : 'var(--border)'}`,
             }}
           >
             Events
@@ -110,14 +110,14 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
               display: 'flex', alignItems: 'center', gap: 5, padding: '3px 10px',
               fontSize: 11, fontFamily: 'inherit', fontWeight: 600, cursor: 'pointer',
               borderRadius: 99, transition: 'color 0.12s, background 0.12s, border-color 0.12s',
-              color: tellMode ? 'var(--accent)' : 'var(--text-muted)',
-              background: tellMode ? 'rgba(124,111,247,0.12)' : 'transparent',
-              border: `1px solid ${tellMode ? 'rgba(124,111,247,0.45)' : 'var(--border)'}`,
+              color: tellMode ? 'var(--accent-orange)' : 'var(--text-muted)',
+              background: tellMode ? 'var(--accent-orange-soft)' : 'transparent',
+              border: `1px solid ${tellMode ? 'var(--accent-orange-border)' : 'var(--border)'}`,
             }}
           >
             <span className={'story-tell-dot' + (tellMode ? ' on' : '')} style={{
-              width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-              background: tellMode ? 'var(--accent)' : 'var(--text-muted)',
+              width: 6, height: 6, borderRadius: 2, flexShrink: 0,
+              background: tellMode ? 'var(--accent-orange)' : 'var(--text-muted)',
             }} />
             {tellMode ? 'Telling' : 'Tell'}
           </button>
@@ -425,10 +425,10 @@ function StoryNarrative({ graph, eventsOpen, detail, setDetail }) {
 const TICK_KIND = {
   commit: { color: 'var(--solid)' },
   verify: { color: 'var(--solid)' },
-  pr:     { color: 'var(--accent)' },
-  issue:  { color: 'var(--accent)' },
+  pr:     { color: 'var(--accent-orange)' },
+  issue:  { color: 'var(--accent-orange)' },
   files:  { color: 'var(--text-muted)' },
-  event:  { color: 'var(--dotted)' },
+  event:  { color: 'var(--accent-orange)' },
 }
 
 function BridgeTick({ tick, selected, onClick }) {

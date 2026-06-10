@@ -431,13 +431,13 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
         >
           {task.episodeTag && (
             <span style={{
-              flexShrink: 0, fontSize: 9, fontWeight: 700, color: 'var(--accent)',
-              background: 'rgba(124,111,247,0.12)', border: '1px solid rgba(124,111,247,0.3)',
+              flexShrink: 0, fontSize: 9, fontWeight: 700, color: 'var(--accent-orange)',
+              background: 'var(--accent-orange-soft)', border: '1px solid var(--accent-orange-border)',
               borderRadius: 5, padding: '0 5px', letterSpacing: '0.3px',
             }}>{task.episodeTag}</span>
           )}
           <span style={{
-            fontSize: 10, color: 'var(--accent)', fontWeight: 600,
+            fontSize: 10, color: 'var(--accent-orange)', fontWeight: 600,
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>{task.promptTitle || task.promptLabel}</span>
         </div>
