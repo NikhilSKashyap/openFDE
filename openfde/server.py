@@ -330,6 +330,16 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     openfde_dir = path / ".openfde"
     openfde_dir.mkdir(exist_ok=True)
 
+    # One watcher per repo. Two live processes (the restart-overlap window) tore
+    # episodes.json via a shared tmp and captured duplicate episode pairs — refuse
+    # loudly instead. Stale locks (dead pid) are swept automatically.
+    from openfde.instance_lock import WatchLockHeld, acquire_watch_lock, release_watch_lock
+    try:
+        watch_lock = acquire_watch_lock(openfde_dir)
+    except WatchLockHeld as exc:
+        logging.getLogger("openfde").error("%s", exc)
+        return
+
     persistence = Persistence(openfde_dir)
     manager     = ConnectionManager()
 
@@ -3195,3 +3205,4 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         await runner.cleanup()
+        release_watch_lock(watch_lock)
