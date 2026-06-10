@@ -223,9 +223,10 @@ class TurnBoundaryLandTest(unittest.TestCase):
 
 
 class SessionAwareIdleTest(unittest.TestCase):
-    """The idle fallback (`_maybe_autoland`) requires file-quiet AND transcript-quiet — a
-    long agent turn (edit → minutes of thinking/tests → edit) must not be split just
-    because no repo file changed for the window."""
+    """Idle landing is OPT-IN now (whole episodes beat eager commits). The default
+    NEVER lands on silence — even file-quiet + transcript-quiet split long agent
+    turns (one long tool call keeps the transcript silent past any window). The
+    double-quiet gate is still tested below via allow_idle=True (the opt-in path)."""
 
     def _seed(self, d, session_id="sess1"):
         import time as _t
@@ -241,41 +242,66 @@ class SessionAwareIdleTest(unittest.TestCase):
         last_change = {"episode_idle": _t.time() - 999}        # files LONG quiet
         return root, p, last_change
 
-    def test_holds_while_transcript_still_streams(self):
+    def test_default_never_lands_on_silence_alone(self):
+        # THE Slice-A guarantee: everything quiet for ages → still reviewing.
+        import os, time as _t
+        with tempfile.TemporaryDirectory() as d:
+            root, p, last_change = self._seed(d)
+            os.environ["OPENFDE_LLM_SUMMARY"] = "0"
+            try:                                               # default: idle landing disabled
+                asyncio.run(pc._maybe_autoland(root, p, _NullManager(), last_change, 12,
+                                               {"sess1": _t.time() - 9999}))
+            finally:
+                os.environ.pop("OPENFDE_LLM_SUMMARY", None)
+            ep = p.get_episode("episode_idle")
+            self.assertEqual(ep["status"], "reviewing")        # parked for boundary/manual Land
+            self.assertEqual(ep["commitShas"], [])             # nothing committed
+
+    def test_optin_holds_while_transcript_still_streams(self):
         import os, time as _t
         with tempfile.TemporaryDirectory() as d:
             root, p, last_change = self._seed(d)
             os.environ["OPENFDE_LLM_SUMMARY"] = "0"
             try:                                               # transcript appended 1s ago → mid-turn
                 asyncio.run(pc._maybe_autoland(root, p, _NullManager(), last_change, 12,
-                                               {"sess1": _t.time()}))
+                                               {"sess1": _t.time()}, allow_idle=True))
             finally:
                 os.environ.pop("OPENFDE_LLM_SUMMARY", None)
             self.assertEqual(p.get_episode("episode_idle")["status"], "reviewing")  # held open
 
-    def test_lands_when_session_also_quiet(self):
+    def test_optin_lands_when_session_also_quiet(self):
         import os, time as _t
         with tempfile.TemporaryDirectory() as d:
             root, p, last_change = self._seed(d)
             os.environ["OPENFDE_LLM_SUMMARY"] = "0"
-            try:                                               # transcript quiet too → turn is over
+            try:                                               # opted in + both quiet → lands
                 asyncio.run(pc._maybe_autoland(root, p, _NullManager(), last_change, 12,
-                                               {"sess1": _t.time() - 999}))
+                                               {"sess1": _t.time() - 999}, allow_idle=True))
             finally:
                 os.environ.pop("OPENFDE_LLM_SUMMARY", None)
             self.assertEqual(p.get_episode("episode_idle")["status"], "landed")
 
-    def test_untracked_session_keeps_old_behavior(self):
-        import os, time as _t
+    def test_files_accumulate_across_quiet_gaps(self):
+        # The pay-off of NOT idle-landing: later edits in the same turn keep
+        # attaching to the SAME open episode instead of orphaning.
         with tempfile.TemporaryDirectory() as d:
-            root, p, last_change = self._seed(d, session_id=None)   # no sessionId on the episode
-            os.environ["OPENFDE_LLM_SUMMARY"] = "0"
-            try:                                               # activity for OTHER sessions is irrelevant
-                asyncio.run(pc._maybe_autoland(root, p, _NullManager(), last_change, 12,
-                                               {"someone-else": _t.time()}))
-            finally:
-                os.environ.pop("OPENFDE_LLM_SUMMARY", None)
-            self.assertEqual(p.get_episode("episode_idle")["status"], "landed")
+            root, g = TurnBoundaryLandTest._repo(self, d)
+            p = Persistence(root / ".openfde")
+            p.upsert_episode({"episodeId": "episode_acc", "title": "Long Turn",
+                              "prompt": "x", "source": "openfde-capture",
+                              "status": "open", "files": [], "commitShas": [],
+                              "sessionId": "sess1"})
+            baselines = {"episode_acc": set()}
+            (root / "feat.py").write_text("first edit\n")
+            asyncio.run(pc._link_changes(root, p, baselines, _NullManager(), {}))
+            self.assertEqual(p.get_episode("episode_acc")["files"], ["feat.py"])
+            # …a long quiet gap passes (no timer fires; nothing lands)…
+            (root / "later.py").write_text("second wave\n")
+            asyncio.run(pc._link_changes(root, p, baselines, _NullManager(), {}))
+            ep = p.get_episode("episode_acc")
+            self.assertEqual(ep["files"], ["feat.py", "later.py"])  # whole episode intact
+            self.assertEqual(ep["status"], "reviewing")
+            self.assertEqual(ep["commitShas"], [])
 
 
 # ── Codex passive capture ───────────────────────────────────────────────
