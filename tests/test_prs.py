@@ -5,9 +5,11 @@ unauthenticated, branch reuse/suffix, push/PR failure) with a scripted runner �
 no git mutation, no network, no real gh.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from openfde.prs import branch_slug, build_pr_text, create_episode_pr
+from openfde.prs import branch_slug, build_pr_text, create_episode_pr, pr_readiness
 
 SHA = "a" * 40
 
@@ -222,6 +224,108 @@ class CreatePrTest(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("gh pr create failed", res["error"])
         self.assertTrue(res["pushed"])                                  # evidence for Review
+
+
+GH_OK = lambda name: "/usr/local/bin/gh"          # noqa: E731 — shutil.which stand-in
+GH_MISSING = lambda name: None                    # noqa: E731
+
+
+class ReadinessTest(unittest.TestCase):
+    """pr_readiness — deterministic, read-only ready/blocked/created verdicts."""
+
+    def test_ready_when_clean_landed_verified_and_not_on_base(self):
+        run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+        r = pr_readiness("/r", _episode(), runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "ready")
+        self.assertEqual(r["suggestedAction"], "create_pr")
+        self.assertEqual(r["blockedBy"], [])
+        self.assertIn("1 landed commit", r["reasons"])
+        self.assertIn("worktree clean", r["reasons"])
+        self.assertIn("unit tests passed", r["reasons"])
+        self.assertIn("frontend lint passed", r["reasons"])
+
+    def test_readiness_is_read_only(self):
+        # The whole verdict costs three git reads — never branch/push/gh.
+        run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+        pr_readiness("/r", _episode(), runner=run, which=GH_OK)
+        self.assertEqual(len(run.calls), 3)
+        self.assertTrue(all(c[0] == "git" for c in run.calls))
+        allowed = {("git", "status"), ("git", "symbolic-ref"), ("git", "merge-base")}
+        self.assertTrue(all(tuple(c[:2]) in allowed for c in run.calls))
+
+    def test_blocked_no_commits(self):
+        run = scripted_runner([CLEAN])                       # no merge-base without a head
+        r = pr_readiness("/r", _episode(commitShas=[]), runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "blocked")
+        self.assertEqual(r["suggestedAction"], "fix_and_rerun")
+        self.assertEqual(r["reasons"], [])
+        self.assertIn("no landed commits", r["blockedBy"])
+
+    def test_blocked_dirty_worktree(self):
+        run = scripted_runner([FakeProc(stdout=" M a.py\n"), SYMREF, NOT_MERGED])
+        r = pr_readiness("/r", _episode(), runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "blocked")
+        self.assertIn("worktree has uncommitted files", r["blockedBy"])
+
+    def test_blocked_verify_failed(self):
+        run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+        ep = _episode(verify={"status": "failed", "checks": [
+            {"id": "unit-tests", "label": "Unit tests", "status": "failed", "summary": "2 failed"}]})
+        r = pr_readiness("/r", ep, runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "blocked")
+        self.assertIn("verification failed", r["blockedBy"])
+
+    def test_blocked_verify_missing_when_repo_has_checks(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tests").mkdir()
+            (Path(d) / "tests" / "test_x.py").write_text("# t\n")
+            run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+            r = pr_readiness(d, _episode(verify=None), runner=run, which=GH_OK)
+            self.assertEqual(r["status"], "blocked")
+            self.assertIn("verification has not run — run checks first", r["blockedBy"])
+
+    def test_verify_missing_allowed_when_no_checks_configured(self):
+        with tempfile.TemporaryDirectory() as d:             # nothing discoverable
+            run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+            r = pr_readiness(d, _episode(verify=None), runner=run, which=GH_OK)
+            self.assertEqual(r["status"], "ready")
+            self.assertIn("no checks configured — verification skipped", r["reasons"])
+
+    def test_created_when_pr_exists(self):
+        run = scripted_runner([])                            # zero subprocess calls
+        ep = _episode(pr={"provider": "github", "number": 1,
+                          "url": "https://github.com/acme/repo/pull/1"})
+        r = pr_readiness("/r", ep, runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "created")
+        self.assertEqual(r["suggestedAction"], "open_pr")
+        self.assertIn("PR #1 already created", r["reasons"])
+        self.assertEqual(r["pr"]["number"], 1)
+        self.assertEqual(run.calls, [])
+
+    def test_blocked_when_commit_already_on_base(self):
+        run = scripted_runner([CLEAN, SYMREF, MERGED])
+        r = pr_readiness("/r", _episode(), runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "blocked")
+        self.assertTrue(any("already on origin/main — no PR needed" in b for b in r["blockedBy"]))
+
+    def test_blocked_operational_episode(self):
+        run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+        r = pr_readiness("/r", _episode(signal="operational"), runner=run, which=GH_OK)
+        self.assertEqual(r["status"], "blocked")
+        self.assertTrue(any("operational/meta" in b for b in r["blockedBy"]))
+
+    def test_blocked_gh_missing(self):
+        run = scripted_runner([CLEAN, SYMREF, NOT_MERGED])
+        r = pr_readiness("/r", _episode(), runner=run, which=GH_MISSING)
+        self.assertEqual(r["status"], "blocked")
+        self.assertIn("gh CLI not installed", r["blockedBy"])
+
+    def test_batch_ctx_skips_own_git_calls(self):
+        run = scripted_runner([])                            # ctx supplies everything
+        ctx = {"clean": True, "base": "origin/main", "on_base": lambda sha: False, "gh_ok": True}
+        r = pr_readiness("/r", _episode(), runner=run, _ctx=ctx)
+        self.assertEqual(r["status"], "ready")
+        self.assertEqual(run.calls, [])
 
 
 if __name__ == "__main__":

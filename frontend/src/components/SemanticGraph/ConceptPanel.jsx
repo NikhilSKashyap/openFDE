@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
 import { cardTitleFor as commitDisplayTitle } from '../../store/pmState'
-import { createEpisodePr, runVerify } from '../../api/backend'
+import { createEpisodePr, getPrReadiness, runVerify } from '../../api/backend'
 
 // Friendly labels for the normalized episode lifecycle states (Auto-Land).
 const EP_STATUS_LABEL = {
@@ -69,15 +69,34 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   const [prLocal, setPrLocal] = useState(null)
   const [prBusy, setPrBusy] = useState(false)
   const [prErr, setPrErr] = useState('')
-  const pr = prLocal || spotlight.pr || null
+  const pr = (prLocal?.eid === spotlight.episodeId ? prLocal.data : null) || spotlight.pr || null
 
   async function landAsPr() {
     setPrBusy(true); setPrErr('')
     const res = await createEpisodePr(spotlight.episodeId)
     setPrBusy(false)
-    if (res?.ok && res.pr) setPrLocal(res.pr)
+    if (res?.ok && res.pr) setPrLocal({ eid: spotlight.episodeId, data: res.pr })
     else setPrErr(res?.error || 'PR failed')
   }
+
+  // Ready-for-PR (v1.1): deterministic verdict. The embedded payload paints first;
+  // a fresh read-only check replaces it when the card opens (worktree state moves).
+  // Results are keyed by episode so a stale fetch never leaks across spotlights.
+  const [readyLocal, setReadyLocal] = useState(null)
+  const readiness = (readyLocal?.eid === spotlight.episodeId ? readyLocal.data : null)
+    || spotlight.prReadiness || null
+
+  useEffect(() => {
+    if (!isEpisode || !spotlight.episodeId) return undefined
+    let alive = true
+    ;(async () => {
+      const r = await getPrReadiness(spotlight.episodeId)
+      if (alive && r?.ok && r.readiness) {
+        setReadyLocal({ eid: spotlight.episodeId, data: r.readiness })
+      }
+    })()
+    return () => { alive = false }
+  }, [isEpisode, spotlight.episodeId])
 
   const concepts = spotlight.concepts || []
   // Only cross-layer rename-coupled (high-signal) concepts may need review.
@@ -301,48 +320,79 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
               </div>
             )}
 
-            {/* Land as PR (manual, v1) — turn the landed episode into a branch + GitHub
-                PR whose body is the story + receipts. Idempotent: shows the PR link
-                once one exists. Needs landed commits and a clean worktree (the
-                backend enforces both; errors surface inline). */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 6px 2px' }}>
+            {/* Shipping panel (v1.1) — the deterministic ready-for-PR verdict, with
+                its receipts (✓) or blockers (✕). Evidence + policy decide; the
+                Create button is enabled ONLY when the gate says ready. An existing
+                PR replaces the whole panel with its link. */}
+            <div style={{ margin: '6px 6px 2px', padding: '7px 9px', borderRadius: 6,
+                          border: '1px solid var(--border)', background: 'var(--surface-2)' }}>
               {pr?.url ? (
-                <a
-                  href={pr.url} target="_blank" rel="noreferrer"
-                  onClick={e => e.stopPropagation()}
-                  title={`${pr.title || 'Pull request'} — ${pr.branch || ''}`}
-                  style={{
-                    fontSize: 10.5, fontWeight: 700, fontFamily: 'ui-monospace, monospace',
-                    color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
-                    border: '1px solid rgba(124,111,247,0.35)', padding: '2px 9px',
-                    borderRadius: 99, textDecoration: 'none',
-                  }}
-                >
-                  PR #{pr.number} ↗
-                </a>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--solid)' }}>
+                    Pull request created
+                  </span>
+                  <a
+                    href={pr.url} target="_blank" rel="noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    title={`${pr.title || 'Pull request'} — ${pr.branch || ''}`}
+                    style={{
+                      fontSize: 10.5, fontWeight: 700, fontFamily: 'ui-monospace, monospace',
+                      color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
+                      border: '1px solid rgba(124,111,247,0.35)', padding: '2px 9px',
+                      borderRadius: 99, textDecoration: 'none',
+                    }}
+                  >
+                    PR #{pr.number} ↗
+                  </a>
+                </div>
               ) : (
-                <button
-                  onClick={landAsPr}
-                  disabled={prBusy || episodeCommits.length === 0}
-                  title={episodeCommits.length === 0
-                    ? 'Needs landed commits first'
-                    : 'Create a branch from this episode’s commits and open a GitHub PR (gh)'}
-                  style={{
-                    padding: '2px 10px', borderRadius: 99, fontFamily: 'inherit', fontSize: 10.5,
-                    cursor: prBusy ? 'wait' : episodeCommits.length === 0 ? 'not-allowed' : 'pointer',
-                    color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
-                    border: '1px solid rgba(124,111,247,0.35)',
-                    opacity: episodeCommits.length === 0 ? 0.5 : 1,
-                  }}
-                >
-                  {prBusy ? 'Opening PR…' : '⇪ Land as PR'}
-                </button>
-              )}
-              {prErr && (
-                <span title={prErr} style={{ fontSize: 10, color: 'var(--violation)', maxWidth: 220,
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {prErr}
-                </span>
+                <>
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, marginBottom: 4,
+                    color: readiness?.status === 'ready' ? 'var(--solid)'
+                      : readiness?.status === 'blocked' ? 'var(--violation)' : 'var(--text-muted)',
+                  }}>
+                    {readiness?.status === 'ready' ? 'Ready to ship'
+                      : readiness?.status === 'blocked' ? 'Not ready for PR'
+                        : 'Checking readiness…'}
+                  </div>
+                  {(readiness?.status === 'ready' ? readiness.reasons : readiness?.blockedBy || [])
+                    .map(row => (
+                      <div key={row} style={{ display: 'flex', alignItems: 'baseline', gap: 6,
+                                              fontSize: 10.5, lineHeight: 1.6,
+                                              color: 'var(--text-muted)' }}>
+                        <span style={{ flexShrink: 0, fontWeight: 700,
+                                       color: readiness?.status === 'ready' ? 'var(--solid)' : 'var(--violation)' }}>
+                          {readiness?.status === 'ready' ? '✓' : '✕'}
+                        </span>
+                        <span>{row}</span>
+                      </div>
+                    ))}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                    <button
+                      onClick={landAsPr}
+                      disabled={prBusy || readiness?.status !== 'ready'}
+                      title={readiness?.status === 'ready'
+                        ? 'Create a branch from this episode’s commits and open a GitHub PR (gh)'
+                        : 'Blocked — resolve the items above first'}
+                      style={{
+                        padding: '2px 10px', borderRadius: 99, fontFamily: 'inherit', fontSize: 10.5,
+                        cursor: prBusy ? 'wait' : readiness?.status === 'ready' ? 'pointer' : 'not-allowed',
+                        color: 'var(--accent)', background: 'rgba(124,111,247,0.10)',
+                        border: '1px solid rgba(124,111,247,0.35)',
+                        opacity: readiness?.status === 'ready' ? 1 : 0.5,
+                      }}
+                    >
+                      {prBusy ? 'Opening PR…' : 'Create Pull Request'}
+                    </button>
+                    {prErr && (
+                      <span title={prErr} style={{ fontSize: 10, color: 'var(--violation)', maxWidth: 200,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {prErr}
+                      </span>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           </div>

@@ -144,6 +144,15 @@ export const runVerify = (payload = {}) =>
 export const createEpisodePr = (episodeId) =>
   apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr`, { method: 'POST', body: '{}' })
 
+/**
+ * Fresh, read-only ready-for-PR verdict (deterministic evidence + policy).
+ *
+ * @param {string} episodeId
+ * @returns {Promise<{ok: boolean, readiness?: Object}|null>}
+ */
+export const getPrReadiness = (episodeId) =>
+  apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr/readiness`)
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 /**

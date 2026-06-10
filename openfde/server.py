@@ -50,6 +50,8 @@ import json
 import logging
 import os
 import secrets
+import shutil
+import subprocess
 import threading
 import webbrowser
 from datetime import datetime, timezone
@@ -75,7 +77,8 @@ from openfde.prompt_story import build_prompt_graph
 from openfde.episode_summary import commit_display, is_bad_title, repair_episode_tasks
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
-from openfde.prs import create_episode_pr
+from openfde import prs as prs_mod
+from openfde.prs import create_episode_pr, pr_readiness
 from openfde import episode_llm_summary
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
@@ -539,6 +542,21 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # ================================================================== #
     #  REST — Land as PR v1 (episode → branch → GitHub PR via local gh)   #
     # ================================================================== #
+
+    async def get_episode_pr_readiness(request: web.Request) -> web.Response:
+        """Fresh, read-only ready-for-PR verdict for one episode (the episode card
+        re-checks on open so the embedded payload's worktree state can't go stale).
+
+        Returns:
+            web.Response — {ok, episodeId, readiness} | 404 unknown episode.
+        """
+        eid = request.match_info.get("episodeId", "")
+        ep = persistence.get_episode(eid)
+        if ep is None:
+            return web.json_response({"ok": False, "error": "unknown episode"}, status=404)
+        loop = asyncio.get_event_loop()
+        readiness = await loop.run_in_executor(None, lambda: pr_readiness(path, ep))
+        return web.json_response({"ok": True, "episodeId": eid, "readiness": readiness})
 
     async def post_episode_pr(request: web.Request) -> web.Response:
         """Open a GitHub PR for a landed episode — the PR body IS the episode's
@@ -1378,6 +1396,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 lines.append(f"- … +{len(files) - 16} more")
         return "\n".join(lines).strip()
 
+    # Ready-for-PR: (sha, base) pairs once seen ON the base — permanent, so cached
+    # across requests; "not on base" is never cached (a push can change it).
+    _onbase_cache: dict = {}
+
     async def get_review_episodes(request: web.Request) -> web.Response:
         """List prompt episodes newest-first with their landed commits, plus an
         "Outside OpenFDE" bucket for commits not linked to any episode.
@@ -1423,11 +1445,34 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return {**c, "files": cf, "fileCount": len(cf),
                     "displayTitle": dtitle, "displaySummary": dsummary}
 
+        # Ready-for-PR readiness (v1.1), embedded so cards/badges render without extra
+        # clicks. One `git status` + one base resolution per request; merge-base only
+        # for landed-no-PR episodes, with a positives-only memo (`_onbase_cache`) —
+        # "on base" is permanent for a given (sha, base), "not on base" can change
+        # after a push so it is re-checked. Steady state ≈ a couple of git reads.
+        st = git_status(path)
+        base_ref = prs_mod._base_ref(path)
+
+        def _on_base(sha: str) -> bool:
+            key = (sha, base_ref)
+            if key in _onbase_cache:
+                return True
+            anc = subprocess.run(["git", "merge-base", "--is-ancestor", sha, base_ref],
+                                 cwd=str(path), capture_output=True, text=True)
+            if anc.returncode == 0:
+                _onbase_cache[key] = True
+                return True
+            return False
+
+        readiness_ctx = {"clean": not (st.get("dirty") or []), "base": base_ref,
+                         "on_base": _on_base, "gh_ok": shutil.which("gh") is not None}
+
         enriched = []
         for e in episodes:
             ecs = [_commit_view(c, e) for c in by_ep.get(e["episodeId"], [])]
             enriched.append({**e, "commits": ecs, "commitCount": len(ecs),
-                             "fileCount": len(e.get("files") or [])})
+                             "fileCount": len(e.get("files") or []),
+                             "prReadiness": pr_readiness(path, e, _ctx=readiness_ctx)})
         # Commits whose episode trailer references an unknown (foreign/older) id
         # are surfaced under Outside OpenFDE too — never silently dropped.
         foreign = [c for c in commits if c.get("episodeId") and c["episodeId"] not in known]
@@ -3003,6 +3048,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/review/episodes", post_review_episode_create)
     app.router.add_post("/api/review/episodes/{episodeId}/land", post_review_episode_land)
     app.router.add_post("/api/review/episodes/{episodeId}/pr",   post_episode_pr)
+    app.router.add_get( "/api/review/episodes/{episodeId}/pr/readiness", get_episode_pr_readiness)
     app.router.add_post("/api/report",                post_report)
     app.router.add_get( "/api/plan",                  get_plan)
     app.router.add_get( "/api/archgraph",             get_archgraph)
