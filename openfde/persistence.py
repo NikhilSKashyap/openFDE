@@ -16,6 +16,7 @@ All writes are atomic (write-to-temp then os.replace) to avoid partial-write cor
 Events are normalized and sanitized before storage (see normalize_event()).
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -623,6 +624,63 @@ class Persistence:
             if e.get("episodeId") == episode_id:
                 return e
         return None
+
+    def upsert_repair_artifact(self, episode_id: str, artifact: dict,
+                               cap: int = 24) -> dict:
+        """Store a repair-hatch artifact on its OWNING episode — never a new one.
+
+        Artifacts (failure_explanation | repair_prompt | failure_flow |
+        repair_run) live in ``episode["repairArtifacts"]``, identified by
+        (kind, fingerprint): the LLM runs once per failure meaning, and storing
+        the same identity again REPLACES the artifact (explicit regenerate),
+        preserving its id/createdAt and bumping updatedAt.
+
+        Args:
+            episode_id: str — owning episode.
+            artifact: dict — {kind, fingerprint, checkId, file, line, function,
+                test, source, text, summary, nodes, edges, …}.
+            cap: int — max artifacts kept per episode (oldest dropped).
+
+        Returns:
+            dict | None — the stored artifact (with id/timestamps), or None
+            when the episode id is unknown.
+        """
+        ep = self.get_episode(episode_id)
+        if not ep:
+            return None
+        arts = [a for a in (ep.get("repairArtifacts") or []) if isinstance(a, dict)]
+        kind, fp = artifact.get("kind"), artifact.get("fingerprint")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        old = next((a for a in arts if a.get("kind") == kind
+                    and a.get("fingerprint") == fp), None)
+        if old is not None:
+            stored = {**old, **artifact, "id": old.get("id"),
+                      "createdAt": old.get("createdAt") or now, "updatedAt": now}
+            arts[arts.index(old)] = stored
+        else:
+            aid = "repair_" + hashlib.sha256(f"{kind}:{fp}".encode()).hexdigest()[:10]
+            stored = {**artifact, "id": aid, "createdAt": now, "updatedAt": now}
+            arts.append(stored)
+            arts = arts[-cap:]
+        ep["repairArtifacts"] = arts
+        self.upsert_episode(ep)
+        return stored
+
+    def get_repair_artifacts(self, episode_id: str, fingerprint: str = None) -> list:
+        """Repair artifacts on an episode, optionally only one fingerprint's.
+
+        Args:
+            episode_id: str — episode identifier.
+            fingerprint: str | None — filter to one failure meaning.
+
+        Returns:
+            list[dict] — artifacts (possibly empty).
+        """
+        ep = self.get_episode(episode_id)
+        arts = [a for a in ((ep or {}).get("repairArtifacts") or []) if isinstance(a, dict)]
+        if fingerprint:
+            arts = [a for a in arts if a.get("fingerprint") == fingerprint]
+        return arts
 
     def latest_active_episode(self) -> dict:
         """Return the newest episode still awaiting review/land (open|reviewing).

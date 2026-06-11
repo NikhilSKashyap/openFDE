@@ -163,7 +163,9 @@ def is_human_prompt(entry: dict) -> bool:
         return False
     if _INTERNAL_MARKER in txt:                     # OpenFDE's own summarizer prompt
         return False
-    return True
+    if "OpenFDE owns version control" in txt:       # OpenFDE-driven runner prompt (e.g.
+        return False                                # a hatch repair run) — same skip the
+    return True                                     # Codex path already applies
 
 
 def read_new_lines(path: Path, start_offset: int):

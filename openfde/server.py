@@ -53,6 +53,7 @@ import secrets
 import shutil
 import subprocess
 import threading
+import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +67,7 @@ from openfde import semantic_graph as semantic_graph_mod
 from openfde.agent_runner import build_system_prompt, run_agent
 from openfde.anthropic_transport import make_transport
 from openfde.claude_code_runner import cli_available as claude_cli_available, run_claude_code, run_claude_code_text
-from openfde.codex_local_runner import cli_available as codex_cli_available, run_codex_local_text
+from openfde.codex_local_runner import cli_available as codex_cli_available, run_codex_local_edit, run_codex_local_text
 from openfde.echo_transport import make_echo_transport
 from openfde.openai_transport import complete as llm_complete, make_transport as make_openai_transport
 from openfde.council import run_council
@@ -74,6 +75,7 @@ from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
+from openfde import failure_flow as failure_flow_mod
 from openfde import source_edit
 from openfde.episode_summary import commit_display, is_bad_title, repair_episode_tasks
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
@@ -1837,6 +1839,264 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response({"ok": True, "answer": answer.strip(),
                                   "role": used_role, "source": source})
 
+    # ── The repair hatch (v3) — fingerprinted failure artifacts ──
+    # A failing check is an implementation issue: explanation + repair prompt
+    # speak through the Agent Council SENIOR_DEV role config (whatever provider
+    # it holds). The failure FLOW derives deterministically (AST + receipts);
+    # the Verifier (else Architect) text role may humanize labels ONLY.
+    # Artifacts persist on the OWNING episode keyed by (kind, fingerprint): the
+    # LLM runs once per failure meaning, reuse is the default, regenerate is
+    # explicit and replaces. Never a new episode; never the user's terminal.
+
+    _HATCH_PROVIDER_LABELS = {
+        "claude-code-local": "Claude Code local", "codex-local": "Codex local",
+        "anthropic": "Anthropic", "openai-compatible": "OpenAI-compatible",
+        "openrouter": "OpenRouter", "ollama": "Ollama", "echo": "Echo"}
+
+    def _hatch_ctx(body: dict) -> dict:
+        return {"file": body.get("file", ""), "line": body.get("line", ""),
+                "test": body.get("test", ""), "funcName": body.get("funcName", ""),
+                "start": body.get("start", ""), "end": body.get("end", ""),
+                "code": (body.get("code") or "")[:4000],
+                "episodeId": body.get("episodeId") or "",
+                "checkId": body.get("checkId") or "",
+                "failureMsg": (body.get("failureMsg") or "")[:800]}
+
+    def _hatch_fp(c: dict, override: str = "") -> str:
+        return override or failure_flow_mod.failure_fingerprint(
+            episode_id=c["episodeId"], check_id=c["checkId"], file=c["file"],
+            line=c["line"], func=c["funcName"], test=c["test"],
+            failure_msg=c["failureMsg"], code=c["code"])
+
+    def _hatch_text_role(primary: str):
+        """(caller, caption) for a text role; falls back to the Architect's."""
+        settings = persistence.load_agent_settings()
+        order = [primary] + ([] if primary == "architect" else ["architect"])
+        for role in order:
+            caller = _text_role(settings.get(role, {}))
+            if caller:
+                prov = (settings.get(role, {}) or {}).get("provider")
+                label = _HATCH_PROVIDER_LABELS.get(prov, prov or "?")
+                return caller, f"{_ROLE_HUMAN.get(role, role)} · {label}"
+        return None, ""
+
+    def _artifact_base(c: dict, kind: str, fp: str) -> dict:
+        return {"kind": kind, "fingerprint": fp, "checkId": c["checkId"],
+                "file": c["file"], "line": c["line"], "function": c["funcName"],
+                "test": c["test"]}
+
+    async def _hatch_store(c: dict, art: dict) -> dict:
+        """Persist on the owning episode (when known) + broadcast; never a new one."""
+        if not c["episodeId"]:
+            return art
+        stored = persistence.upsert_repair_artifact(c["episodeId"], art)
+        if stored:
+            ep = persistence.get_episode(c["episodeId"])
+            if ep:
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
+            return stored
+        return art
+
+    def _hatch_reuse(c: dict, kind: str, fp: str):
+        """The run-LLM-once law: a saved artifact for this failure meaning wins."""
+        if not c["episodeId"]:
+            return None
+        for a in persistence.get_repair_artifacts(c["episodeId"], fp):
+            if a.get("kind") == kind:
+                return a
+        return None
+
+    async def _hatch_compose(c: dict, sys_prompt: str, fallback: str):
+        """Senior-Dev text composition grounded in the function code; honest caption."""
+        caller, caption = _hatch_text_role("senior_dev")
+        text = ""
+        if caller:
+            user = (f"file: {c['file']}\nfunction: {c['funcName']} "
+                    f"(lines {c['start']}-{c['end']})\n"
+                    f"failing: {c['test'] or 'check'} at line {c['line']}\n"
+                    + (f"failure output: {c['failureMsg']}\n" if c['failureMsg'] else "")
+                    + f"\nfunction code:\n{c['code']}")
+            try:
+                loop = asyncio.get_event_loop()
+                text = await loop.run_in_executor(None, lambda: caller(sys_prompt, user))
+            except Exception as exc:  # noqa: BLE001
+                logger.error("hatch compose failed: %s", exc)
+        if (text or "").strip():
+            return text.strip(), caption
+        return fallback, "OpenFDE · template"
+
+    def _hatch_fallback_prompt(c: dict) -> str:
+        return (f"In {c['file']}, function {c['funcName']}() "
+                f"(lines {c['start']}–{c['end']}): "
+                f"{('test ' + c['test']) if c['test'] else 'a check'} fails at "
+                f"line {c['line']}. Fix the function so the check passes, without "
+                "changing the test.")
+
+    async def _hatch_generate(request: web.Request, kind: str,
+                              sys_prompt: str, fallback_fn) -> web.Response:
+        """Shared explain/prompt path: reuse by fingerprint unless regenerate."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        c = _hatch_ctx(body)
+        fp = _hatch_fp(c, body.get("fingerprint") or "")
+        if not body.get("regenerate"):
+            saved = _hatch_reuse(c, kind, fp)
+            if saved:
+                return web.json_response({"ok": True, "artifact": saved,
+                                          "fingerprint": fp, "reused": True})
+        text, source = await _hatch_compose(c, sys_prompt, fallback_fn(c))
+        art = {**_artifact_base(c, kind, fp), "source": source, "text": text,
+               "summary": text.split("\n")[0][:160]}
+        art = await _hatch_store(c, art)
+        return web.json_response({"ok": True, "artifact": art,
+                                  "fingerprint": fp, "reused": False})
+
+    async def post_hatch_explain(request: web.Request) -> web.Response:
+        """Explain WHY the check fails (senior_dev role); once per fingerprint.
+
+        Returns:
+            web.Response — {ok, artifact, fingerprint, reused}.
+        """
+        sys_prompt = ("You are the Senior Dev in OpenFDE. Explain WHY this check fails, "
+                      "grounded ONLY in the provided function code and failure location: "
+                      "what the failing line asserts, what actually happens, and the most "
+                      "likely smallest fix. Plain language, 2-4 sentences; markdown for "
+                      "emphasis and inline code is fine; no large code dumps.")
+        return await _hatch_generate(
+            request, "failure_explanation", sys_prompt,
+            lambda c: (f"{c['test'] or 'A check'} fails at `{c['file']}:{c['line']}` inside "
+                       f"`{c['funcName']}()` — the assertion on that line doesn't hold. "
+                       "Compare what the line asserts with what the code above it produces."))
+
+    async def post_hatch_prompt(request: web.Request) -> web.Response:
+        """Compose the paste-ready repair prompt (senior_dev role); once per fingerprint.
+
+        Returns:
+            web.Response — {ok, artifact, fingerprint, reused}.
+        """
+        sys_prompt = ("You are the Senior Dev in OpenFDE. Compose a precise, paste-ready "
+                      "prompt for a coding agent to FIX this failing check. Implementation "
+                      "voice: name the file, the function, the exact failing line, what the "
+                      "assertion expects, and the smallest correct change. 2-4 sentences. "
+                      "Output ONLY the prompt text — no preamble, no quotes, no headers.")
+        return await _hatch_generate(request, "repair_prompt", sys_prompt,
+                                     _hatch_fallback_prompt)
+
+    async def post_hatch_flow(request: web.Request) -> web.Response:
+        """Derive the failure FLOW — how the failure got there; once per fingerprint.
+
+        Deterministic AST/receipt evidence is the graph; the Verifier (else
+        Architect) text role may only rewrite edge labels + summary (strict
+        JSON, fallback to deterministic).
+
+        Returns:
+            web.Response — {ok, artifact, fingerprint, reused}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        c = _hatch_ctx(body)
+        if not c["file"]:
+            return web.json_response({"ok": False, "error": "file required"}, status=400)
+        fp = _hatch_fp(c, body.get("fingerprint") or "")
+        if not body.get("regenerate"):
+            saved = _hatch_reuse(c, "failure_flow", fp)
+            if saved:
+                return web.json_response({"ok": True, "artifact": saved,
+                                          "fingerprint": fp, "reused": True})
+        loop = asyncio.get_event_loop()
+        flow = await loop.run_in_executor(None, lambda: failure_flow_mod.build_failure_flow(
+            path, file=c["file"], line=int(c["line"] or 0),
+            func=c["funcName"], test=c["test"], output_tail=c["failureMsg"]))
+        caller, caption = _hatch_text_role("verifier")
+        used = False
+        if caller:
+            flow, used = await loop.run_in_executor(
+                None, lambda: failure_flow_mod.humanize_flow(flow, caller))
+        art = {**_artifact_base(c, "failure_flow", fp),
+               "source": caption if used else "OpenFDE · static analysis",
+               "text": "", "summary": flow.get("summary", ""),
+               "nodes": flow.get("nodes") or [], "edges": flow.get("edges") or []}
+        art = await _hatch_store(c, art)
+        return web.json_response({"ok": True, "artifact": art,
+                                  "fingerprint": fp, "reused": False})
+
+    async def post_hatch_artifacts(request: web.Request) -> web.Response:
+        """Hydrate: all saved artifacts for this failure meaning (hatch reopen).
+
+        Returns:
+            web.Response — {ok, fingerprint, artifacts: {kind: artifact}}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        c = _hatch_ctx(body)
+        fp = _hatch_fp(c, body.get("fingerprint") or "")
+        arts = persistence.get_repair_artifacts(c["episodeId"], fp) if c["episodeId"] else []
+        return web.json_response({"ok": True, "fingerprint": fp,
+                                  "artifacts": {a.get("kind"): a for a in arts}})
+
+    async def post_hatch_run(request: web.Request) -> web.Response:
+        """Run the repair WITH the configured senior_dev provider, scoped.
+
+        Goes through OpenFDE's own runner (Claude Code: editable=[file] hard
+        scope; Codex: workspace-write with the scope stated in the prompt) —
+        NEVER by injecting into the user's terminal sessions. The receipt is
+        stored as a repair_run artifact on the owning episode; never commits.
+
+        Returns:
+            web.Response — {ok, run: artifact}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        c = _hatch_ctx(body)
+        if not c["file"]:
+            return web.json_response({"ok": False, "error": "file required"}, status=400)
+        fp = _hatch_fp(c, body.get("fingerprint") or "")
+        prompt_text = (body.get("prompt") or "").strip() or _hatch_fallback_prompt(c)
+        task = ("Repair task — scoped to a single failing check. Edit ONLY "
+                f"{c['file']} (function {c['funcName']}, lines {c['start']}-{c['end']}); "
+                "do not touch other files. " + prompt_text)
+        settings = persistence.load_agent_settings()
+        cfg = settings.get("senior_dev", {}) or {}
+        prov, model = cfg.get("provider"), cfg.get("model")
+
+        def _go():
+            if prov == "claude-code-local":
+                out = run_claude_code(repo_root=path, prompt=task, allow_dirty=True,
+                                      editable=[c["file"]], protected=[], model=model)
+                res = out.get("result") or {}   # run_agent-shaped: {status, reportSummary, …}
+                return {"status": res.get("status") or "failed",
+                        "summary": (res.get("reportSummary") or "")[:400],
+                        "writes": out.get("writes") or [],
+                        "rejected": out.get("rejected") or [],
+                        "error": out.get("error"), "costUsd": out.get("costUsd")}
+            if prov == "codex-local":
+                out = run_codex_local_edit(repo_root=path, prompt=task, model=model)
+                return {"status": "passed" if out.get("ok") else "failed",
+                        "writes": out.get("touched") or [], "rejected": [],
+                        "error": out.get("error"),
+                        "summary": (out.get("summary") or "")[:400]}
+            return {"status": "failed", "writes": [], "rejected": [],
+                    "error": f"Senior Dev provider '{prov or 'none'}' can't run repairs "
+                             "— configure a local CLI (Claude Code or Codex) in Agents."}
+
+        loop = asyncio.get_event_loop()
+        out = await loop.run_in_executor(None, _go)
+        label = _HATCH_PROVIDER_LABELS.get(prov, prov or "?")
+        art = {**_artifact_base(c, "repair_run", fp), **out,
+               "source": f"Senior Dev · {label}",
+               "text": out.get("error") or out.get("summary") or ""}
+        art = await _hatch_store(c, art)
+        return web.json_response({"ok": art.get("status") not in (None, "failed"),
+                                  "run": art})
+
     async def get_concept_cards(request: web.Request) -> web.Response:
         """Return all saved concept cards (newest-first)."""
         return web.json_response({"ok": True, "cards": persistence.load_concept_cards()})
@@ -3103,6 +3363,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/semantic-graph",            get_semantic_graph)
     app.router.add_post("/api/semantic-graph/refresh",    post_semantic_graph_refresh)
     app.router.add_post("/api/concept/ask",               post_concept_ask)
+    app.router.add_post("/api/hatch/explain",             post_hatch_explain)
+    app.router.add_post("/api/hatch/prompt",              post_hatch_prompt)
+    app.router.add_post("/api/hatch/flow",                post_hatch_flow)
+    app.router.add_post("/api/hatch/run",                 post_hatch_run)
+    app.router.add_post("/api/hatch/artifacts",           post_hatch_artifacts)
     app.router.add_get( "/api/concept-cards",             get_concept_cards)
     app.router.add_post("/api/concept-cards",             post_concept_card)
     app.router.add_post("/api/execution/compile-workflow", post_compile_workflow)
@@ -3145,8 +3410,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     if dist_dir.exists():
         dist_resolved = dist_dir.resolve()
 
+        # index.html must NEVER be cached (a stale index references purged hashed
+        # chunks → users see pre-rebuild UI / ELK 404s); hashed assets under
+        # /assets are immutable by construction and may cache forever.
+        _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+        _IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
         async def serve_root(request: web.Request) -> web.FileResponse:
-            """Serve index.html for the root path.
+            """Serve index.html for the root path (never cached).
 
             Args:
                 request: web.Request
@@ -3154,10 +3425,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             Returns:
                 web.FileResponse — frontend/dist/index.html
             """
-            return web.FileResponse(dist_dir / "index.html")
+            return web.FileResponse(dist_dir / "index.html", headers=_NO_CACHE)
 
         async def serve_spa(request: web.Request) -> web.FileResponse:
             """Serve a static asset or fall back to index.html for SPA routing.
+
+            Hashed assets are immutable-cached; the index fallback never is.
 
             Args:
                 request: web.Request
@@ -3171,10 +3444,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 try:
                     candidate.relative_to(dist_resolved)
                     if candidate.is_file():
-                        return web.FileResponse(candidate)
+                        headers = _IMMUTABLE if rel.startswith("assets/") else _NO_CACHE
+                        return web.FileResponse(candidate, headers=headers)
                 except (ValueError, OSError):
                     pass
-            return web.FileResponse(dist_dir / "index.html")
+            return web.FileResponse(dist_dir / "index.html", headers=_NO_CACHE)
 
         app.router.add_get("/",          serve_root)
         app.router.add_get("/{path:.*}", serve_spa)
