@@ -74,6 +74,7 @@ from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
+from openfde import source_edit
 from openfde.episode_summary import commit_display, is_bad_title, repair_episode_tasks
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
@@ -612,6 +613,47 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                    "required": c["required"]} for c in verify_mod.discover_checks(path)]
         return web.json_response({"ok": True, "checks": checks,
                                   "latest": persistence.load_verify_latest()})
+
+    async def get_source_slice(request: web.Request) -> web.Response:
+        """A line slice of a repo file — the repair hatch's READ.
+
+        Query: path (repo-relative), start, end (1-based inclusive; end optional).
+        The hatch is function-scoped: the UI resolves the range from the
+        ArchGraph and only ever asks for one function.
+
+        Returns:
+            web.Response — {ok, path, start, end, total, code} | 400 {error}.
+        """
+        q = request.rel_url.query
+        try:
+            return web.json_response({"ok": True, **source_edit.read_slice(
+                path, q.get("path", ""), int(q.get("start", 1)), int(q.get("end", 0)))})
+        except (source_edit.SourceEditError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    async def post_source_patch(request: web.Request) -> web.Response:
+        """Splice a replacement into a repo file — the repair hatch's WRITE (⌘S).
+
+        Body: {path, start, end, code}. The edit hits the worktree like any
+        other edit, so the watcher attributes it to the live episode — repairs
+        are recorded with the same zero ceremony as the work itself.
+
+        Returns:
+            web.Response — {ok, path, start, end, total} | 400 {error}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        try:
+            result = source_edit.splice_lines(path, str(body.get("path", "")),
+                                              int(body.get("start", 0)),
+                                              int(body.get("end", 0)),
+                                              str(body.get("code", "")))
+        except (source_edit.SourceEditError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        await manager.broadcast({"type": "source_patched", "payload": result})
+        return web.json_response({"ok": True, **result})
 
     async def post_verify_run(request: web.Request) -> web.Response:
         """Run the repo's local checks now and store the evidence.
@@ -3037,6 +3079,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_get( "/api/verify/status",         get_verify_status)
     app.router.add_post("/api/verify/run",            post_verify_run)
+    app.router.add_get( "/api/source",                get_source_slice)
+    app.router.add_post("/api/source/patch",          post_source_patch)
     app.router.add_get( "/api/events",                get_events)
     app.router.add_post("/api/events",                post_event)
     app.router.add_get( "/api/project",               get_project)

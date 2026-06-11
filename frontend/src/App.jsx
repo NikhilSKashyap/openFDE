@@ -10,6 +10,7 @@ import CommandPalette from './components/CommandPalette/CommandPalette'
 import AgentSettings from './components/AgentSettings/AgentSettings'
 import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
+import FunctionPatch from './components/Whiteboard/FunctionPatch'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
@@ -91,6 +92,9 @@ export default function App() {
   const [archGraph, setArchGraph]     = useState(null)
   const [expandedIds, setExpandedIds] = useState(() => new Set())
   const [archSel, setArchSel]         = useState(null)
+  // The repair hatch — function-scoped fix surface, summoned ONLY by a failure
+  // receipt's "Show →" ({file, line, func, funcName, test, start, end} | null).
+  const [hatch, setHatch] = useState(null)
   // ── Execution run / live trace (Step 17) ─────────────────────────────────
   // run: { runId, status, scopedBoxIds, scopedArrowIds, nodeStates, edgeStates,
   //        trace: {id:[events]}, failures: {id:{...}} } | null
@@ -850,6 +854,40 @@ export default function App() {
     setExpandedIds(ids)
   }
   function collapseAll() { setExpandedIds(new Set()); setArchSel(null) }
+
+  // "Show →" on a failed check: resolve the failing line to its FUNCTION via the
+  // ArchGraph (containing function = greatest start-line ≤ failure line; range
+  // ends where the next function begins), focus the canvas there (expand the
+  // module + file), and open the repair hatch on exactly that slice.
+  function onShowFailure(failure) {
+    const open = (graph) => {
+      const fns = (graph?.functions || []).filter(f => f.path === failure.file)
+        .sort((a, b) => (a.line || 0) - (b.line || 0))
+      let fn = null
+      let end = failure.line + 22
+      for (let i = 0; i < fns.length; i++) {
+        const isLast = i === fns.length - 1
+        if ((fns[i].line || 0) <= failure.line && (isLast || (fns[i + 1].line || 0) > failure.line)) {
+          fn = fns[i]
+          end = isLast ? failure.line + 30 : Math.max(failure.line, (fns[i + 1].line || 0) - 1)
+          break
+        }
+      }
+      const start = fn ? fn.line : Math.max(1, failure.line - 8)
+      const file = (graph?.files || []).find(f => f.path === failure.file)
+      const modBox = file ? canvasState.boxes.find(b => b.moduleId === file.moduleId) : null
+      setActiveView('whiteboard')
+      setExpandedIds(prev => {
+        const next = new Set(prev)
+        if (modBox) next.add(modBox.id)
+        next.add(`box:file:${failure.file}`)
+        return next
+      })
+      setHatch({ ...failure, start, end, funcName: fn?.name || failure.func })
+    }
+    if (archGraph) open(archGraph)
+    else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); open(g) } })
+  }
 
   // Expand a single module; with deep=true also expand every file inside it
   // (so all its functions become visible) — wired to the module right-click menu.
@@ -1713,8 +1751,10 @@ export default function App() {
                 landing={landing}
                 landNote={landNote}
                 onSpotlightCommit={onSpotlightCommit}
+                onShowFailure={onShowFailure}
               />
             )}
+            {hatch && <FunctionPatch hatch={hatch} onClose={() => setHatch(null)} />}
           </main>
           <aside className={`panel-right${rightOpen ? '' : ' collapsed'}`}>
             <button className="panel-collapse-btn right" onClick={() => setRightOpen(o => !o)}

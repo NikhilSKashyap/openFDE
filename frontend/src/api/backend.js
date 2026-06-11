@@ -159,6 +159,16 @@ export const createEpisodePr = (episodeId) =>
 export const getPrReadiness = (episodeId) =>
   apiFetch(`/api/review/episodes/${encodeURIComponent(episodeId)}/pr/readiness`)
 
+// ── Repair hatch — function-scoped source read/patch (opens FROM a receipt) ──
+
+/** One function's lines. @returns {Promise<{ok, path, start, end, total, code}|null>} */
+export const getSourceSlice = (path, start, end) =>
+  apiFetch(`/api/source?path=${encodeURIComponent(path)}&start=${start}&end=${end}`)
+
+/** Splice the function back (⌘S). The watcher records it like any edit. */
+export const patchSource = (path, start, end, code) =>
+  apiFetch('/api/source/patch', { method: 'POST', body: JSON.stringify({ path, start, end, code }) })
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 /**

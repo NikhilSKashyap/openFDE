@@ -1318,6 +1318,47 @@
    3-row grid, column flow: every triplet of children is one column. Episode
    columns hold [branches-above, box, branches-below]; bridge columns hold an
    empty cell, the tick line, an empty cell. Pure CSS, horizontal scroll. */
+/* The repair hatch — function-scoped fix surface, summoned ONLY by a failure
+   receipt's "Show →". Orange edge: it belongs to the record's voice. */
+.repair-hatch {
+  position: absolute; top: 52px; left: 16px; z-index: 60; width: 500px;
+  display: flex; flex-direction: column; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--accent-orange-border);
+  border-left: 3px solid var(--accent-orange);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.repair-hatch-head { display: flex; align-items: center; gap: 7px; padding: 8px 10px; }
+.repair-hatch-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--accent-orange); flex-shrink: 0; }
+.repair-hatch-title { font-size: 11.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repair-hatch-lines { color: var(--text-muted); font-weight: 400; }
+.repair-hatch-close { margin-left: auto; border: none; background: none; color: var(--text-muted);
+  font-size: 15px; cursor: pointer; padding: 0 4px; }
+.repair-hatch-close:hover { color: var(--text); }
+.repair-hatch-fail { padding: 3px 12px 6px; font-size: 10.5px; font-family: ui-monospace, monospace;
+  color: var(--violation); }
+.repair-hatch-code {
+  margin: 0 10px; padding: 8px 10px; border-radius: 7px; resize: vertical;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; line-height: 1.55;
+  white-space: pre; overflow-x: auto; tab-size: 4;
+}
+.repair-hatch-code:focus { outline: none; border-color: var(--accent-orange-border); }
+.repair-hatch-foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px; }
+.repair-hatch-save {
+  padding: 3px 12px; border-radius: 99px; cursor: pointer; font-family: inherit;
+  font-size: 11px; font-weight: 600; color: #1a1108;
+  background: var(--accent-orange); border: 1px solid var(--accent-orange);
+}
+.repair-hatch-save:disabled { opacity: 0.5; cursor: default; }
+.repair-hatch-prompt {
+  padding: 3px 11px; border-radius: 99px; cursor: pointer; font-family: inherit;
+  font-size: 11px; color: var(--accent);
+  background: rgba(124, 111, 247, 0.10); border: 1px solid rgba(124, 111, 247, 0.35);
+}
+.repair-hatch-note { font-size: 10.5px; color: var(--text-muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+
 /* honest cap: ambient canvas edges beyond the render budget are named, never dropped silently */
 .wb-flow-budget {
   position: absolute; bottom: 50px; right: 12px; z-index: 46;

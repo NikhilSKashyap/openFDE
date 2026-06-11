@@ -46,7 +46,7 @@ function patchLineClass(ln) {
  * @param {Function} props.onFocusConcept - (concept|null) => void  (highlight on canvas)
  * @param {Function} props.onClose
  */
-export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard, onFocusConcept, onClose, onLand, landing = false, landNote = null, onSpotlightCommit }) {
+export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard, onFocusConcept, onClose, onLand, landing = false, landNote = null, onSpotlightCommit, onShowFailure }) {
   const isCommit = spotlight.kind === 'commit'
   const isWorktree = spotlight.kind === 'worktree'
   const isEpisode = spotlight.kind === 'episode'
@@ -364,6 +364,20 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                   <span style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 9.5, color: 'var(--text-muted)' }}>
                     {(ch.durationMs / 1000).toFixed(1)}s
                   </span>
+                )}
+                {ch.status === 'failed' && (ch.failures || [])[0] && onShowFailure && (
+                  <button
+                    onClick={() => onShowFailure(ch.failures[0], ch)}
+                    title={`Open ${ch.failures[0].file}:${ch.failures[0].line} — ${ch.failures[0].func}() — in the repair hatch`}
+                    style={{
+                      flexShrink: 0, padding: '0 7px', borderRadius: 99, cursor: 'pointer',
+                      fontFamily: 'inherit', fontSize: 10, fontWeight: 600,
+                      color: 'var(--accent-orange)', background: 'var(--accent-orange-soft)',
+                      border: '1px solid var(--accent-orange-border)',
+                    }}
+                  >
+                    Show →
+                  </button>
                 )}
               </div>
             ))}

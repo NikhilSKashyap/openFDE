@@ -18,6 +18,7 @@ Pure-ish helpers; the subprocess runner is injectable for tests.
 """
 
 import json
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -97,6 +98,56 @@ def _tail(text: str, cap: int = _TAIL_CAP) -> str:
     return text if len(text) <= cap else "…" + text[-(cap - 1):]
 
 
+# "File "/abs/or/rel/path.py", line 27, in test_acquire_then_conflict"
+_FRAME_RE = re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
+_FAILHEAD_RE = re.compile(r'^(?:FAIL|ERROR): (\S+)', re.M)
+_MAX_FAILURES = 5
+
+
+def parse_failure_locations(output: str, root) -> list:
+    """Repo-relative failure sites from a unittest-style traceback.
+
+    For each FAIL/ERROR block: every in-repo frame is considered and the
+    DEEPEST one wins (the assertion or raise site — usually the test line, or
+    the app frame when the error happened inside product code). Frames outside
+    the repo (stdlib, site-packages) are ignored. Capped, deduped by file:line.
+
+    Returns:
+        list[dict] — [{test, file, line, func}] suitable for the Show → hatch.
+    """
+    root_s = str(Path(root).resolve())
+    tests = _FAILHEAD_RE.findall(output or "")
+    blocks = re.split(r'^(?:FAIL|ERROR): \S+.*$', output or "", flags=re.M)[1:]
+    out, seen = [], set()
+    for i, block in enumerate(blocks):
+        frames = []
+        for m in _FRAME_RE.finditer(block):
+            fpath, line, func = m.group(1), int(m.group(2)), m.group(3)
+            p = Path(fpath)
+            if not p.is_absolute():
+                p = Path(root_s) / fpath
+            try:
+                rel = str(p.resolve()).removeprefix(root_s + "/")
+            except (OSError, ValueError):
+                continue
+            if rel.startswith("/") or rel == str(p.resolve()):
+                continue                       # outside the repo (stdlib etc.)
+            frames.append({"file": rel, "line": line, "func": func})
+        if not frames:
+            continue
+        site = frames[-1]                      # deepest in-repo frame
+        key = f"{site['file']}:{site['line']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"test": tests[i] if i < len(tests) else "",
+                    "file": site["file"], "line": site["line"],
+                    "func": site["func"]})
+        if len(out) >= _MAX_FAILURES:
+            break
+    return out
+
+
 def _summary(output: str, exit_code: int) -> str:
     """A one-line receipt: the last meaningful output line, with a terse final line
     folded into its predecessor — unittest's "Ran 155 tests in 11.5s" + "OK" becomes
@@ -132,16 +183,24 @@ def run_check(root, check: dict, *, runner=None, timeout: int = _CHECK_TIMEOUT) 
     except Exception as exc:  # noqa: BLE001 — a broken check must record, not raise
         exit_code, output = -1, f"check error: {exc}"
     dur_ms = int((time.monotonic() - t0) * 1000)
-    return {
+    status = PASSED if exit_code == 0 else FAILED
+    evidence = {
         "id": check["id"], "label": check["label"],
         "command": " ".join(check["command"]), "cwd": check.get("cwd") or "",
         "required": bool(check.get("required", True)),
-        "status": PASSED if exit_code == 0 else FAILED,
+        "status": status,
         "exitCode": exit_code,
         "summary": _summary(output, exit_code),
         "outputTail": _tail(output),
         "startedAt": started, "finishedAt": _now(), "durationMs": dur_ms,
     }
+    if status == FAILED:
+        # Failure LOCATIONS, parsed from the FULL output before tailing — these
+        # power "Show →": receipt → exact function on the canvas → repair hatch.
+        locs = parse_failure_locations(output, root)
+        if locs:
+            evidence["failures"] = locs
+    return evidence
 
 
 def run_verification(root, *, checks=None, runner=None, timeout: int = _CHECK_TIMEOUT) -> dict:
