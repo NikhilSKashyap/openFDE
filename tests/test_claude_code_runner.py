@@ -112,6 +112,59 @@ class ClaudeCodeRunnerScopeTest(unittest.TestCase):
         # Claude never ran → the user's WIP is exactly as they left it.
         self.assertEqual(self._read("ingest/reader.py"), "USER WIP\n")
 
+    # 3b) allow_dirty (the repair hatch): dirty IN-SCOPE file is the subject of
+    # the run — the edit lands as a write, stacked on the user's uncommitted state.
+    def test_allow_dirty_in_scope_repair_runs(self):
+        (self.root / "ingest" / "reader.py").write_text("USER BROKE THIS\n")
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps(
+            [["ingest/reader.py", "REPAIRED\n"]])
+        out = run_claude_code(
+            repo_root=self.root, prompt="repair it", allow_dirty=True,
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake))
+        self.assertNotEqual(out["result"]["status"], "failed")
+        self.assertEqual(out["writes"], ["ingest/reader.py"])
+        self.assertEqual(self._read("ingest/reader.py"), "REPAIRED\n")
+
+    # 3c) allow_dirty does NOT loosen anything outside the scope: a pre-dirty
+    # out-of-scope file Claude clobbers still fails safe (no revert, honest).
+    def test_allow_dirty_still_protects_out_of_scope_dirty(self):
+        (self.root / "ingest" / "reader.py").write_text("USER BROKE THIS\n")
+        (self.root / "other" / "note.txt").write_text("USER EDIT\n")
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps(
+            [["ingest/reader.py", "REPAIRED\n"], ["other/note.txt", "CLOBBER\n"]])
+        out = run_claude_code(
+            repo_root=self.root, prompt="repair it", allow_dirty=True,
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake))
+        self.assertEqual(out["result"]["status"], "failed")
+        self.assertIn("already had uncommitted changes", out["result"]["reportSummary"])
+        self.assertNotEqual(self._read("other/note.txt"), "ORIGINAL NOTE\n")
+
+    # 3d) The repair restores the dirty file to its HEAD content (the staged-break
+    # case: the break was never committed). The file leaves the dirty set — the
+    # write must STILL be attributed from pre-vs-post content.
+    def test_allow_dirty_repair_back_to_head_is_attributed(self):
+        (self.root / "ingest" / "reader.py").write_text("USER BROKE THIS\n")
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps(
+            [["ingest/reader.py", "ORIGINAL\n"]])          # exactly HEAD content
+        out = run_claude_code(
+            repo_root=self.root, prompt="repair it", allow_dirty=True,
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake))
+        self.assertNotEqual(out["result"]["status"], "failed")
+        self.assertEqual(out["writes"], ["ingest/reader.py"])
+        self.assertEqual(self._read("ingest/reader.py"), "ORIGINAL\n")
+
+    # 3e) Default path: Claude silently reverting the user's dirty file to HEAD
+    # is a clobber of uncommitted work — it must fail clear, never pass unnoticed.
+    def test_revert_of_user_dirty_file_to_head_fails_clear(self):
+        (self.root / "other" / "note.txt").write_text("USER EDIT\n")
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps(
+            [["ingest/reader.py", "NEW\n"], ["other/note.txt", "ORIGINAL NOTE\n"]])
+        out = run_claude_code(
+            repo_root=self.root, prompt="do it",
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake))
+        self.assertEqual(out["result"]["status"], "failed")
+        self.assertIn("already had uncommitted changes", out["result"]["reportSummary"])
+
     # 4) Claude touches a pre-dirty out-of-scope file → fail safe, NOT reverted.
     def test_claude_edits_preexisting_dirty_out_of_scope_fails_safely(self):
         (self.root / "other" / "note.txt").write_text("USER EDIT\n")

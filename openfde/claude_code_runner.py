@@ -336,7 +336,8 @@ def run_claude_code_text(*, system, user, model=None, timeout=180,
 def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
                     timeout=_DEFAULT_TIMEOUT, max_budget_usd=_DEFAULT_BUDGET_USD,
                     claude_bin=None, should_cancel=None, on_proc=None,
-                    on_write=None, on_read=None, stream=True) -> dict:
+                    on_write=None, on_read=None, stream=True,
+                    allow_dirty=False) -> dict:
     """Drive the Claude Code CLI as Senior Dev; return a run_agent-shaped outcome.
 
     Args:
@@ -345,6 +346,11 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
         editable: list[str] — editable in-scope paths (writes allowed).
         protected: list[str] — protected paths (force needs_approval).
         model: str | None — model alias/id for `--model` (default 'sonnet').
+        allow_dirty: bool — permit edits to IN-SCOPE files that already carry
+            uncommitted changes (the repair-hatch case: a failing file in an
+            episode under review is dirty by definition). Such edits stack on
+            the user's uncommitted state and count as writes — review-then-land
+            still governs them. Out-of-scope dirty files keep the fail-safe.
         timeout: int — wall-clock seconds before the CLI run is aborted.
         max_budget_usd: float — hard `--max-budget-usd` spend cap.
         claude_bin: str | None — explicit binary path (default: search PATH).
@@ -372,9 +378,11 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
 
     # Refuse to run if an in-scope file is already dirty: we could not separate
     # Claude's edit from the user's uncommitted work afterwards. Claude is never
-    # invoked, so the user's work is left exactly as it was.
+    # invoked, so the user's work is left exactly as it was. The repair hatch
+    # opts out (allow_dirty): there the dirty in-scope file IS the subject of
+    # the run, and its edits land as reviewable writes on the episode.
     dirty_in_scope = sorted(pre_dirty & editable_set)
-    if dirty_in_scope:
+    if dirty_in_scope and not allow_dirty:
         return _failed_outcome(
             "Cannot run on file(s) with uncommitted changes in scope — commit, "
             f"stash, or review first: {', '.join(dirty_in_scope)}.")
@@ -440,11 +448,21 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
         error = summary_text[:300] or "Claude Code reported an error."
 
     # ── Enforce scope, but ONLY on files the Claude run actually changed. ──────
+    # Pre-vs-post CONTENT is the truth, not dirty-set membership: a repair that
+    # returns a dirty file to its HEAD state leaves the dirty set entirely, and
+    # a run that reverts the user's dirty file to HEAD must be caught, not missed.
+    post_changed = set(_dirty_set(root))
+    for rel in pre_dirty:
+        if _hash(root, rel) != pre_hashes.get(rel):
+            post_changed.add(rel)
     writes, protected_attempts, rejected, conflicts = [], [], [], []
-    for rel in _dirty_set(root):
+    for rel in post_changed:
         if rel in pre_dirty and _hash(root, rel) == pre_hashes.get(rel):
             continue  # pre-existing user change Claude did not touch — preserve it
         if rel in pre_dirty:
+            if allow_dirty and rel in editable_set:
+                writes.append(rel)   # the requested repair, stacked on the user's
+                continue             # uncommitted state — review-then-land applies
             conflicts.append(rel)  # Claude modified an already-dirty file — never revert
             continue
         # Newly changed by the Claude run → enforce dotted/solid scope.
