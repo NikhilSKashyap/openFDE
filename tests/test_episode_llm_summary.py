@@ -230,3 +230,37 @@ class ClusterChangesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnsureFactsRaceTest(unittest.TestCase):
+    def test_concurrent_writer_survives_the_llm_window(self):
+        # Regression (live, the Reproduce flow): verify receipts attached to an
+        # episode DURING ensure_facts' LLM call were wiped by its stale
+        # full-list write. The summarizer must merge only its narrative fields.
+        import tempfile
+        from pathlib import Path
+        from openfde.persistence import Persistence
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d) / ".openfde")
+            p.upsert_episode({"episodeId": "e1", "prompt": "implement story graph",
+                              "title": "Implement story graph", "files": ["a.py"],
+                              "commitShas": [], "signal": "product",
+                              "status": "reviewing"})
+            ls.ensure_facts(p)                       # deterministic meta first
+
+            def racing_invoke(provider, system, user, timeout):
+                # Mid-LLM-call, another writer attaches evidence + files.
+                ep = p.get_episode("e1")
+                ep["verify"] = {"status": "failed", "checks": []}
+                ep["files"] = ["tests/test_x.py"]
+                p.upsert_episode(ep)
+                return _GOOD
+
+            out = ls.ensure_facts(p, allow_llm=True, invoke=racing_invoke,
+                                  providers=["codex-local"], limit=1)
+            e1 = next(e for e in out if e["episodeId"] == "e1")
+            self.assertEqual(e1["title"], "Auto-Land Prompt Commits")   # LLM title kept
+            stored = p.get_episode("e1")
+            self.assertEqual(stored.get("verify"), {"status": "failed", "checks": []})
+            self.assertEqual(stored.get("files"), ["tests/test_x.py"])  # NOT clobbered
+            self.assertEqual(stored.get("title"), "Auto-Land Prompt Commits")

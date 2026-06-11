@@ -327,17 +327,34 @@ def ensure_facts(persistence, *, allow_llm: bool = False, providers=None, invoke
     tick uses ``allow_llm=True, limit=1`` to upgrade one eligible episode per cycle.
     """
     eps = persistence.load_episodes()
-    changed_any = False
+    changed_ids = set()
     spent = 0
     for ep in eps:
         do_llm = allow_llm and (limit is None or spent < limit) and wants_llm(ep)
         if enrich(ep, invoke=invoke, providers=providers, timeout=timeout, allow_llm=do_llm):
-            changed_any = True
+            changed_ids.add(ep.get("episodeId"))
         if do_llm:
             spent += 1
-    if changed_any:
-        persistence._write_json(persistence.episodes_path, eps)
-    return eps
+    if not changed_ids:
+        return eps
+    # Merge-by-field at write time. The LLM call above takes SECONDS — between
+    # our load and now, OTHER writers may have attached evidence (a Reproduce
+    # run's verify receipts), files, or repair artifacts. A stale full-list
+    # write here clobbered exactly that once. The summarizer owns ONLY its
+    # narrative fields; everything else is taken fresh from the store.
+    _OWNED = ("sequence", "tag", "title", "summary", "storyFacts",
+              "summarySource", "summaryConfidence", "summaryFingerprint",
+              "summaryLlmTried", "signal")
+    by_id = {e.get("episodeId"): e for e in eps}
+    fresh = persistence.load_episodes()
+    for f in fresh:
+        src = by_id.get(f.get("episodeId"))
+        if src is not None and f.get("episodeId") in changed_ids:
+            for k in _OWNED:
+                if k in src:
+                    f[k] = src[k]
+    persistence._write_json(persistence.episodes_path, fresh)
+    return fresh
 
 
 # ── Change clustering (multi-commit Auto-Land) ──────────────────────────────
