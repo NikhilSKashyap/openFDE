@@ -1321,13 +1321,18 @@
 /* The repair hatch — function-scoped fix surface, summoned ONLY by a failure
    receipt's "Show →". Orange edge: it belongs to the record's voice. */
 .repair-hatch {
-  position: absolute; top: 52px; left: 16px; z-index: 60; width: 500px;
-  display: flex; flex-direction: column; border-radius: 10px;
-  background: var(--surface); border: 1px solid var(--accent-orange-border);
-  border-left: 3px solid var(--accent-orange);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  position: absolute; top: 50%; right: 352px; transform: translateY(-50%);
+  z-index: 60; width: 492px; max-height: 76vh;
+  display: flex; flex-direction: column; border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 0.5px solid color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42), 0 0 0 0.5px var(--accent-orange-border);
 }
-.repair-hatch-head { display: flex; align-items: center; gap: 7px; padding: 8px 10px; }
+.repair-hatch-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px;
+  cursor: grab; user-select: none; touch-action: none; }
+.repair-hatch-head:active { cursor: grabbing; }
 .repair-hatch-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--accent-orange); flex-shrink: 0; }
 .repair-hatch-title { font-size: 11.5px; font-weight: 600; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1338,9 +1343,10 @@
 .repair-hatch-fail { padding: 3px 12px 6px; font-size: 10.5px; font-family: ui-monospace, monospace;
   color: var(--violation); }
 .repair-hatch-code {
-  margin: 0 10px; padding: 8px 10px; border-radius: 7px; resize: vertical;
-  background: var(--bg); color: var(--text); border: 1px solid var(--border);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; line-height: 1.55;
+  margin: 0 12px; padding: 10px 12px; border-radius: 9px; resize: vertical;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  color: var(--text); border: 0.5px solid color-mix(in srgb, var(--text) 10%, transparent);
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.6;
   white-space: pre; overflow-x: auto; tab-size: 4;
 }
 .repair-hatch-code:focus { outline: none; border-color: var(--accent-orange-border); }
@@ -1358,6 +1364,143 @@
 }
 .repair-hatch-note { font-size: 10.5px; color: var(--text-muted); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+/* ── Repair artifact cards — movable Senior-Dev outputs beside the hatch ── */
+.repair-card {
+  /* Dock beside the hatch when there's room; never off-canvas — in a narrow
+     middle panel the dock clamps to the left edge and overlaps the hatch
+     (both are draggable, nothing is lost). */
+  position: absolute; right: min(858px, calc(100% - 384px)); z-index: 59;
+  width: 372px; max-height: 56vh;
+  display: flex; flex-direction: column; border-radius: 13px;
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 0.5px solid color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.40), 0 0 0 0.5px var(--accent-orange-border);
+}
+.repair-card.dock-a { top: 30%; transform: translateY(-50%); }
+.repair-card.dock-b { top: 66%; transform: translateY(-50%); }
+.repair-card-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px 5px;
+  cursor: grab; user-select: none; touch-action: none; }
+.repair-card-head:active { cursor: grabbing; }
+.repair-card-title { font-size: 11px; font-weight: 700; color: var(--text);
+  text-transform: uppercase; letter-spacing: 0.06em; }
+.repair-card-body { padding: 2px 12px 8px; overflow-y: auto; font-size: 11.5px;
+  line-height: 1.6; color: var(--text); }
+.repair-card-busy { font-size: 11px; color: var(--text-muted); font-style: italic; }
+.repair-card-foot { display: flex; align-items: center; gap: 6px; padding: 0 12px 10px; }
+.repair-card-btn {
+  padding: 2px 10px; border-radius: 99px; cursor: pointer; font-family: inherit;
+  font-size: 10.5px; font-weight: 600; color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 16%, transparent);
+}
+.repair-card-btn.run { color: var(--accent-orange); background: var(--accent-orange-soft);
+  border-color: var(--accent-orange-border); }
+.repair-card-btn:disabled { opacity: 0.55; cursor: wait; }
+.repair-card-note { font-size: 9.5px; color: var(--active); }
+.repair-card-src, .repair-card-runline { font-size: 9.5px; color: var(--text-muted); }
+
+/* ── Failure-flow lens — dim the canvas, show only the failure path ── */
+.flow-lens-dim { opacity: 0.78; }
+.flow-lens-lit { stroke: color-mix(in srgb, var(--text) 55%, transparent); stroke-width: 1.2; }
+.flow-lens-pill { fill: color-mix(in srgb, var(--surface) 92%, transparent);
+  stroke: var(--accent-orange-border); stroke-width: 1; }
+.flow-lens-pill-label { font-size: 12px; font-weight: 600; fill: var(--text);
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; }
+.flow-lens-pill-sub { font-size: 9px; fill: var(--text-muted); }
+.flow-lens-edge { stroke: var(--accent-orange); stroke-width: 1.6; }
+.flow-lens-edge.failing { stroke: var(--violation); }
+.flow-lens-edge.low { stroke-dasharray: 4 4; opacity: 0.75; }
+.flow-lens-label-bg { fill: color-mix(in srgb, var(--surface) 94%, transparent);
+  stroke: color-mix(in srgb, var(--text) 12%, transparent); stroke-width: 0.5; }
+.flow-lens-label { font-size: 9.5px; fill: var(--text); }
+.flow-lens-label.failing { fill: var(--violation); font-weight: 700; }
+.flow-lens-strip {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 70;
+  display: flex; align-items: center; gap: 10px; max-width: 78%;
+  padding: 7px 14px; border-radius: 99px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 0.5px solid var(--accent-orange-border);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.flow-lens-strip-title { font-size: 10px; font-weight: 800; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--accent-orange); flex-shrink: 0; }
+.flow-lens-strip-summary { font-size: 11px; color: var(--text); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.flow-lens-strip-src { font-size: 9.5px; color: var(--text-muted); flex-shrink: 0; }
+.flow-lens-strip-btn { flex-shrink: 0; padding: 2px 10px; border-radius: 99px;
+  cursor: pointer; font-family: inherit; font-size: 10px; font-weight: 600;
+  color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 16%, transparent); }
+.flow-lens-strip-btn:disabled { opacity: 0.55; cursor: wait; }
+
+/* "Show failure flow" button in the hatch foot */
+.repair-hatch-flow { padding: 3px 10px; border-radius: 99px; cursor: pointer;
+  font-family: inherit; font-size: 10.5px; font-weight: 600;
+  color: var(--accent-orange); background: var(--accent-orange-soft);
+  border: 0.5px solid var(--accent-orange-border); }
+.repair-hatch-flow:disabled { opacity: 0.6; cursor: wait; }
+
+/* Failure-and-repair records in the Story drawer */
+.tlv3-repair { margin: 4px 0 8px; padding: 7px 9px; border-radius: 9px;
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 9%, transparent); }
+.tlv3-repair-fail { font-size: 10.5px; font-weight: 600; color: var(--violation); margin-bottom: 5px; }
+.tlv3-repair-block { margin: 5px 0; font-size: 11px; line-height: 1.55; color: var(--text); }
+.tlv3-repair-label { display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); }
+.tlv3-repair-src { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.tlv3-repair-note { font-size: 9.5px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--active); }
+.tlv3-repair-copy { padding: 1px 8px; border-radius: 99px; cursor: pointer; font-family: inherit;
+  font-size: 9.5px; font-weight: 600; color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 16%, transparent); }
+.tlv3-repair-runline { margin-top: 4px; font-size: 10px; color: var(--text-muted); }
+.tlv3-repair-loc { font-size: 10px; color: var(--text-muted); margin: -2px 0 4px;
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; }
+.tlv3-repair-row { display: flex; align-items: center; gap: 7px; width: 100%;
+  margin: 2px 0; padding: 4px 8px; border-radius: 8px; cursor: pointer;
+  font-family: inherit; text-align: left;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 10%, transparent); }
+.tlv3-repair-row:hover { background: var(--accent-orange-soft);
+  border-color: var(--accent-orange-border); }
+.tlv3-repair-row-label { font-size: 10px; font-weight: 700; color: var(--text);
+  text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
+.tlv3-repair-row-meta { font-size: 9.5px; color: var(--text-muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.tlv3-repair-row-go { font-size: 10px; color: var(--accent-orange); flex-shrink: 0; }
+.tlv3-repair-green { margin-top: 5px; font-size: 10px; font-weight: 600; color: var(--solid); }
+.tlv3-repair-flowedge { margin: 5px 0; font-size: 10.5px; color: var(--text); }
+.tlv3-repair-flowlabel { margin: 1px 0 0 10px; font-size: 10px; color: var(--text-muted); }
+.tlv3-repair-detail-md { margin: 6px 0; font-size: 11px; line-height: 1.6; color: var(--text); }
+
+/* Markdown inside artifact cards / Story drawer */
+.md p { margin: 0 0 7px; }
+.md p:last-child { margin-bottom: 0; }
+.md ul, .md ol { margin: 0 0 7px; padding-left: 18px; }
+.md li { margin: 2px 0; }
+.md h4, .md h5, .md h6 { margin: 8px 0 4px; font-size: 11.5px; color: var(--text); }
+.md code {
+  padding: 0.5px 4px; border-radius: 4px; font-size: 10.5px;
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+  background: var(--accent-orange-soft); border: 0.5px solid var(--accent-orange-border);
+}
+.md pre { margin: 0 0 7px; padding: 8px 10px; border-radius: 9px; overflow-x: auto;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 11%, transparent); }
+.md pre code { padding: 0; border: 0; background: transparent; font-size: 10.5px; line-height: 1.55; }
+
+.repair-hatch-explain {
+  padding: 3px 11px; border-radius: 99px; cursor: pointer; font-family: inherit;
+  font-size: 11px; color: var(--accent);
+  background: rgba(124, 111, 247, 0.10); border: 1px solid rgba(124, 111, 247, 0.35);
+}
+
 
 /* honest cap: ambient canvas edges beyond the render budget are named, never dropped silently */
 .wb-flow-budget {
@@ -2194,6 +2337,14 @@
   opacity: 0.5;
   filter: drop-shadow(0 0 3px var(--accent-orange-glow));
   animation: watch-appear 0.35s ease-out, glow-pulse 3s ease-in-out infinite;
+}
+
+/* the failing function wears the SAME ring files get when edited — just red.
+   Placed after the .active/.trail tiers so red wins their stroke at equal weight. */
+.watch-ring.fail-focus,
+.watch-ring.active.fail-focus {
+  stroke: var(--violation);
+  filter: drop-shadow(0 0 6px var(--violation));
 }
 
 .wb-watching {

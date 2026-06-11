@@ -74,6 +74,10 @@ export default function WhiteboardCanvas({
   // Nesting (Step 16 in-place expansion)
   archGraph = null, expandedIds, onToggleExpand, onSelectArchEntity, archSel = null, onExpandModule = null,
   flowMode = 'focused', story = null,
+  failFocus = null,   // {fnId, fileId} — red-ring + auto-scroll to the failing function
+  flowLens = null,    // {artifact:{summary,nodes,edges,source}, busy} — failure-flow lens
+  onExitFlowLens,
+  onRegenFlowLens,
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
   watchBoxIds = null,
@@ -702,6 +706,18 @@ export default function WhiteboardCanvas({
     return () => clearTimeout(f.timer)
   }, [liveFollow, watchRings, scale])
 
+  // Show →: smooth-scroll the failing function into view once its geometry
+  // exists (expansion + ELK settle re-run this via the layout dep).
+  useEffect(() => {
+    if (!failFocus) return
+    const g = layout.fnById?.[failFocus.fnId] || layout.fileById?.[failFocus.fileId]
+    const el = scrollRef.current
+    if (!g || !el) return
+    el.scrollTo({ left: Math.max(0, (g.x + g.w / 2) * scale - el.clientWidth * 0.38),
+                  top: Math.max(0, (g.y + g.h / 2) * scale - el.clientHeight * 0.5),
+                  behavior: 'smooth' })
+  }, [failFocus, scale, layout])
+
   // ── Spotlight geometry: which visible boxes are lit (hold the concept / were
   //    touched by the commit) and which are amber (a tethered concept the commit
   //    only partially covered — "you changed 1 of 4 places this lives"). ────────
@@ -744,6 +760,20 @@ export default function WhiteboardCanvas({
       {flowOverflow > 0 && (
         <div className="wb-flow-budget" title="Ambient edges are capped for legibility — selection always shows everything it touches">
           +{flowOverflow} ambient flows beyond budget · select a node to focus
+        </div>
+      )}
+      {flowLens?.artifact && (
+        <div className="flow-lens-strip">
+          <span className="flow-lens-strip-title">Failure flow</span>
+          <span className="flow-lens-strip-summary">{flowLens.artifact.summary}</span>
+          <span className="flow-lens-strip-src">{flowLens.artifact.source}</span>
+          {onRegenFlowLens && (
+            <button className="flow-lens-strip-btn" onClick={onRegenFlowLens} disabled={flowLens.busy}
+                    title="Re-derive the flow and re-humanize the labels">
+              {flowLens.busy ? 'Re-tracing…' : '↻ Regenerate'}
+            </button>
+          )}
+          <button className="flow-lens-strip-btn" onClick={onExitFlowLens}>Exit lens ✕</button>
         </div>
       )}
       <div className="wb-canvas-scroll" ref={scrollRef} onWheel={handleWheel}>
@@ -857,6 +887,95 @@ export default function WhiteboardCanvas({
               x={r.geom.x - 7} y={r.geom.y - 7} width={r.geom.w + 14} height={r.geom.h + 14}
               rx={14} fill="none" pointerEvents="none" />
           ))}
+
+          {/* Failure-flow LENS: how the failure got there. Dim everything; show
+              ONLY the failure path — involved boxes stay lit (mask holes), flow
+              nodes without a box render as pills beside the failing function,
+              and the labeled arrows are the deterministic evidence. The red
+              failing-function ring renders after this layer, so it stays on top. */}
+          {flowLens?.artifact && (() => {
+            const art = flowLens.artifact
+            const fnodes = art.nodes || []
+            const fedges = art.edges || []
+            const anchorBox = layout.fnById?.[failFocus?.fnId] || layout.fileById?.[failFocus?.fileId]
+            if (!fnodes.length) return null
+            const placed = {}
+            let synth = 0
+            const baseX = anchorBox ? anchorBox.x + anchorBox.w + 110 : 240
+            const baseY = anchorBox ? anchorBox.y - 30 : 240
+            fnodes.forEach((n, i) => {
+              const base = String(n.id).split('.').pop()
+              let g = null
+              if (i === 0 && anchorBox) g = anchorBox          // the failing test IS the anchor
+              if (!g && n.file) g = layout.fnById?.[`box:function:${n.file}:${n.id}`]
+                || layout.fnById?.[`box:function:${n.file}:${base}`]
+              if (g) {
+                placed[n.id] = { x: g.x, y: g.y, w: g.w, h: g.h, real: true, label: n.label }
+              } else {
+                placed[n.id] = { x: baseX, y: baseY + synth * 74, w: 196, h: 40, real: false,
+                                 label: n.label, sub: n.file ? `${n.file}${n.line ? ':' + n.line : ''}` : (n.line ? `line ${n.line}` : '') }
+                synth += 1
+              }
+            })
+            const mid = (g) => ({ cx: g.x + g.w / 2, cy: g.y + g.h / 2 })
+            return (
+              <g className="flow-lens-layer" pointerEvents="none">
+                <defs>
+                  <mask id="flow-lens-mask">
+                    <rect x="0" y="0" width={viewBounds.w} height={viewBounds.h} fill="white" />
+                    {Object.values(placed).filter(g => g.real).map((g, i) => (
+                      <rect key={`fl-hole-${i}`} x={g.x - 10} y={g.y - 10}
+                        width={g.w + 20} height={g.h + 20} rx={16} fill="black" />
+                    ))}
+                  </mask>
+                </defs>
+                <rect className="flow-lens-dim" x="0" y="0" width={viewBounds.w} height={viewBounds.h}
+                  fill="var(--bg)" mask="url(#flow-lens-mask)" />
+                {Object.values(placed).filter(g => g.real).map((g, i) => (
+                  <rect key={`fl-lit-${i}`} className="flow-lens-lit" x={g.x - 8} y={g.y - 8}
+                    width={g.w + 16} height={g.h + 16} rx={14} fill="none" />
+                ))}
+                {Object.values(placed).filter(g => !g.real).map((g, i) => (
+                  <g key={`fl-pill-${i}`}>
+                    <rect className="flow-lens-pill" x={g.x} y={g.y} width={g.w} height={g.h} rx={11} />
+                    <text className="flow-lens-pill-label" x={g.x + 12} y={g.y + (g.sub ? 17 : 24)}>{g.label}</text>
+                    {g.sub && <text className="flow-lens-pill-sub" x={g.x + 12} y={g.y + 31}>{g.sub}</text>}
+                  </g>
+                ))}
+                {fedges.map((e, i) => {
+                  const a = placed[e.from], b = placed[e.to]
+                  if (!a || !b) return null
+                  const am = mid(a), bm = mid(b)
+                  const x1 = am.cx < bm.cx ? a.x + a.w + 6 : a.x - 6
+                  const y1 = am.cy
+                  const x2 = am.cx < bm.cx ? b.x - 8 : b.x + b.w + 8
+                  const y2 = bm.cy
+                  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - 14
+                  const failing = /fails/i.test(e.label || '')
+                  const lw = Math.min(220, Math.max(40, (e.label || '').length * 5.4))
+                  return (
+                    <g key={`fl-edge-${i}`}>
+                      <path className={`flow-lens-edge${failing ? ' failing' : ''}${e.confidence === 'low' ? ' low' : ''}`}
+                        d={`M ${x1} ${y1} Q ${mx} ${my - 12} ${x2} ${y2}`}
+                        fill="none" markerEnd="url(#arrowhead-flow)" />
+                      <rect className="flow-lens-label-bg" x={mx - lw / 2} y={my - 22} width={lw} height={16} rx={8} />
+                      <text className={`flow-lens-label${failing ? ' failing' : ''}`} x={mx} y={my - 10} textAnchor="middle">
+                        {(e.label || '').slice(0, 40)}
+                      </text>
+                    </g>
+                  )
+                })}
+              </g>
+            )
+          })()}
+
+          {/* Repair-hatch focus: the FAILING function wears a red boundary. */}
+          {failFocus && (() => {
+            const g = layout.fnById?.[failFocus.fnId] || layout.fileById?.[failFocus.fileId]
+            if (!g) return null
+            return <rect className="watch-ring active fail-focus" x={g.x - 6} y={g.y - 6}
+              width={g.w + 12} height={g.h + 12} rx={13} fill="none" pointerEvents="none" />
+          })()}
 
           {/* Watch Any Agent: holds while the agent works — bright on the live box,
               calmer trail on boxes touched earlier this session. */}

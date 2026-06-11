@@ -20,6 +20,10 @@ export default function Whiteboard({
   archSel,
   onExpandModule,
   flowMode = 'story',
+  failFocus = null,
+  flowLens = null,
+  onExitFlowLens,
+  onRegenFlowLens,
   story = null,
   runNodeStates,
   runEdgeStates,
@@ -134,6 +138,10 @@ export default function Whiteboard({
           onExpandModule={onExpandModule}
           flowMode={flowMode}
           story={story}
+          failFocus={failFocus}
+          flowLens={flowLens}
+          onExitFlowLens={onExitFlowLens}
+          onRegenFlowLens={onRegenFlowLens}
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
           watchBoxIds={watchBoxIds}

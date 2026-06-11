@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { getPromptGraph } from '../../api/backend'
+import { tryCopy } from '../../lib/clipboard'
+import Md from '../../lib/markdown'
 
 /**
  * Story view — the conceptual narrative built from prompt episodes.
@@ -148,7 +150,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
           <StoryNarrative graph={graph} eventsOpen={eventsOpen}
                           detail={detail} setDetail={setDetail} />
           {detail && (
-            <StoryDrawer detail={detail} epById={epById}
+            <StoryDrawer detail={detail} epById={epById} setDetail={setDetail}
                          onClose={() => setDetail(null)}
                          onSpotlightEpisode={onSpotlightEpisode}
                          onSpotlightCommit={onSpotlightCommit}
@@ -447,10 +449,67 @@ function BridgeTick({ tick, selected, onClick }) {
 }
 
 // A lifecycle branch above/below a beat, with its little connector stem.
+// Compact failure-and-repair rows on the episode drawer — one group per failure
+// fingerprint, one clickable row per artifact (explanation / flow / prompt /
+// run). Rows open the artifact detail INSIDE the drawer, never by view-jumping.
+function RepairSection({ ep, verifyGreen, openDetail }) {
+  const groups = {}
+  for (const a of ep.repairArtifacts || []) {
+    if (!a || !a.fingerprint) continue
+    const g = groups[a.fingerprint] || (groups[a.fingerprint] = { failure: a, byKind: {} })
+    g.byKind[a.kind] = a
+  }
+  const KINDS = [['failure_explanation', 'explanation'], ['failure_flow', 'failure flow'],
+                 ['repair_prompt', 'repair prompt'], ['repair_run', 'senior dev run']]
+  return (
+    <div className="tlv3-drawer-section">
+      <div className="tlv3-drawer-k">failure and repair</div>
+      {Object.values(groups).map((g, i) => (
+        <div key={i} className="tlv3-repair">
+          <div className="tlv3-repair-fail">
+            ✕ {g.failure.test || g.failure.checkId || 'check'} — <span className="tlv3-mono">{g.failure.file}:{g.failure.line}</span>
+          </div>
+          {g.failure.function && <div className="tlv3-repair-loc">{g.failure.function}()</div>}
+          {KINDS.filter(([k]) => g.byKind[k]).map(([k, label]) => (
+            <button key={k} className="tlv3-repair-row" onClick={() => openDetail(g.byKind[k])}>
+              <span className="tlv3-repair-row-label">{label}</span>
+              <span className="tlv3-repair-row-meta">
+                {k === 'repair_run'
+                  ? (g.byKind[k].status !== 'failed'
+                      ? `ran ✓ — ${(g.byKind[k].writes || []).length} file${(g.byKind[k].writes || []).length === 1 ? '' : 's'}`
+                      : 'run ✕')
+                  : (g.byKind[k].source || '')}
+              </span>
+              <span className="tlv3-repair-row-go">→</span>
+            </button>
+          ))}
+          {verifyGreen && <div className="tlv3-repair-green">✓ checks green — verified after the repair</div>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// Honest copy for the repair prompt inside the drawer detail.
+function RepairCopy({ text }) {
+  const [note, setNote] = useState('')
+  const copy = async () => {
+    const ok = await tryCopy(text || '')
+    setNote(ok ? 'Copied ✓' : 'Clipboard blocked — select the text and ⌘C')
+    setTimeout(() => setNote(''), 3500)
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0' }}>
+      <button className="tlv3-repair-copy" onClick={copy}>Copy prompt</button>
+      {note && <span className="tlv3-repair-note">{note}</span>}
+    </div>
+  )
+}
+
 // ── Inline Story drawer — details open IN the board, never by switching views ──
 // Canvas spotlighting (amber files / commit impact) remains available as explicit
 // "→ canvas" secondary actions; the default click keeps the user in the story.
-function StoryDrawer({ detail, epById, onClose, onSpotlightEpisode, onSpotlightCommit, setActiveView }) {
+function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, onSpotlightCommit, setActiveView }) {
   const node = detail.node || {}
   const ep = epById[node.episodeId]            // enriched episode (commits w/ titles) when loaded
   const showOnCanvas = () => {
@@ -486,6 +545,11 @@ function StoryDrawer({ detail, epById, onClose, onSpotlightEpisode, onSpotlightC
         {row('status', node.status)}
         {node.verify && row('verification',
           `${node.verify.status}${(node.verify.checks || []).length ? ' — ' + node.verify.checks.map(c => `${c.label} ${c.status === 'passed' ? '✓' : '✕'}`).join(' · ') : ''}`)}
+        {(ep?.repairArtifacts || []).length > 0 && (
+          <RepairSection ep={ep}
+                         verifyGreen={node.verify?.status === 'passed'}
+                         openDetail={(a) => setDetail?.({ kind: 'repair', key: a.id, artifact: a, node, back: detail })} />
+        )}
         {node.pr && row('pull request', <a href={node.pr.url} target="_blank" rel="noreferrer">PR #{node.pr.number} ↗</a>)}
         {node.issue && row('issue', <a href={node.issue.url} target="_blank" rel="noreferrer">#{node.issue.number} ↗</a>)}
         {commits.length > 0 && (
@@ -508,6 +572,42 @@ function StoryDrawer({ detail, epById, onClose, onSpotlightEpisode, onSpotlightC
           </div>
         )}
         {canvasBtn('Show files on canvas →', showOnCanvas)}
+      </>
+    )
+  } else if (detail.kind === 'repair') {
+    const a = detail.artifact || {}
+    const KIND_LABEL = { failure_explanation: 'explanation', repair_prompt: 'repair prompt',
+                         failure_flow: 'failure flow', repair_run: 'senior dev run' }
+    body = (
+      <>
+        {head(`${node.tag || 'episode'} · ${KIND_LABEL[a.kind] || 'repair'}`)}
+        <button className="tlv3-drawer-action"
+                onClick={() => setDetail?.(detail.back || { kind: 'episode', key: node.episodeId, node })}>
+          ← back to episode
+        </button>
+        <div className="tlv3-drawer-title">✕ {a.test || a.checkId || 'check'} — <span className="tlv3-mono">{a.file}:{a.line}</span></div>
+        {a.kind === 'failure_flow' ? (
+          <>
+            {a.summary && <div className="tlv3-drawer-summary">{a.summary}</div>}
+            {(a.edges || []).map((e, i) => (
+              <div key={i} className="tlv3-repair-flowedge">
+                <span className="tlv3-mono">{e.from}</span> → <span className="tlv3-mono">{e.to}</span>
+                <div className="tlv3-repair-flowlabel">{e.label}{e.confidence === 'low' ? ' (low confidence)' : ''}</div>
+              </div>
+            ))}
+          </>
+        ) : a.kind === 'repair_run' ? (
+          <div className="tlv3-drawer-summary">
+            {a.status !== 'failed'
+              ? `Senior Dev ran ✓ — ${(a.writes || []).length} file${(a.writes || []).length === 1 ? '' : 's'} edited`
+              : `Senior Dev run ✕ — ${a.error || 'failed'}`}
+          </div>
+        ) : (
+          <div className="tlv3-repair-detail-md"><Md text={a.text} /></div>
+        )}
+        {a.kind === 'repair_prompt' && <RepairCopy text={a.text} />}
+        {row('source', a.source)}
+        {row('updated', a.updatedAt)}
       </>
     )
   } else if (detail.kind === 'commit') {

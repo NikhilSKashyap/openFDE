@@ -50,8 +50,7 @@ import {
   landEpisode,
   askConcept,
   getConceptCards,
-  saveConceptCard,
-} from './api/backend'
+  saveConceptCard, hatchFlow } from './api/backend'
 import { connectWS, closeWS } from './api/ws'
 
 // Merge event lists, dedup by id, newest-first, capped. Existing (live) entries
@@ -95,6 +94,7 @@ export default function App() {
   // The repair hatch — function-scoped fix surface, summoned ONLY by a failure
   // receipt's "Show →" ({file, line, func, funcName, test, start, end} | null).
   const [hatch, setHatch] = useState(null)
+  const [flowLens, setFlowLens] = useState(null)   // {artifact, busy} — failure-flow lens
   // ── Execution run / live trace (Step 17) ─────────────────────────────────
   // run: { runId, status, scopedBoxIds, scopedArrowIds, nodeStates, edgeStates,
   //        trace: {id:[events]}, failures: {id:{...}} } | null
@@ -859,7 +859,7 @@ export default function App() {
   // ArchGraph (containing function = greatest start-line ≤ failure line; range
   // ends where the next function begins), focus the canvas there (expand the
   // module + file), and open the repair hatch on exactly that slice.
-  function onShowFailure(failure) {
+  function onShowFailure(failure, _check, episodeId) {
     const open = (graph) => {
       const fns = (graph?.functions || []).filter(f => f.path === failure.file)
         .sort((a, b) => (a.line || 0) - (b.line || 0))
@@ -883,7 +883,9 @@ export default function App() {
         next.add(`box:file:${failure.file}`)
         return next
       })
-      setHatch({ ...failure, start, end, funcName: fn?.name || failure.func })
+      setHatch({ ...failure, start, end, funcName: fn?.name || failure.func,
+                 episodeId: episodeId || '', checkId: _check?.id || '',
+                 failureMsg: (_check?.summary || _check?.outputTail || '').slice(0, 800) })
     }
     if (archGraph) open(archGraph)
     else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); open(g) } })
@@ -1707,6 +1709,21 @@ export default function App() {
               archSel={archSel}
               onExpandModule={expandModule}
               flowMode={flowMode}
+              failFocus={hatch ? { fnId: `box:function:${hatch.file}:${hatch.funcName || hatch.func}`, fileId: `box:file:${hatch.file}` } : null}
+              flowLens={flowLens}
+              onExitFlowLens={() => setFlowLens(null)}
+              onRegenFlowLens={async () => {
+                if (!hatch || !flowLens?.artifact || flowLens.busy) return
+                setFlowLens(l => ({ ...l, busy: true }))
+                const r = await hatchFlow({
+                  episodeId: hatch.episodeId || '', checkId: hatch.checkId || '',
+                  failureMsg: hatch.failureMsg || '', file: hatch.file, line: hatch.line,
+                  test: hatch.test || '', funcName: hatch.funcName || hatch.func,
+                  start: hatch.start, end: hatch.end,
+                  fingerprint: flowLens.artifact.fingerprint, regenerate: true,
+                })
+                setFlowLens(r?.artifact ? { artifact: r.artifact } : (l => ({ ...l, busy: false })))
+              }}
               story={story}
               runNodeStates={run?.nodeStates}
               runEdgeStates={run?.edgeStates}
@@ -1754,7 +1771,9 @@ export default function App() {
                 onShowFailure={onShowFailure}
               />
             )}
-            {hatch && <FunctionPatch hatch={hatch} onClose={() => setHatch(null)} />}
+            {hatch && <FunctionPatch hatch={hatch}
+                                     onClose={() => { setHatch(null); setFlowLens(null) }}
+                                     onShowFlow={(art) => setFlowLens({ artifact: art })} />}
           </main>
           <aside className={`panel-right${rightOpen ? '' : ' collapsed'}`}>
             <button className="panel-collapse-btn right" onClick={() => setRightOpen(o => !o)}

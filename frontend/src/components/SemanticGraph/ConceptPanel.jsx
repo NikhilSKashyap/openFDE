@@ -367,7 +367,7 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                 )}
                 {ch.status === 'failed' && (ch.failures || [])[0] && onShowFailure && (
                   <button
-                    onClick={() => onShowFailure(ch.failures[0], ch)}
+                    onClick={() => onShowFailure(ch.failures[0], ch, spotlight.episodeId)}
                     title={`Open ${ch.failures[0].file}:${ch.failures[0].line} — ${ch.failures[0].func}() — in the repair hatch`}
                     style={{
                       flexShrink: 0, padding: '0 7px', borderRadius: 99, cursor: 'pointer',

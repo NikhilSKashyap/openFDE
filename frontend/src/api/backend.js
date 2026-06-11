@@ -169,6 +169,27 @@ export const getSourceSlice = (path, start, end) =>
 export const patchSource = (path, start, end, code) =>
   apiFetch('/api/source/patch', { method: 'POST', body: JSON.stringify({ path, start, end, code }) })
 
+/** Repair prompt via the senior_dev role — once per failure fingerprint;
+    pass {regenerate: true} to replace. → {ok, artifact, fingerprint, reused} */
+export const composeFixPrompt = (payload) =>
+  apiFetch('/api/hatch/prompt', { method: 'POST', body: JSON.stringify(payload), _timeout: 90_000 })
+
+/** Explanation of WHY the check fails (senior_dev role) — once per fingerprint. */
+export const hatchExplain = (payload) =>
+  apiFetch('/api/hatch/explain', { method: 'POST', body: JSON.stringify(payload), _timeout: 90_000 })
+
+/** Failure flow — deterministic AST/receipt graph; Verifier humanizes labels. */
+export const hatchFlow = (payload) =>
+  apiFetch('/api/hatch/flow', { method: 'POST', body: JSON.stringify(payload), _timeout: 120_000 })
+
+/** Run the repair through OpenFDE's configured senior_dev, scoped to the file. */
+export const hatchRun = (payload) =>
+  apiFetch('/api/hatch/run', { method: 'POST', body: JSON.stringify(payload), _timeout: 660_000 })
+
+/** Hydrate: every saved artifact for this failure meaning (hatch reopen). */
+export const hydrateHatch = (payload) =>
+  apiFetch('/api/hatch/artifacts', { method: 'POST', body: JSON.stringify(payload) })
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 /**
