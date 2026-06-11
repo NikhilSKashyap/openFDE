@@ -100,7 +100,20 @@ export default function WhiteboardCanvas({
   // ── Compute nested layout (expanded modules → files → functions) ──────────
   // Memoised so transient state (hover, zoom, rubber-band) doesn't re-run the
   // layout — important since hover updates happen on pointer move.
-  const expanded = expandedIds instanceof Set ? expandedIds : EMPTY_SET
+  const manualExpanded = expandedIds instanceof Set ? expandedIds : EMPTY_SET
+
+  // Semantic zoom — ALTITUDE IS THE FILTER. The zoom level decides the deepest
+  // granularity that may render: far out = modules only, mid = files, close =
+  // functions. Manual expansion survives in state but is clamped by altitude,
+  // so "expand all" at world view can never produce the spaghetti screenshot.
+  const altitude = scale < 0.5 ? 0 : scale < 1.0 ? 1 : 2
+  const expanded = useMemo(() => {
+    if (altitude >= 2) return manualExpanded
+    if (altitude === 0) return EMPTY_SET
+    const keep = new Set()
+    for (const id of manualExpanded) if (!id.startsWith('box:file:')) keep.add(id)
+    return keep
+  }, [manualExpanded, altitude])
   // Dagre lays out files/functions synchronously — this is the instant first
   // paint and the fallback if ELK hasn't resolved yet or fails. It is NOT shown
   // once ELK is ready; it only seeds the canvas so there's never a blank frame.
@@ -162,8 +175,8 @@ export default function WhiteboardCanvas({
   }, [flowMode, story])
 
   const flowArrows = useMemo(
-    () => computeFlowArrows(archGraph, layout, { mode: flowMode, focusId, storyFlowIds: storyData.ids, flowIdToStep: storyData.map }),
-    [archGraph, layout, flowMode, focusId, storyData],
+    () => computeFlowArrows(archGraph, layout, { mode: flowMode, focusId, storyFlowIds: storyData.ids, flowIdToStep: storyData.map, altitude }),
+    [archGraph, layout, flowMode, focusId, storyData, altitude],
   )
 
   // Routed mode: replace the bezier/arc geometry of any flow arrow ELK actually
@@ -179,6 +192,18 @@ export default function WhiteboardCanvas({
       return pts ? { ...f, routedPoints: pts } : f
     })
   }, [flowArrows, routedEdges])
+
+  // Two layers + a render budget: attention edges (focused / story) draw ON TOP
+  // of boxes; ambient edges draw UNDER them, heaviest trunks first, capped — and
+  // the cap is never silent (the budget chip names what it dropped).
+  const FLOW_BUDGET = 140
+  const { flowsOver, flowsUnder, flowOverflow } = useMemo(() => {
+    const over = [], under = []
+    for (const f of renderFlowArrows) (f.highlight || f.story ? over : under).push(f)
+    under.sort((x, y) => (y.count || 0) - (x.count || 0))
+    return { flowsOver: over, flowsUnder: under.slice(0, FLOW_BUDGET),
+             flowOverflow: Math.max(0, under.length - FLOW_BUDGET) }
+  }, [renderFlowArrows])
 
   // Story mode staged layout (Batch 5b): when a story is available, render it as
   // left-to-right phases instead of the nested file stack.
@@ -716,6 +741,11 @@ export default function WhiteboardCanvas({
 
   return (
     <div className="wb-canvas-root">
+      {flowOverflow > 0 && (
+        <div className="wb-flow-budget" title="Ambient edges are capped for legibility — selection always shows everything it touches">
+          +{flowOverflow} ambient flows beyond budget · select a node to focus
+        </div>
+      )}
       <div className="wb-canvas-scroll" ref={scrollRef} onWheel={handleWheel}>
         <svg
           ref={svgRef}
@@ -750,6 +780,14 @@ export default function WhiteboardCanvas({
             </marker>
           </defs>
           <rect x="0" y="0" width={viewBounds.w} height={viewBounds.h} fill="url(#dot-grid)" />
+
+          {/* Ambient dependency trunks — UNDER the boxes: weighted module↔module
+              aggregates (and dimmed leftovers). The signal layer, not the noise. */}
+          {!storyStage && (
+            <g pointerEvents="none">
+              {flowsUnder.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
+            </g>
+          )}
 
           {storyStage ? (
             <StoryStage stage={storyStage}
@@ -793,11 +831,11 @@ export default function WhiteboardCanvas({
                 </g>
               ))}
 
-              {/* Function-level dataflow arrows (Step 23/26) — on top of boxes so the
-                  in-file call-arc lanes are visible; non-interactive so they never
-                  intercept port clicks. */}
+              {/* Attention edges — the focused / story flows, ON TOP of boxes so
+                  the selected node's 1-hop detail reads; non-interactive so they
+                  never intercept port clicks. */}
               <g pointerEvents="none">
-                {renderFlowArrows.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
+                {flowsOver.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
               </g>
 
               {/* Story-mode step badges (Batch 5) — numbered, non-interactive. */}
@@ -1050,12 +1088,17 @@ function FlowArrow({ flow }) {
     mid = getBezierMidpoint(start, fp, end, tp)
   }
 
-  // Visual hierarchy (Batch 4): by default, file/module rollups read clearly
-  // while same-file function arcs stay faint texture; the focused flow pops and
-  // unrelated flows nearly vanish.
-  const base = flow.route === 'arc-right' ? 0.22 : 0.5
-  const opacity = flow.dim ? 0.07 : flow.highlight ? 0.95 : base
-  const width = flow.highlight ? 2 : (flow.route === 'arc-right' ? 1.1 : 1.35)
+  // Visual hierarchy: module trunks carry WEIGHT (width grows with bundled flow
+  // count), long edges fade with distance so locality reads stronger, the
+  // focused flow pops, unrelated flows nearly vanish.
+  const ddx = (flow.to.x + flow.to.w / 2) - (flow.from.x + flow.from.w / 2)
+  const ddy = (flow.to.y + flow.to.h / 2) - (flow.from.y + flow.from.h / 2)
+  const fade = Math.max(0.3, Math.min(1, 1.15 - Math.hypot(ddx, ddy) / 2600))
+  const base = flow.route === 'arc-right' ? 0.22 : flow.level === 0 ? 0.45 : 0.5
+  const opacity = flow.dim ? 0.07 : flow.highlight ? 0.95 : base * fade
+  const width = flow.highlight ? 2
+    : flow.level === 0 ? Math.min(3.2, 1.2 + Math.log2((flow.count || 1) + 1) * 0.55)
+      : (flow.route === 'arc-right' ? 1.1 : 1.35)
   // Labels only when highlighted (related to focus); otherwise the canvas stays
   // calm. Bundled flows show an aggregate "N flows" pill.
   const labelText = flow.highlight && flow.label ? truncate(flow.label, 22) : ''

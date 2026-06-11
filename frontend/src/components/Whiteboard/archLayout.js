@@ -308,7 +308,8 @@ function flowRelatesToFocus(fw, focusId) {
  *                  count, label, confidence }. `from`/`to` are node geometries.
  */
 export function computeFlowArrows(archGraph, layout, opts = {}) {
-  const { mode = 'focused', focusId = null, storyFlowIds = null, flowIdToStep = null } = opts
+  const { mode = 'focused', focusId = null, storyFlowIds = null, flowIdToStep = null,
+          altitude = 2 } = opts
   const story = mode === 'story' && storyFlowIds && storyFlowIds.size > 0
   const flows = (archGraph && archGraph.flows) || []
   if (!flows.length || !layout) return []
@@ -332,10 +333,13 @@ export function computeFlowArrows(archGraph, layout, opts = {}) {
     const fb = resolveAt(fw.toFunctionId, fw.toFile, fw.toModuleId, 2)
     if (!fa || !fb) continue
     const sameFile = fa.level === 2 && fb.level === 2 && fw.fromFile === fw.toFile
-    const crossFile = fw.fromFile !== fw.toFile
 
     // Story mode: keep only flows on the story path (function-level, human label).
-    // Other modes: focused rolls unrelated cross-file flows up to file level.
+    // Other modes — ATTENTION decides altitude ("altitude is the filter"):
+    //   • unrelated to the focus → both endpoints collapse to the MODULE trunk
+    //     (weighted aggregate). No selection ⇒ the whole board is calm trunks.
+    //   • related to the focus → full detail, clamped by the zoom altitude.
+    //   • mode 'all' keeps the legacy everything-on render (the art mode).
     let a, b, related, storyFlow = false, stepLabel = null, stepOrder = null
     if (story) {
       if (!storyFlowIds.has(fw.id)) continue
@@ -344,16 +348,19 @@ export function computeFlowArrows(archGraph, layout, opts = {}) {
       if (step) { stepLabel = step.label; stepOrder = step.order }
     } else {
       related = focusId ? flowRelatesToFocus(fw, focusId) : false
-      a = fa; b = fb
-      if (mode !== 'all' && crossFile && !related) {
-        a = resolveAt(fw.fromFunctionId, fw.fromFile, fw.fromModuleId, 1)
-        b = resolveAt(fw.toFunctionId, fw.toFile, fw.toModuleId, 1)
+      if (mode === 'all') {
+        a = fa; b = fb
+      } else if (related) {
+        a = resolveAt(fw.fromFunctionId, fw.fromFile, fw.fromModuleId, altitude)
+        b = resolveAt(fw.toFunctionId, fw.toFile, fw.toModuleId, altitude)
+      } else {
+        a = resolveAt(fw.fromFunctionId, fw.fromFile, fw.fromModuleId, 0)
+        b = resolveAt(fw.toFunctionId, fw.toFile, fw.toModuleId, 0)
       }
     }
     if (!a || !b || a.id === b.id) continue
     const route = sameFile ? 'arc-right'
       : (fw.fromModuleId === fw.toModuleId ? 'arc-left' : 'bezier')
-    if (a.level === 0 && b.level === 0) continue   // module↔module = persisted arrows
     const key = `${a.id} ${b.id}`
     let e = agg.get(key)
     if (!e) {

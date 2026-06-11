@@ -1318,6 +1318,14 @@
    3-row grid, column flow: every triplet of children is one column. Episode
    columns hold [branches-above, box, branches-below]; bridge columns hold an
    empty cell, the tick line, an empty cell. Pure CSS, horizontal scroll. */
+/* honest cap: ambient canvas edges beyond the render budget are named, never dropped silently */
+.wb-flow-budget {
+  position: absolute; bottom: 50px; right: 12px; z-index: 46;
+  padding: 4px 10px; border-radius: 999px; font-size: 11px;
+  color: var(--text-muted); background: var(--surface-2);
+  border: 1px solid var(--border); pointer-events: none;
+}
+
 /* short boards center vertically in the viewport; tall ones scroll from the top */
 .tlv3-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px 10px;
                display: flex; align-items: safe center; }
