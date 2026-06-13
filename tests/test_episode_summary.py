@@ -203,6 +203,86 @@ class RepairTasksTest(unittest.TestCase):
         self.assertEqual(out[0]["commitSha"], "a651bad")              # identity preserved
 
 
+class ReconcileTaskStatusTest(unittest.TestCase):
+    """OpenPM cards must mirror their episode's CURRENT verify state — the live
+    split-brain bug was a card stuck on FAILED next to a passed episode."""
+
+    def _ep(self, eid, verify_status=None, status=None):
+        ep = {"episodeId": eid, "tag": "P1", "title": "Add Thing"}
+        if verify_status is not None:
+            ep["verify"] = {"status": verify_status}
+        if status is not None:
+            ep["status"] = status
+        return ep
+
+    def _task(self, eid, column, vstatus):
+        return {"id": "t-" + (eid or "x"), "source": "openfde-episode",
+                "episodeId": eid, "column": column, "verificationStatus": vstatus}
+
+    def test_passed_episode_clears_stale_failed_card(self):
+        # The exact live bug: card sat in Testing/FAILED while the episode passed.
+        tasks = [self._task("e1", "testing", "failed")]
+        changed = es.reconcile_task_status(tasks, [self._ep("e1", "passed")])
+        self.assertTrue(changed)
+        self.assertEqual(tasks[0]["verificationStatus"], "passed")
+        self.assertEqual(tasks[0]["column"], "testing")   # not todo/doing → not promoted
+
+    def test_failed_episode_clears_stale_passed_card(self):
+        tasks = [self._task("e1", "testing", "passed")]
+        changed = es.reconcile_task_status(tasks, [self._ep("e1", "failed")])
+        self.assertTrue(changed)
+        self.assertEqual(tasks[0]["verificationStatus"], "failed")
+
+    def test_result_promotes_todo_or_doing_to_testing(self):
+        tasks = [self._task("e1", "doing", None), self._task("e2", "todo", None)]
+        changed = es.reconcile_task_status(
+            tasks, [self._ep("e1", "passed"), self._ep("e2", "failed")])
+        self.assertTrue(changed)
+        self.assertEqual(tasks[0]["column"], "testing")
+        self.assertEqual(tasks[0]["verificationStatus"], "passed")
+        self.assertEqual(tasks[1]["column"], "testing")
+        self.assertEqual(tasks[1]["verificationStatus"], "failed")
+
+    def test_landed_episode_forces_done_passed(self):
+        tasks = [self._task("e1", "testing", "failed")]
+        changed = es.reconcile_task_status(tasks, [self._ep("e1", "failed", status="landed")])
+        self.assertTrue(changed)
+        self.assertEqual(tasks[0]["column"], "done")
+        self.assertEqual(tasks[0]["verificationStatus"], "passed")
+
+    def test_user_shipped_card_left_alone(self):
+        # column=done but episode NOT landed (manual move) → never reopened here.
+        tasks = [self._task("e1", "done", "passed")]
+        changed = es.reconcile_task_status(tasks, [self._ep("e1", "failed")])
+        self.assertFalse(changed)
+        self.assertEqual(tasks[0]["column"], "done")
+        self.assertEqual(tasks[0]["verificationStatus"], "passed")
+
+    def test_pending_verify_untouched(self):
+        tasks = [self._task("e1", "testing", "failed")]
+        changed = es.reconcile_task_status(tasks, [self._ep("e1", "running")])
+        self.assertFalse(changed)
+        self.assertEqual(tasks[0]["verificationStatus"], "failed")
+
+    def test_non_episode_and_unlinked_cards_untouched(self):
+        tasks = [
+            {"id": "demo", "title": "Whiteboard", "column": "doing"},   # no episodeId
+            self._task("ghost", "testing", "failed"),                    # episode missing
+        ]
+        changed = es.reconcile_task_status(tasks, [self._ep("e1", "passed")])
+        self.assertFalse(changed)
+
+    def test_idempotent(self):
+        tasks = [self._task("e1", "testing", "failed")]
+        eps = [self._ep("e1", "passed")]
+        self.assertTrue(es.reconcile_task_status(tasks, eps))
+        self.assertFalse(es.reconcile_task_status(tasks, eps))   # second pass no-ops
+
+    def test_non_list_is_safe(self):
+        self.assertFalse(es.reconcile_task_status(None, []))
+        self.assertFalse(es.reconcile_task_status({}, []))
+
+
 class EnrichTest(unittest.TestCase):
     def test_assigns_and_is_idempotent(self):
         ep = {"episodeId": "e1", "prompt": "fix the login bug"}
