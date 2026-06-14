@@ -10,9 +10,11 @@ evidence is strong.
 Reuses the prompt_capture primitives (transcript discovery, prompt parsing, edit-file
 attribution, the captureKey). Laws:
 
-  • Match to THIS repo — Claude Code by transcript cwd (exact) OR by edited files under
-    the repo (cross-cwd, like a session rooted elsewhere that edits this repo); Codex by
-    its session_meta cwd.
+  • Match to THIS repo — Claude Code: a SAME-cwd turn (the prompt's session cwd IS the
+    repo) imports even when discussion-only; a CROSS-cwd turn (a session rooted elsewhere)
+    imports ONLY when it edited files under the repo. Discussion-only prompts from a
+    different cwd are NOT this repo's history and are skipped. Codex stays cwd-exact (its
+    tool events carry no clean file path yet).
   • Skip OpenFDE-internal prompts — ``is_human_prompt`` already drops the summarizer /
     capture INTERNAL_MARKER and the runner directive, and machine/tool/meta turns.
   • Preserve source (claude-code / codex) and the original timestamp.
@@ -32,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from openfde.prompt_capture import (
-    _same_dir, capture_key_exists, claude_projects_dir,
+    _same_dir, capture_key_exists,
     codex_prompt_text, codex_session_id_from_path, edit_files_under,
     is_codex_human_prompt, is_human_prompt, read_new_lines, _claude_transcripts,
     _codex_init_ctx, codex_transcripts, _prompt_record,
@@ -106,18 +108,6 @@ def _link_commit(prompt_ts: float, edited: set, commits: list, linked: set):
 
 
 # ── transcript → turns (prompt + the files its turn edited) ──────────────────
-
-def _claude_repo_transcripts(root, home) -> list:
-    """Claude transcripts relevant to this repo: the repo's own cwd dir (exact match)
-    plus any other transcript that edits files under the repo (cross-cwd)."""
-    own = set()
-    d = claude_projects_dir(root, home)
-    if d.exists():
-        own = set(sorted(d.glob("*.jsonl")))
-    # The broad set is filtered per-turn by edit-files below; include all so a session
-    # rooted elsewhere (e.g. cwd=other repo, edits=this repo) is still found.
-    return sorted(own | set(_claude_transcripts(home)))
-
 
 def _claude_turns(path: Path, root) -> list:
     """[(prompt_record, edited_files)] for a Claude transcript — each human prompt with
@@ -202,6 +192,13 @@ def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_
     def _ingest(turns, kind):
         for prompt, edited in turns:
             counts["scanned"] += 1
+            # cwd attribution (backfill accuracy): a SAME-cwd turn (this prompt's session
+            # cwd IS the repo) imports even when discussion-only; a CROSS-cwd turn imports
+            # ONLY when it edited files under THIS repo. A discussion-only prompt from a
+            # different cwd is another repo's history — skip it. (Codex turns reach here
+            # only after _codex_turns filtered them to the repo's session cwd.)
+            if not edited and not _same_dir(prompt.get("cwd"), str(root)):
+                continue
             key = prompt.get("key")
             if not key or capture_key_exists(persistence, key):
                 continue                                  # idempotent: already imported
@@ -217,7 +214,9 @@ def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_
                     "open": "discussion"}[ep["status"]]] += 1
 
     try:
-        for path in _claude_repo_transcripts(root, home):
+        # Scan EVERY Claude transcript (the repo's own cwd dir is among them); _ingest
+        # applies the same-cwd / cross-cwd-with-edits rule per turn.
+        for path in sorted(_claude_transcripts(home)):
             _ingest(_claude_turns(path, root), "claude-code")
         for path in codex_transcripts(home):
             _ingest(_codex_turns(path, root), "codex")
