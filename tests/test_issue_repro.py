@@ -318,3 +318,41 @@ class ReportScrubTest(unittest.TestCase):
         self.assertIn("2 files (1 test, 1 source)", body)
         self.assertIn("abc1234", body)
         self.assertIn("Suspected area", body)
+
+
+class JsTargetStaysHonestTest(unittest.TestCase):
+    """Registering the JS/TS pack must NOT make reproduce draft a Python test for a
+    JS bug. A non-Python target stops cleanly (unsupported_runner), pins the JS
+    check so the verify gate works, and writes nothing under tests/."""
+
+    def test_js_target_returns_unsupported_runner_without_writing(self):
+        with tempfile.TemporaryDirectory() as dd:
+            root = Path(dd)
+            (root / "package.json").write_text(json.dumps(
+                {"name": "demo", "scripts": {"test": "vitest"}}))
+            (root / "src").mkdir()
+            (root / "src" / "math.ts").write_text(
+                "export const add = (a: number, b: number) => a - b\n")
+
+            def caller(_sys, _user):
+                # the drafter-agent stub: triage names the .ts target so locate finds it
+                return json.dumps({"kind": "bug", "reproducible": True,
+                                   "targets": [{"file": "src/math.ts"}],
+                                   "failure_mode": "wrong sum",
+                                   "desired_behavior": "add(2,3)===5"})
+
+            v = reproduce_issue(
+                root, title="add() returns the wrong sum",
+                body="Calling add(2, 3) raises a TypeError instead of returning 5. "
+                     "Expected 5 but got the wrong value.",
+                labels=["bug"], caller=caller, check_cmd=["npm", "run", "test"])
+
+            self.assertEqual(v["verdict"], "unsupported_runner")
+            self.assertIn("Python only", v["summary"])
+            # the JS check WAS pinned (verify gate works for this repo now) ...
+            cfg = root / ".openfde" / "verify.json"
+            self.assertTrue(cfg.exists())
+            self.assertEqual(json.loads(cfg.read_text())[0]["command"],
+                             ["npm", "run", "test", "--", "--run"])
+            # ... but NO Python repro test was fabricated under tests/
+            self.assertEqual(list(root.glob("tests/**/*.py")), [])

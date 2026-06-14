@@ -2,15 +2,19 @@
 openfde/language_packs/registry.py — the front door.
 
 ``get_language_packs(root)`` returns every pack that applies to a repo;
-``get_pack_for_file(path)`` returns the pack that owns a single file. Python is the
-only pack today — JS/TS and others are added here as they land. Boring on purpose.
+``get_pack_for_file(path)`` returns the pack that owns a single file. Python is
+Pack #1 and JS/TS is Pack #2 (L1-A: verify + repro seams); others are added here as
+they land. Boring on purpose.
 """
 from __future__ import annotations
 
+from .js_ts_pack import JsTsPack
 from .python_pack import PythonPack
 
-# Ordered: the first pack that claims a file wins in get_pack_for_file.
-_ALL_PACKS = (PythonPack(),)
+# Ordered: the first pack that claims a file wins in get_pack_for_file, and for a
+# polyglot repo packs[0] owns failure parsing — Python stays first so its behavior
+# is byte-for-byte unchanged. Extensions don't overlap, so file ownership is exact.
+_ALL_PACKS = (PythonPack(), JsTsPack())
 
 
 def get_language_packs(root) -> list:

@@ -6,6 +6,7 @@ parsing, repro context) live behind a pack so the core loop stays language-agnos
 Python is Pack #1; the door is open for JS/TS, Go, Rust to follow.
 """
 from .base import FailureLocation, LanguagePack, VerifyCheckSpec
+from .js_ts_pack import JsTsPack
 from .python_pack import PythonPack
 from .registry import get_language_packs, get_pack_for_file
 
@@ -14,6 +15,7 @@ __all__ = [
     "VerifyCheckSpec",
     "LanguagePack",
     "PythonPack",
+    "JsTsPack",
     "get_language_packs",
     "get_pack_for_file",
 ]
