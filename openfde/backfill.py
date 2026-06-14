@@ -34,9 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from openfde.prompt_capture import (
-    _same_dir, capture_key_exists,
-    codex_prompt_text, codex_session_id_from_path, edit_files_under,
-    is_codex_human_prompt, is_human_prompt, read_new_lines, _claude_transcripts,
+    capture_key_exists, claude_multirepo_context_guard,
+    codex_prompt_text, codex_session_id_from_path, edit_files_under, repo_file_evidence,
+    is_codex_human_prompt, is_human_prompt, read_new_lines, same_repo, _claude_transcripts,
     _codex_init_ctx, codex_transcripts, _prompt_record,
 )
 
@@ -110,31 +110,33 @@ def _link_commit(prompt_ts: float, edited: set, commits: list, linked: set):
 # ── transcript → turns (prompt + the files its turn edited) ──────────────────
 
 def _claude_turns(path: Path, root) -> list:
-    """[(prompt_record, edited_files)] for a Claude transcript — each human prompt with
-    the repo-relative files its turn (up to the next prompt) edited."""
+    """[(prompt_record, edited_files, file_evidence)] for a Claude transcript — each human
+    prompt with the repo-relative files its turn WROTE (edited; drives status) and the
+    broader set it TOUCHED (read/edit/write; drives cross-cwd attribution)."""
     entries, _ = read_new_lines(Path(path), 0)
-    turns, cur, edits = [], None, []
+    turns, cur, edits, evid = [], None, [], []
     for e in entries:
         if is_human_prompt(e):
             if cur is not None:
-                turns.append((cur, sorted(set(edits))))
-            cur, edits = _prompt_record(e), []
+                turns.append((cur, sorted(set(edits)), sorted(set(evid))))
+            cur, edits, evid = _prompt_record(e), [], []
         elif cur is not None:
             edits.extend(edit_files_under(e, root))
+            evid.extend(repo_file_evidence(e, root))
     if cur is not None:
-        turns.append((cur, sorted(set(edits))))
+        turns.append((cur, sorted(set(edits)), sorted(set(evid))))
     return turns
 
 
 def _codex_turns(path: Path, root) -> list:
-    """[(prompt_record, [])] for a Codex transcript whose session cwd is this repo.
-
-    Codex tool events carry no clean file path (v1), so Codex turns import as discussion
-    episodes with no edit-file evidence — honest, not guessed."""
+    """[(prompt_record, [], [])] for a Codex transcript whose session cwd is canonically
+    this repo. Codex tool events carry no clean file path (v1), so Codex stays cwd-exact
+    (canonical: git root / resolved path, never basename) and imports with no file
+    evidence — honest, not guessed."""
     entries, _ = read_new_lines(Path(path), 0)
     fctx = _codex_init_ctx(Path(path))
     cwd = fctx.get("cwd")
-    if not (cwd and _same_dir(cwd, str(root))):
+    if not (cwd and same_repo(cwd, root)):
         return []
     sid = fctx.get("sessionId") or codex_session_id_from_path(path)
     out = []
@@ -147,7 +149,7 @@ def _codex_turns(path: Path, root) -> list:
         uuid = e.get("id") or e.get("uuid") or secrets.token_hex(8)
         out.append(({"key": f"{sid}:{uuid}", "text": txt, "sessionId": sid,
                      "uuid": uuid, "timestamp": e.get("timestamp") or fctx.get("timestamp"),
-                     "cwd": cwd, "kind": "codex"}, []))
+                     "cwd": cwd, "kind": "codex"}, [], []))
     return out
 
 
@@ -190,14 +192,13 @@ def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_
     counts = {"imported": 0, "landed": 0, "needsReview": 0, "discussion": 0, "scanned": 0}
 
     def _ingest(turns, kind):
-        for prompt, edited in turns:
+        for prompt, edited, evidence in turns:
             counts["scanned"] += 1
-            # cwd attribution (backfill accuracy): a SAME-cwd turn (this prompt's session
-            # cwd IS the repo) imports even when discussion-only; a CROSS-cwd turn imports
-            # ONLY when it edited files under THIS repo. A discussion-only prompt from a
-            # different cwd is another repo's history — skip it. (Codex turns reach here
-            # only after _codex_turns filtered them to the repo's session cwd.)
-            if not edited and not _same_dir(prompt.get("cwd"), str(root)):
+            # Multi-repo guard (REMOVABLE shim): a same canonical-repo turn imports even
+            # discussion-only; a cross-cwd turn imports ONLY with canonical file evidence
+            # (read/edit/write) under THIS repo — never by basename or session directory.
+            # (Codex turns reach here already filtered to the repo's session cwd.)
+            if not claude_multirepo_context_guard(prompt, evidence, root):
                 continue
             key = prompt.get("key")
             if not key or capture_key_exists(persistence, key):

@@ -180,6 +180,69 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(res2["imported"], 0)
         self.assertEqual(len(self._backfilled()), 1)
 
+    # ── canonical repo identity: basename / sibling / subdir / Codex ──
+    def test_same_basename_different_path_is_ignored(self):
+        # Same folder NAME, different path → a different repo. Basename is never evidence.
+        twin = Path(self.tmp.name) / "elsewhere" / self.root.name   # same basename, other path
+        self._cross_transcript("b.jsonl", [
+            self._cross_prompt("u7", "what's our plan here?", "2026-06-10T00:00:00Z", twin)], twin)
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 0)
+        self.assertEqual(self._backfilled(), [])
+
+    def test_claude_projects_sibling_repo_does_not_bleed(self):
+        # A sibling repo in the same workspace (shared parent) is a different repo.
+        sibling = self.root.parent / "sibling-proj"
+        self._cross_transcript("s.jsonl", [
+            self._cross_prompt("u6", "discuss the sibling roadmap", "2026-06-10T00:00:00Z", sibling)], sibling)
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 0)
+        self.assertEqual(self._backfilled(), [])
+
+    def test_subdir_session_is_same_repo(self):
+        # A session rooted in a SUBDIR of the watched repo is the same git repo → imports,
+        # even discussion-only (canonical git-root match, not exact path).
+        sub = self.root / "pkg"
+        sub.mkdir()
+        self._cross_transcript("sub.jsonl", [
+            self._cross_prompt("u5", "how is pkg structured?", "2026-06-10T00:00:00Z", sub)], sub)
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 1)
+        self.assertEqual(self._backfilled()[0]["status"], "open")
+
+    # ── Codex fixtures (cwd-exact) ──
+    @staticmethod
+    def _cdx_user(text, pid="p1"):
+        return {"type": "response_item", "id": pid, "timestamp": "2026-06-09T00:00:01Z",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": text}]}}
+
+    def _codex_transcript(self, uuid, cwd, entries):
+        from openfde.prompt_capture import codex_sessions_root
+        d = codex_sessions_root(self.home) / "2026" / "06" / "09"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"rollout-2026-06-09T00-00-00-{uuid}.jsonl"
+        meta = {"type": "session_meta", "timestamp": "2026-06-09T00:00:00Z",
+                "payload": {"id": uuid, "cwd": str(cwd)}}
+        path.write_text("\n".join(json.dumps(e) for e in ([meta] + entries)) + "\n")
+        return path
+
+    def test_codex_cross_cwd_is_ignored(self):
+        # Codex stays cwd-exact (canonical): another repo with no file evidence → out.
+        other = Path(self.tmp.name) / "other-repo"
+        self._codex_transcript("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", other,
+                               [self._cdx_user("codex discussion in another repo")])
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 0)
+
+    def test_codex_same_cwd_imports(self):
+        # Codex rooted at the watched repo imports (cwd-exact canonical match).
+        self._codex_transcript("11111111-2222-3333-4444-555555555555", self.root,
+                               [self._cdx_user("codex work in the watched repo", pid="p2")])
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 1)
+        self.assertEqual(self._backfilled()[0]["kind"], "codex")
+
 
 if __name__ == "__main__":
     unittest.main()

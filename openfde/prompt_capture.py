@@ -106,30 +106,122 @@ def claude_projects_dir(repo_root, home=None) -> Path:
     return claude_projects_root(home) / encode_repo_dir(repo_root)
 
 
-def edit_files_under(entry: dict, repo_root) -> list:
-    """Repo-relative paths an entry's Edit/Write/MultiEdit tool calls touch under
-    ``repo_root`` (empty if none) — the cwd-agnostic signal that links a session to a
-    repo: a prompt belongs to the repo whose files it edits, wherever it's rooted."""
+def _rel_under(fp, root_real: str):
+    """Repo-relative path when ``fp`` RESOLVES to a location under ``root_real`` (symlinks
+    resolved on both sides), else None. Containment is applied to real FILE paths only —
+    never to a session/transcript directory."""
+    if not fp:
+        return None
+    try:
+        fp_real = os.path.realpath(str(fp))
+    except (OSError, ValueError, TypeError):
+        return None
+    if fp_real.startswith(root_real + os.sep):
+        return os.path.relpath(fp_real, root_real)
+    return None
+
+
+def _tool_files_under(entry: dict, repo_root, tools) -> list:
+    """Repo-relative files the entry's ``tools`` (file_path) calls touch under
+    ``repo_root`` — canonical (symlink-resolved) containment, deduped, order-preserving."""
     msg = entry.get("message") if isinstance(entry, dict) else None
     content = msg.get("content") if isinstance(msg, dict) else None
     if not isinstance(content, list):
         return []
-    rr = str(Path(repo_root))
-    out = []
+    try:
+        root_real = os.path.realpath(str(repo_root))
+    except (OSError, ValueError):
+        return []
+    out, seen = [], set()
     for b in content:
-        if not (isinstance(b, dict) and b.get("type") == "tool_use"
-                and b.get("name") in ("Edit", "Write", "MultiEdit")):
+        if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in tools):
             continue
-        fp = (b.get("input") or {}).get("file_path") or ""
-        if not fp:
-            continue
-        try:
-            rel = os.path.relpath(fp, rr)
-        except (ValueError, TypeError):
-            continue
-        if not rel.startswith("..") and not os.path.isabs(rel):
+        rel = _rel_under((b.get("input") or {}).get("file_path"), root_real)
+        if rel is not None and rel not in seen:
+            seen.add(rel)
             out.append(rel)
     return out
+
+
+def edit_files_under(entry: dict, repo_root) -> list:
+    """Repo-relative paths an entry's Edit/Write/MultiEdit tool calls touch under
+    ``repo_root`` (canonical, symlink-resolved). The WRITE set — drives episode files
+    and land status; empty when the turn wrote nothing under the repo."""
+    return _tool_files_under(entry, repo_root, ("Edit", "Write", "MultiEdit"))
+
+
+def repo_file_evidence(entry: dict, repo_root) -> list:
+    """Repo-relative files an entry's Read / Edit / Write / MultiEdit calls touch under
+    ``repo_root`` (canonical). The broader ATTRIBUTION signal — a cross-cwd turn belongs
+    to this repo when it touched a file whose RESOLVED path is under the repo root."""
+    return _tool_files_under(entry, repo_root, ("Read", "Edit", "Write", "MultiEdit"))
+
+
+# ── canonical repo identity (symlink + git-root aware) ───────────────────────
+# Repo identity must be canonical, NEVER a basename: /Downloads/interview and
+# /Documents/Claude/Projects/interview are different repos unless git resolves them to
+# the same root. Used to attribute a prompt to a repo without folder-name false matches.
+_CANON_ROOT_CACHE: dict = {}
+
+
+def _git_toplevel(real_path: str):
+    """The git work-tree root for ``real_path`` (symlink-resolved), or None when it is
+    not inside a work tree / git is unavailable."""
+    try:
+        r = subprocess.run(["git", "-C", real_path, "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = (r.stdout or "").strip()
+    if r.returncode != 0 or not top:
+        return None
+    try:
+        return os.path.realpath(top)
+    except (OSError, ValueError):
+        return top
+
+
+def canonical_repo_root(path) -> str:
+    """Canonical identity for a repo path: the git work-tree root when ``path`` is in one
+    (so a subdir maps to its repo root), else the resolved absolute path. Symlinks are
+    always resolved; '' for a falsy/unresolvable path. Cached per process."""
+    if not path:
+        return ""
+    key = str(path)
+    if key in _CANON_ROOT_CACHE:
+        return _CANON_ROOT_CACHE[key]
+    try:
+        real = os.path.realpath(key)
+    except (OSError, ValueError):
+        real = ""
+    val = (_git_toplevel(real) or real) if real else ""
+    _CANON_ROOT_CACHE[key] = val
+    return val
+
+
+def same_repo(cwd, root) -> bool:
+    """True when two paths are the SAME repo by canonical identity (git root when
+    available, else resolved path). Basename is never evidence; symlinks are resolved."""
+    a = canonical_repo_root(cwd)
+    return bool(a) and a == canonical_repo_root(root)
+
+
+def claude_multirepo_context_guard(prompt: dict, file_evidence, root) -> bool:
+    """REMOVABLE compatibility shim. Claude Code can expose MULTIPLE repo contexts in a
+    single session (especially under ~/Claude/Projects), so a prompt's cwd or a turn's
+    file paths can belong to a SIBLING repo. This guard decides — per turn — whether a
+    prompt is CANONICALLY the watched repo's, preventing cross-repo prompt bleed:
+
+      • same canonical repo as the watched root → belongs (even discussion-only);
+      • a different cwd → belongs ONLY if the turn touched (read/edit/write) a file whose
+        resolved path is under the watched repo.
+
+    Never matches by basename; never treats the session directory as containment. If
+    Claude later emits unambiguous per-turn repo ids, delete this guard and gate on those.
+    """
+    if same_repo(prompt.get("cwd"), root):
+        return True
+    return bool(file_evidence)
 
 
 def prompt_text(entry: dict) -> str:
@@ -538,8 +630,12 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
                         # land its full (clustered) edit set before opening the new one.
                         await _land_active_capture(root, persistence, manager, last_change,
                                                    session_id=rec.get("sessionId"))
-                        if _same_dir(rec.get("cwd"), repo_str):
-                            await _capture(rec, files=[])      # cwd-matched → now
+                        # Canonical repo identity (symlink + git-root aware), never the
+                        # session DIRECTORY by basename — Claude can expose sibling repos
+                        # in one session. Same repo → capture now (even discussion-only);
+                        # a different cwd waits for a real edit under THIS repo.
+                        if same_repo(rec.get("cwd"), root):
+                            await _capture(rec, files=[])      # canonical repo → now
                         else:
                             pending[rec.get("sessionId")] = rec  # wait for a repo edit (Claude)
                         continue
