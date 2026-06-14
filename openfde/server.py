@@ -72,6 +72,8 @@ from openfde.codex_local_runner import cli_available as codex_cli_available, run
 from openfde.echo_transport import make_echo_transport
 from openfde.openai_transport import complete as llm_complete, make_transport as make_openai_transport
 from openfde.council import run_council
+from openfde import council_context as council_context_mod
+from openfde import council_router as council_router_mod
 from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
 from openfde.story import build_story
@@ -3736,6 +3738,81 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """
         return web.Response()
 
+    # ── Council Chat Router (v1) — one chat, routed across the council ───────
+    # Read-only Q&A: route a message to Architect / Senior Dev / Verifier (or have
+    # Architect + Senior Dev DISCUSS) and answer from the generated CouncilContext.
+    # The brain is PURE (openfde.council_router / council_context); the server only
+    # injects the live stores + the _text_role callers. This NEVER edits files and
+    # NEVER dispatches run_council / run_claude_code / hatch / workflow — run_ask can
+    # only invoke the injected text callers. Senior Dev's EDIT mode may be busy; that
+    # is reported, never used to block read-only Senior Dev chat.
+
+    def _council_available() -> dict:
+        s = persistence.load_agent_settings()
+        return {r: _text_role(s.get(r, {})) is not None for r in agent_settings_mod.ROLES}
+
+    def _council_agent_states() -> dict:
+        return council_context_mod.derive_agent_states(
+            available=_council_available(), runs=persistence.load_runs(),
+            active_run_ids=set(_RUN_CONTROLS))
+
+    def _council_context() -> dict:
+        return council_context_mod.build_council_context(
+            active_episode=persistence.latest_active_episode(),
+            recent_episodes=persistence.load_episodes(),
+            repo_status=git_status(path),
+            verify_latest=persistence.load_verify_latest(),
+            project=persistence.load_project(),
+            project_log=persistence.load_project_log(),
+            agent_states=_council_agent_states())
+
+    async def get_council_context(request: web.Request) -> web.Response:
+        loop = asyncio.get_event_loop()
+        ctx = await loop.run_in_executor(None, _council_context)
+        return web.json_response({"ok": True, "context": ctx})
+
+    async def post_council_ask(request: web.Request) -> web.Response:
+        """Route ONE chat message and answer READ-ONLY. Body: {question, target?};
+        target ∈ auto|architect|senior_dev|verifier|discuss (default auto). Answers
+        through _text_role callers only — never dispatches an editing runner."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        question = (body.get("question") or "").strip()
+        target = (body.get("target") or "auto").strip().lower()
+        if not question:
+            return web.json_response({"ok": False, "error": "question required"}, status=400)
+
+        def _work():
+            settings = persistence.load_agent_settings()
+            agent_states = _council_agent_states()
+            ctx = _council_context()
+            decision = council_router_mod.route(question, target, agent_states)
+            # Inject the text callers: Architect/Verifier and Senior Dev's READ-ONLY
+            # chat role all build a _text_role caller the same way — none can edit the
+            # repo. (Senior Dev's edit runner is never referenced on this path.)
+            callers = {r: _text_role(settings.get(r, {})) for r in agent_settings_mod.ROLES}
+            result = council_router_mod.run_ask(
+                question=question, decision=decision, context=ctx,
+                callers=callers, role_human=_ROLE_HUMAN)
+            used = result.get("usedRole")
+            if used:
+                prov = settings.get(used, {}).get("provider")
+                if prov:
+                    result["provider"] = prov     # secondary metadata, not the label
+            result["routedTarget"] = target
+            result["agents"] = agent_states
+            return result
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _work)
+        except Exception as exc:  # noqa: BLE001 — read-only chat must fail soft
+            logger.error("council ask failed: %s", exc)
+            return web.json_response({"ok": False, "error": "council ask failed"}, status=500)
+        return web.json_response({"ok": True, **result})
+
     # ---- register routes (order matters: specific before catch-all) -----
     app.router.add_get("/ws",                          ws_handler)
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
@@ -3787,6 +3864,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/agent/run",                 post_agent_run)
     app.router.add_post("/api/council/run",               post_council_run)
     app.router.add_post("/api/council/{runId}/cancel",     post_council_cancel)
+    app.router.add_get( "/api/council/context",           get_council_context)
+    app.router.add_post("/api/council/ask",               post_council_ask)
     app.router.add_get( "/api/execution/workflows",       get_workflows)
     app.router.add_post("/api/execution/workflow/{workflowId}/result", post_workflow_result)
     app.router.add_get( "/api/execution/workflow/{workflowId}", get_workflow_one)

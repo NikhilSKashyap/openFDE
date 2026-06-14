@@ -1,0 +1,125 @@
+"""
+Tests for openfde.council_context — the generated, capped, PURE CouncilContext and
+its agent-state derivation. Laws: read-only chat is never "busy"; a file-editing run
+makes senior_dev.edit busy; everything is capped; the brief renders deterministically.
+"""
+import unittest
+
+from openfde import council_context as C
+
+
+class DeriveAgentStatesTest(unittest.TestCase):
+    def test_idle_when_no_runs(self):
+        st = C.derive_agent_states(
+            available={"architect": True, "senior_dev": True, "verifier": True},
+            runs=[], active_run_ids=[])
+        for r in ("architect", "senior_dev", "verifier"):
+            self.assertFalse(st[r]["workBusy"])
+            self.assertFalse(st[r]["chatBusy"])             # chat is never busy
+        self.assertEqual(st["runningWorkJobs"], [])
+
+    def test_edit_run_attributes_work_to_senior_dev(self):
+        runs = [{"runId": "r1", "kind": "council_run", "status": "running",
+                 "endedAt": None, "startedAt": "t0"}]
+        st = C.derive_agent_states(runs=runs, active_run_ids=[])
+        self.assertTrue(st["senior_dev"]["workBusy"])       # editing → Senior Dev
+        self.assertFalse(st["senior_dev"]["chatBusy"])      # work busy, chat free
+        self.assertFalse(st["architect"]["workBusy"])
+        self.assertFalse(st["verifier"]["workBusy"])
+        self.assertEqual(st["runningWorkJobs"][0]["runId"], "r1")
+        self.assertEqual(st["runningWorkJobs"][0]["role"], "senior_dev")
+
+    def test_verify_run_attributes_work_to_verifier(self):
+        runs = [{"runId": "v1", "kind": "verify_run", "status": "running", "endedAt": None}]
+        st = C.derive_agent_states(runs=runs, active_run_ids=[])
+        self.assertTrue(st["verifier"]["workBusy"])
+        self.assertFalse(st["senior_dev"]["workBusy"])
+
+    def test_plan_run_attributes_work_to_architect(self):
+        runs = [{"runId": "p1", "kind": "plan_run", "status": "running", "endedAt": None}]
+        st = C.derive_agent_states(runs=runs, active_run_ids=[])
+        self.assertTrue(st["architect"]["workBusy"])
+        self.assertFalse(st["senior_dev"]["workBusy"])
+
+    def test_work_busy_from_in_flight_run_id_not_yet_persisted(self):
+        st = C.derive_agent_states(runs=[], active_run_ids=["live1"])
+        self.assertTrue(st["senior_dev"]["workBusy"])
+        self.assertEqual(st["runningWorkJobs"][0]["runId"], "live1")
+
+    def test_finished_run_is_not_busy(self):
+        runs = [{"runId": "r1", "kind": "council_run", "status": "passed", "endedAt": "t1"}]
+        st = C.derive_agent_states(runs=runs, active_run_ids=[])
+        self.assertFalse(st["senior_dev"]["workBusy"])
+
+    def test_unavailable_provider_reflected(self):
+        st = C.derive_agent_states(available={"verifier": False}, runs=[], active_run_ids=[])
+        self.assertFalse(st["verifier"]["available"])
+        self.assertTrue(st["architect"]["available"])       # missing → available
+
+    def test_jobs_are_capped(self):
+        runs = [{"runId": f"r{i}", "kind": "agent_run", "status": "running",
+                 "endedAt": None} for i in range(12)]
+        st = C.derive_agent_states(runs=runs, active_run_ids=[])
+        self.assertLessEqual(len(st["runningWorkJobs"]), 5)
+
+
+class BuildContextTest(unittest.TestCase):
+    def test_shape_and_caps(self):
+        episodes = [{"episodeId": f"e{i}", "tag": f"P{i}", "title": f"Title {i}",
+                     "status": "landed", "summary": f"did thing {i}"} for i in range(10)]
+        active = {"episodeId": "e0", "tag": "P0", "title": "Active", "status": "reviewing",
+                  "verification": {"status": "passed"},
+                  "intentSource": {"kind": "issue", "ref": "#12"}}
+        repo = {"git": True, "branch": "main", "shortHead": "abc1234",
+                "dirty": [f"f{i}.py" for i in range(40)], "staged": []}
+        verify = {"status": "passed", "ranAt": "2026-06-14T00:00:00Z", "checks": []}
+        project = {"name": "demo", "description": "Ship the council router.", "entries": []}
+        plog = [{"summary": f"decision {i}"} for i in range(10)]
+        agents = C.derive_agent_states(runs=[], active_run_ids=[])
+        ctx = C.build_council_context(active_episode=active, recent_episodes=episodes,
+                                      repo_status=repo, verify_latest=verify,
+                                      project=project, project_log=plog, agent_states=agents)
+        self.assertEqual(ctx["activeEpisode"]["tag"], "P0")
+        self.assertEqual(ctx["activeEpisode"]["verify"], "passed")
+        self.assertEqual(ctx["activeEpisode"]["intent"], "issue")
+        self.assertLessEqual(len(ctx["recentEpisodes"]), 5)
+        self.assertEqual(ctx["repo"]["dirtyCount"], 40)            # true count kept
+        self.assertLessEqual(len(ctx["repo"]["dirtyFiles"]), 20)   # list capped
+        self.assertEqual(ctx["verify"]["status"], "passed")
+        self.assertLessEqual(len(ctx["recentDecisions"]), 5)
+        self.assertIn("Ship the council router.", ctx["recentDecisions"])
+        self.assertIn("agents", ctx)
+
+    def test_handles_empty_inputs(self):
+        ctx = C.build_council_context()
+        self.assertIsNone(ctx["activeEpisode"])
+        self.assertEqual(ctx["recentEpisodes"], [])
+        self.assertEqual(ctx["repo"]["dirtyCount"], 0)
+        self.assertIsNone(ctx["verify"])
+        self.assertEqual(ctx["recentDecisions"], [])
+
+
+class RenderBriefTest(unittest.TestCase):
+    def test_brief_mentions_active_repo_and_busy(self):
+        agents = C.derive_agent_states(
+            runs=[{"runId": "r1", "kind": "council_run", "status": "running", "endedAt": None}],
+            active_run_ids=[])
+        ctx = C.build_council_context(
+            active_episode={"tag": "P5", "title": "Router", "status": "reviewing"},
+            repo_status={"branch": "main", "dirty": ["a.py"]}, agent_states=agents)
+        brief = C.render_brief(ctx)
+        self.assertIn("P5", brief)
+        self.assertIn("branch main", brief)
+        self.assertIn("mid-WORK", brief)                   # busy is reported, not hidden
+        self.assertIn("Senior Dev", brief)                 # attributed to the work role
+        self.assertLessEqual(len(brief), 1800)
+
+    def test_brief_idle_and_empty_are_safe(self):
+        idle = C.build_council_context(agent_states=C.derive_agent_states())
+        self.assertIn("all idle", C.render_brief(idle))
+        self.assertIsInstance(C.render_brief({}), str)
+        self.assertIsInstance(C.render_brief(None), str)
+
+
+if __name__ == "__main__":
+    unittest.main()

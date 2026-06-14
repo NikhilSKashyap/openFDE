@@ -1,0 +1,256 @@
+"""
+openfde/council_router.py — the deterministic Council Chat Router (v1) + ask runner.
+
+One OpenFDE chat, routed across the council. PURE and testable:
+  • route(question, target, agent_states) decides WHO answers (or that Architect +
+    Senior Dev should DISCUSS) from the question + an explicit target + agent states.
+  • run_ask(...) drives the answer through INJECTED text callers — the server passes
+    the `_text_role` callers, so this module never imports a provider or a runner.
+
+Two hard rules baked in:
+  • READ-ONLY. run_ask only ever invokes the injected text callers `caller(system,
+    user) -> str`. It has no handle to run_council / run_claude_code / any file-editing
+    runner — it CANNOT dispatch a run, by construction.
+  • Every role has two modes. `<role>.work` (planning, editing, verifying, running
+    checks) may be busy, but that NEVER blocks `<role>.chat` (read-only Q&A) for ANY
+    role. workBusy is surfaced in the decision/receipt, never used to reroute (a
+    provider that cannot run concurrent text calls is a future, provider-level concern).
+
+Receipt: a single contributing role labels as itself (Architect / Senior Dev /
+Verifier); two or more label as "Council", with the contributing roles as secondary
+metadata (contributorsLabel, e.g. "Architect · Senior Dev"). Never "A + B" as the label.
+"""
+from __future__ import annotations
+
+from openfde import council_context
+
+ROLES = ("architect", "senior_dev", "verifier")
+TARGETS = ("auto", "architect", "senior_dev", "verifier", "discuss")
+
+_ROLE_HUMAN = {"architect": "Architect", "senior_dev": "Senior Dev", "verifier": "Verifier"}
+
+_PERSONA = {
+    "architect": "You own product direction, architecture, roadmap, and tradeoffs.",
+    "senior_dev": "You own implementation, debugging, and code paths — but here you "
+                  "only DISCUSS, you never edit files.",
+    "verifier": "You own tests, verification, readiness, review, and PR evidence.",
+}
+
+# Deterministic v1 routing vocabulary (substring match, lowercased).
+_ARCH_KW = ("architecture", "architect", "roadmap", "product", "tradeoff", "trade-off",
+            "strategy", "design", "approach", "what do you think", "why", "scope",
+            "decision", "direction", "priorit", "should we", "high-level")
+_SD_KW = ("implement", "implementation", "debug", "code path", "codepath", "code",
+          "function", "patch", "failing test", "stack trace", "traceback", "bug",
+          "fix", "refactor", "exception", "regress in")
+_VER_KW = ("verify", "verification", "readiness", "ready to ship", "pr evidence",
+           "regression", "coverage", "review the", "tests pass", "test suite",
+           "gate", "ci ", "is it green")
+_DISCUSS_KW = ("discuss", "debate", "weigh in", "both of you", "what do you both",
+               "you both think", "hash this out", "argue", "get both")
+
+
+def _count(ql: str, kws) -> int:
+    return sum(1 for k in kws if k in ql)
+
+
+def _wants_discuss(ql: str) -> bool:
+    if any(k in ql for k in _DISCUSS_KW):
+        return True
+    if "architect" in ql and ("senior dev" in ql or "senior-dev" in ql):
+        return True
+    if "both" in ql and ("role" in ql or "agent" in ql or "team" in ql):
+        return True
+    return False
+
+
+def _tie_break(scores: dict) -> str:
+    """Highest score wins; ties resolve Architect > Senior Dev > Verifier."""
+    best = max(scores.values())
+    for r in ROLES:
+        if scores[r] == best:
+            return r
+    return "architect"
+
+
+def route(question, target="auto", agent_states=None) -> dict:
+    """Decide who answers. Deterministic; no network, no provider knowledge.
+
+    Returns:
+        dict — {mode: 'single'|'discuss', roles: [...], primaryRole, confidence,
+                reason, workBusyRoles}.
+    """
+    ql = (question or "").lower()
+    states = agent_states if isinstance(agent_states, dict) else {}
+    # Every role's `.work` busy is REPORTED, never used to reroute: `.work` busy never
+    # blocks `.chat`, for any role.
+    work_busy_roles = [r for r in ROLES if (states.get(r) or {}).get("workBusy")]
+    base = {"workBusyRoles": work_busy_roles}
+    t = (target or "auto").strip().lower()
+    if t not in TARGETS:
+        t = "auto"
+
+    # ── Explicit targets win outright ────────────────────────────────────────
+    if t in ROLES:
+        return {**base, "mode": "single", "roles": [t], "primaryRole": t,
+                "confidence": 1.0, "reason": f"explicit target: {_ROLE_HUMAN[t]}"}
+    if t == "discuss":
+        return {**base, "mode": "discuss", "roles": ["architect", "senior_dev"],
+                "primaryRole": "architect", "confidence": 1.0,
+                "reason": "explicit discuss: Architect + Senior Dev"}
+
+    # ── Auto: discuss first, then keyword intent ─────────────────────────────
+    if _wants_discuss(ql):
+        return {**base, "mode": "discuss", "roles": ["architect", "senior_dev"],
+                "primaryRole": "architect", "confidence": 0.9,
+                "reason": "question asks both roles to weigh in"}
+    scores = {"architect": _count(ql, _ARCH_KW),
+              "senior_dev": _count(ql, _SD_KW),
+              "verifier": _count(ql, _VER_KW)}
+    # A high-impact, ambiguous tradeoff — strong on BOTH architecture and
+    # implementation and roughly balanced (within 1) → let them discuss it.
+    if (scores["architect"] >= 2 and scores["senior_dev"] >= 2
+            and abs(scores["architect"] - scores["senior_dev"]) <= 1):
+        return {**base, "mode": "discuss", "roles": ["architect", "senior_dev"],
+                "primaryRole": "architect", "confidence": 0.6,
+                "reason": "balanced architecture/implementation signal → discuss"}
+    if max(scores.values()) == 0:
+        return {**base, "mode": "single", "roles": ["architect"],
+                "primaryRole": "architect", "confidence": 0.4,
+                "reason": "no strong signal → Architect (default)"}
+    top = _tie_break(scores)
+    second = sorted(scores.values(), reverse=True)[1]
+    conf = round(min(1.0, 0.55 + 0.15 * (scores[top] - second)), 2)
+    return {**base, "mode": "single", "roles": [top], "primaryRole": top,
+            "confidence": conf,
+            "reason": f"matched {_ROLE_HUMAN[top]} keywords (score {scores[top]})"}
+
+
+# ── Prompt building ──────────────────────────────────────────────────────────
+
+def build_role_prompt(role, question, context, discuss=False) -> tuple:
+    """(system, user) for one role. user carries the question + the rendered brief."""
+    rh = _ROLE_HUMAN.get(role, role)
+    extra = (" You are in a council discussion; give YOUR perspective concisely — you "
+             "need not cover everything the others will." if discuss else "")
+    system = (
+        f"You are the {rh} in OpenFDE, a forward-deployed engineering tool. "
+        f"{_PERSONA.get(role, '')} Answer in plain language, concise (2-6 sentences), "
+        "NO code dumps. This is a READ-ONLY discussion — you are NOT editing files or "
+        "running anything. Ground the answer in the council context; if it is "
+        f"insufficient, say what is missing instead of speculating.{extra}")
+    brief = council_context.render_brief(context)
+    user = f"Question: {question}\n\n--- council context ---\n{brief or '(no context)'}"
+    return system, user
+
+
+def _synthesis_prompt(question, notes) -> tuple:
+    system = (
+        "You are the Architect in OpenFDE, synthesizing a council discussion into ONE "
+        "answer for the user. Merge the perspectives below into a single coherent, "
+        "plain-language answer (3-7 sentences), no code dumps; note any genuine "
+        "disagreement briefly. READ-ONLY — nothing is being edited or run.")
+    body = "\n\n".join(f"{_ROLE_HUMAN.get(r, r)} said:\n{t}" for r, t in notes.items())
+    return system, f"User question: {question}\n\n{body}"
+
+
+def _deterministic_synthesis(notes) -> str:
+    return "\n\n".join(f"**{_ROLE_HUMAN.get(r, r)}:** {notes[r]}"
+                       for r in ("architect", "senior_dev") if notes.get(r))
+
+
+def _no_provider_answer(context) -> str:
+    brief = council_context.render_brief(context)
+    return ("No model provider is configured for this role yet, so here is the live "
+            "council context to answer from directly:\n\n" + (brief or "(no context)"))
+
+
+def _safe_call(caller, system, user) -> str:
+    """Invoke an injected text caller; a provider error degrades to '' (→ fallback),
+    never an exception that crashes the ask."""
+    try:
+        return (caller(system, user) or "").strip()
+    except Exception:  # noqa: BLE001 — provider failures must not break read-only chat
+        return ""
+
+
+def _receipt(contrib_roles, rh) -> dict:
+    """Receipt labels for an answer. PRIMARY label: a single contributing role shows
+    that role (``Architect``/``Senior Dev``/``Verifier``); two or more show ``Council``;
+    none shows ``OpenFDE``. SECONDARY metadata: ``contributors`` and a ``" · "``-joined
+    ``contributorsLabel`` (e.g. ``Architect · Senior Dev``) — never the primary label."""
+    names = [rh.get(r, r) for r in contrib_roles]
+    label = "Council" if len(names) >= 2 else (names[0] if names else "OpenFDE")
+    return {"label": label, "contributors": names, "contributorsLabel": " · ".join(names)}
+
+
+# ── Ask orchestration (pure; the server injects the text callers) ────────────
+
+def run_ask(*, question, decision, context, callers, role_human=None) -> dict:
+    """Produce ONE answer for a routed question using INJECTED text callers only.
+
+    `callers` is {role: caller|None}; the server builds each via _text_role (so every
+    call is capture-safe — see that seam). This function never dispatches a run.
+
+    Returns:
+        dict — {answer, mode, roles, primaryRole, usedRole, label, contributors,
+                contributorsLabel, fallback, roleNotes?, routedReason, confidence,
+                workBusyRoles}.
+    """
+    rh = role_human or _ROLE_HUMAN
+    callers = callers or {}
+    common = {"routedReason": decision.get("reason", ""),
+              "confidence": decision.get("confidence"),
+              "workBusyRoles": decision.get("workBusyRoles", [])}
+    if decision.get("mode") == "discuss":
+        return {**common, **_run_discuss(question, decision, context, callers, rh)}
+    return {**common, **_run_single(question, decision, context, callers, rh)}
+
+
+def _run_single(question, decision, context, callers, rh) -> dict:
+    primary = decision.get("primaryRole", "architect")
+    # graceful availability fallback: chosen role → Architect → deterministic brief.
+    for role in [primary] + (["architect"] if primary != "architect" else []):
+        caller = callers.get(role)
+        if not caller:
+            continue
+        system, user = build_role_prompt(role, question, context)
+        answer = _safe_call(caller, system, user)
+        if answer:
+            return {"mode": "single", "roles": [role], "primaryRole": primary,
+                    "usedRole": role, "fallback": role != primary,
+                    "answer": answer, **_receipt([role], rh)}
+    return {"mode": "single", "roles": [primary], "primaryRole": primary,
+            "usedRole": None, "fallback": True,
+            "answer": _no_provider_answer(context), **_receipt([], rh)}
+
+
+def _run_discuss(question, decision, context, callers, rh) -> dict:
+    notes = {}
+    for role in ("architect", "senior_dev"):          # sequential is fine for v1
+        caller = callers.get(role)
+        if not caller:
+            continue
+        system, user = build_role_prompt(role, question, context, discuss=True)
+        txt = _safe_call(caller, system, user)
+        if txt:
+            notes[role] = txt
+    if not notes:
+        return {"mode": "discuss", "roles": [], "primaryRole": "architect",
+                "usedRole": None, "fallback": True, "roleNotes": {},
+                "answer": _no_provider_answer(context), **_receipt([], rh)}
+    if len(notes) == 1:                               # only one role could answer
+        role, txt = next(iter(notes.items()))
+        return {"mode": "discuss", "roles": [role], "primaryRole": role,
+                "usedRole": role, "fallback": True, "roleNotes": notes,
+                "answer": txt, **_receipt([role], rh)}    # one contributor → role label
+    # Both answered → synthesize via the Architect text role, else deterministically.
+    synth = ""
+    if callers.get("architect"):
+        s_sys, s_user = _synthesis_prompt(question, notes)
+        synth = _safe_call(callers["architect"], s_sys, s_user)
+    contrib = [r for r in ("architect", "senior_dev") if notes.get(r)]
+    return {"mode": "discuss", "roles": ["architect", "senior_dev"],
+            "primaryRole": "architect", "usedRole": "architect", "fallback": False,
+            "roleNotes": notes, "answer": synth or _deterministic_synthesis(notes),
+            **_receipt(contrib, rh)}                      # 2 contributors → "Council"
