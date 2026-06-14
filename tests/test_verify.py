@@ -16,6 +16,7 @@ from openfde.verify import (
     run_check,
     run_verification,
 )
+from openfde.language_packs.python_pack import resolve_pytest_cmd
 
 
 class FakeProc:
@@ -345,7 +346,10 @@ class PytestDiscoveryTest(unittest.TestCase):
             (root / "tests").mkdir()
             (root / "tests" / "test_a.py").write_text("def test_a(): pass\n")
         checks = self._disc(build)
-        self.assertEqual(checks[0]["command"][:3], ["python3", "-m", "pytest"])
+        # The runner prefix is resolved per-environment (pytest CLI vs python3 -m
+        # pytest), so assert "this is a pytest command with OpenFDE's flags" rather
+        # than a fixed `python3 -m pytest` prefix.
+        self.assertIn("pytest", " ".join(checks[0]["command"]))
         self.assertIn("--tb=short", checks[0]["command"])
         self.assertIn("no:cacheprovider", checks[0]["command"])
 
@@ -354,7 +358,9 @@ class PytestDiscoveryTest(unittest.TestCase):
             (root / "pyproject.toml").write_text(
                 "[tool.pytest.ini_options]\ntestpaths = ['tests']\n")
         checks = self._disc(build)
-        self.assertEqual(checks[0]["command"][:3], ["python3", "-m", "pytest"])
+        self.assertIn("pytest", " ".join(checks[0]["command"]))
+        self.assertIn("--tb=short", checks[0]["command"])
+        self.assertIn("no:cacheprovider", checks[0]["command"])
 
     def test_pyproject_without_pytest_section_stays_unittest(self):
         def build(root):
@@ -377,7 +383,10 @@ class RecheckSingleTestTest(unittest.TestCase):
         (root / "conftest.py").write_text("")
         return d, root
 
-    CMD = ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    # Resolve the working pytest runner for THIS environment (pytest CLI vs
+    # python3 -m pytest) — a fixed `python3 -m pytest` makes recheck fail on a host
+    # where the interpreter can't import pytest even though the CLI is on PATH.
+    CMD = resolve_pytest_cmd()
 
     def test_failing_then_fixed(self):
         from openfde.verify import recheck_single_test

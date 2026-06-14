@@ -21,6 +21,7 @@ from openfde.issue_repro import (
     reproduce_issue,
     triage_issue,
 )
+from openfde.language_packs.python_pack import resolve_pytest_cmd
 
 PYTEST = shutil.which("pytest") is not None
 
@@ -177,7 +178,10 @@ REPRO_DRAFT = json.dumps({
              "    with pytest.raises(ValueError):\n"
              "        divide(6, None)\n"),
 })
-CHECK = ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+# The working pytest runner for THIS environment (pytest CLI vs python3 -m pytest);
+# a fixed `python3 -m pytest` yields run_error verdicts on a host that can't import
+# pytest through the interpreter even when the CLI is on PATH.
+CHECK = resolve_pytest_cmd()
 
 
 @unittest.skipUnless(PYTEST, "pytest not installed")

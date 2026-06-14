@@ -414,6 +414,7 @@ def run_single_test(root, base_cmd: list, test_path: str, test_name: str,
     Returns:
         dict — {status: failed|passed|error, tail, failures}.
     """
+    from openfde.language_packs import get_pack_for_file
     from openfde.verify import parse_failure_locations
     cmd = [*base_cmd, f"{test_path}::{test_name}"]
     try:
@@ -427,33 +428,13 @@ def run_single_test(root, base_cmd: list, test_path: str, test_name: str,
     tail = output.strip()[-1500:]
     if proc.returncode == 0:
         return {"status": "passed", "tail": tail, "failures": []}
-    failures = parse_failure_locations(output, root)
+    # Failure parsing is a language seam → the pack that owns the test file parses
+    # it (raw fallback when no pack claims the file).
+    pack = get_pack_for_file(test_path)
+    failures = ([loc.as_dict() for loc in pack.parse_failures(output, root)]
+                if pack is not None else parse_failure_locations(output, root))
     status = "failed" if failures or "failed" in output else "error"
     return {"status": status, "tail": tail, "failures": failures}
-
-
-_DEFAULT_PYTEST_CMD = ["python3", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider"]
-
-
-def _ensure_pytest_check(root) -> None:
-    """Persist a pytest check as ``.openfde/verify.json`` so the repo's "Run checks"
-    runs the repro test we are about to write. The drafted repro is ALWAYS pytest,
-    so a bare repo with no test config gets a pytest gate instead of a refusal —
-    this is what makes Reproduce (and the whole verify→Show→hatch loop) work on ANY
-    repo, test suite or not. Idempotent: never overwrites an existing config (the
-    user's, or one we wrote earlier). Silent on error."""
-    try:
-        cfg = Path(root) / ".openfde" / "verify.json"
-        if cfg.exists():
-            return
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(json.dumps([{
-            "id": "unit-tests", "label": "Unit tests",
-            "command": list(_DEFAULT_PYTEST_CMD), "required": True,
-        }], indent=2), encoding="utf-8")
-        logger.info("issue_repro: pinned a pytest check (.openfde/verify.json)")
-    except OSError:
-        pass
 
 
 def reproduce_issue(root, *, title: str, body: str, labels: list,
@@ -504,12 +485,19 @@ def reproduce_issue(root, *, title: str, body: str, labels: list,
                 "summary": "triage says reproducible, but no text-capable agent "
                            "is configured to draft the test (Agents → Senior Dev)"}
     if not check_cmd or "pytest" not in " ".join(map(str, check_cmd)):
-        # Bare / non-pytest repo: the repro we draft IS pytest, so synthesize a
-        # pytest check and persist it (.openfde/verify.json) so the repo's own
-        # "Run checks" then runs the new test — instead of refusing. This is the
-        # piece that makes "point OpenFDE at any repo → it just works" true.
-        _ensure_pytest_check(root)
-        check_cmd = list(_DEFAULT_PYTEST_CMD)
+        # The runner the repo discovered isn't this language's (or there's none).
+        # Ask the language pack that owns the target file for its framework: it
+        # pins a check config (so "Run checks" runs the test we're about to write)
+        # and hands back the command to run it with now — instead of refusing.
+        # This is the piece that makes "point OpenFDE at any repo → it works" true.
+        from openfde.language_packs import get_pack_for_file
+        pack = get_pack_for_file(target["file"])
+        if pack is None:
+            return {"verdict": "unsupported_runner", "targets": targets,
+                    "links": [t["file"] for t in targets],
+                    "summary": "no language pack for this file type yet (v1: Python)"}
+        pack.ensure_check_config(root)
+        check_cmd = list(pack.repro_context()["test_command"])
 
     home = find_test_home(root, target["file"])
     issue_ctx = (f"--- github issue ---\ntitle: {title}\n"

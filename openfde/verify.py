@@ -77,12 +77,15 @@ def discover_checks(root) -> list:
     checks = []
     tests_dir = root / "tests"
     if _is_pytest_repo(root):
-        # -q --tb=short: compact frames ("path:line: in func") the failure parser
-        # reads best; no:cacheprovider keeps the run from writing .pytest_cache
-        # into the worktree (the watcher must never see the verifier as an edit).
+        # The Python pack owns "how do we run pytest here": it resolves the working
+        # runner (pytest CLI vs `python3 -m pytest`) and appends OpenFDE's flags
+        # (-q --tb=short -p no:cacheprovider — compact "path:line: in func" frames the
+        # failure parser reads best; no:cacheprovider keeps .pytest_cache out of the
+        # worktree). Lazy import keeps verify ⇄ language_packs acyclic, so a machine
+        # where `python3 -m pytest` is broken still gets a green gate.
+        from openfde.language_packs.python_pack import resolve_pytest_cmd
         checks.append({"id": "unit-tests", "label": "Unit tests",
-                       "command": ["python3", "-m", "pytest", "-q", "--tb=short",
-                                   "-p", "no:cacheprovider"],
+                       "command": resolve_pytest_cmd(),
                        "cwd": "", "required": True})
     elif tests_dir.is_dir() and any(tests_dir.glob("test_*.py")):
         checks.append({"id": "unit-tests", "label": "Unit tests",
@@ -401,7 +404,8 @@ def run_check(root, check: dict, *, runner=None, timeout: int = _CHECK_TIMEOUT) 
     if status == FAILED:
         # Failure LOCATIONS, parsed from the FULL output before tailing — these
         # power "Show →": receipt → exact function on the canvas → repair hatch.
-        locs = parse_failure_locations(output, root)
+        # Parsing is a language seam → route through the pack (raw fallback).
+        locs = _parse_via_packs(output, root)
         if locs:
             evidence["failures"] = locs
     return evidence
@@ -418,7 +422,7 @@ def run_verification(root, *, checks=None, runner=None, timeout: int = _CHECK_TI
         dict — {status, checks[], ranAt, durationMs, note?}.
     """
     if checks is None:
-        checks = discover_checks(root)
+        checks = _discover_via_packs(root)
     started, t0 = _now(), time.monotonic()
     if not checks:
         return {"status": SKIPPED, "checks": [], "ranAt": started, "durationMs": 0,
@@ -431,3 +435,36 @@ def run_verification(root, *, checks=None, runner=None, timeout: int = _CHECK_TI
         "ranAt": started,
         "durationMs": int((time.monotonic() - t0) * 1000),
     }
+
+
+# ── Language seam ──────────────────────────────────────────────────────────────
+# Discovery + failure parsing are language-specific, so they route through the
+# LanguagePack registry. Python is the only pack today and it WRAPS discover_checks
+# / parse_failure_locations below, so behavior is byte-for-byte unchanged. The raw
+# fallbacks cover repos no pack claims (config-only or frontend-only). Imports are
+# lazy to keep verify ↔ language_packs free of an import cycle.
+
+def _discover_via_packs(root) -> list:
+    """discover_checks() through the language packs (dedup by check id)."""
+    from openfde.language_packs import get_language_packs
+    packs = get_language_packs(root)
+    if not packs:
+        return discover_checks(root)
+    out, seen = [], set()
+    for pack in packs:
+        for spec in pack.discover_checks(root):
+            d = spec.as_dict()
+            if d["id"] in seen:
+                continue
+            seen.add(d["id"])
+            out.append(d)
+    return out
+
+
+def _parse_via_packs(output: str, root) -> list:
+    """parse_failure_locations() through the pack that owns the repo."""
+    from openfde.language_packs import get_language_packs
+    packs = get_language_packs(root)
+    if not packs:
+        return parse_failure_locations(output, root)
+    return [loc.as_dict() for loc in packs[0].parse_failures(output, root)]
