@@ -390,12 +390,21 @@ def git_diff(root: Path, sha: str, max_patch: int = _MAX_PATCH_CHARS) -> Optiona
     }
 
 
+# A commit's file set is IMMUTABLE, so cache it per (root, sha, cap) for the process lifetime.
+# The Prompt Story Rail polls commit_files for ~all recent commits on every /api/review/episodes
+# request; re-running `git show` each poll was the dominant cost as history grew (≈30ms × dozens
+# of commits per poll). Bounded with crude FIFO trim — entries are tiny and history is finite.
+_COMMIT_FILES_CACHE: dict = {}
+_COMMIT_FILES_CACHE_CAP = 4096
+
+
 def commit_files(root: Path, sha: str, cap: int = 80) -> list:
     """Return the repo-relative paths a commit touched (cheap — names only).
 
     Used to enrich the Prompt Story Rail's nested commit chips and the OpenPM
     commit tasks with their file set *without* paying for a full patch. Capped so
-    a sprawling commit can't bloat the episodes payload.
+    a sprawling commit can't bloat the episodes payload. Results are cached per
+    (root, sha, cap) — a commit's files never change — so repeated polls are free.
 
     Args:
         root: Path — repository root.
@@ -406,11 +415,17 @@ def commit_files(root: Path, sha: str, cap: int = 80) -> list:
     Returns:
         list[str] — changed paths (possibly capped); empty on any error.
     """
+    # Cache check FIRST — a hit skips is_git_repo()/_valid_sha() (each a syscall/subprocess); only
+    # already-validated shas are ever cached, so this is safe.
+    key = (str(root), sha, cap)
+    cached = _COMMIT_FILES_CACHE.get(key)
+    if cached is not None:
+        return list(cached)                            # copy: callers must not mutate the cache
     if not is_git_repo(root) or not _valid_sha(sha):
         return []
     res = _run(["git", "show", "--no-color", "--name-only", "--format=", sha, "--"], root)
     if res.returncode != 0:
-        return []
+        return []                                      # transient failure → don't cache
     out, seen = [], set()
     for line in res.stdout.splitlines():
         p = _strip_path(line.strip())
@@ -419,7 +434,11 @@ def commit_files(root: Path, sha: str, cap: int = 80) -> list:
             out.append(p)
         if len(out) >= cap:
             break
-    return out
+    if len(_COMMIT_FILES_CACHE) >= _COMMIT_FILES_CACHE_CAP:   # crude FIFO trim, oldest ~10%
+        for k in list(_COMMIT_FILES_CACHE)[:_COMMIT_FILES_CACHE_CAP // 10]:
+            _COMMIT_FILES_CACHE.pop(k, None)
+    _COMMIT_FILES_CACHE[key] = out
+    return list(out)
 
 
 def worktree_diff(root: Path, paths=None, max_patch: int = _MAX_PATCH_CHARS) -> dict:
