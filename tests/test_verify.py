@@ -11,6 +11,7 @@ from pathlib import Path
 
 from openfde.verify import (
     _TAIL_CAP,
+    _parse_via_packs,
     discover_checks,
     parse_failure_locations,
     run_check,
@@ -435,3 +436,50 @@ class RunFaultDomainTest(unittest.TestCase):
     def test_clean_green_is_nobodys_failure(self):
         from openfde.verify import run_fault_domain
         self.assertEqual(run_fault_domain({"status": "passed", "recheck": "passed"}), "")
+
+
+class ParseViaPacksPolyglotTest(unittest.TestCase):
+    """A polyglot repo (Python + JS/TS) must still read JS/TS failure locations.
+
+    get_language_packs returns Python FIRST, so the old packs[0]-only parse lost
+    Vitest/Jest locations (PythonPack saw unknown output, JsTsPack was never tried).
+    _parse_via_packs now tries each detected pack and takes the first non-empty.
+    """
+
+    def _polyglot_repo(self):
+        d = tempfile.TemporaryDirectory()
+        root = Path(d.name)
+        (root / "package.json").write_text('{"name":"demo","scripts":{"test":"vitest"}}')
+        (root / "service.py").write_text("def add(a, b):\n    return a + b\n")
+        return d, root
+
+    def test_js_failure_parsed_when_python_is_first(self):
+        # Vitest output: PythonPack returns [] for it, JsTsPack parses file+line.
+        vitest = (" FAIL  src/math.test.ts > add > adds two numbers\n"
+                  "AssertionError: expected 5 to be 4\n"
+                  " ❯ src/math.test.ts:8:19\n")
+        d, root = self._polyglot_repo()
+        with d:
+            from openfde.language_packs import get_language_packs
+            self.assertEqual([p.name for p in get_language_packs(root)],
+                             ["python", "js_ts"])          # Python first, JS/TS second
+            locs = _parse_via_packs(vitest, root)
+            self.assertEqual(len(locs), 1)
+            self.assertEqual(locs[0]["file"], "src/math.test.ts")
+            self.assertEqual(locs[0]["line"], 8)
+
+    def test_python_failure_still_wins_when_python_parses(self):
+        # A pytest traceback: PythonPack (first) parses it; JsTsPack would return [].
+        pytest_out = (
+            "=================================== FAILURES ===================================\n"
+            "_________________________________ test_add _________________________________\n"
+            "service.py:3: in test_add\n"
+            "    assert add(1, 2) == 4\n"
+            "E   AssertionError\n")
+        d, root = self._polyglot_repo()
+        with d:
+            locs = _parse_via_packs(pytest_out, root)
+            self.assertEqual(len(locs), 1)
+            self.assertEqual(locs[0]["file"], "service.py")
+            self.assertEqual(locs[0]["line"], 3)
+            self.assertEqual(locs[0]["test"], "test_add")

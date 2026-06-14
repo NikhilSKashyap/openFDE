@@ -439,10 +439,14 @@ def run_verification(root, *, checks=None, runner=None, timeout: int = _CHECK_TI
 
 # ── Language seam ──────────────────────────────────────────────────────────────
 # Discovery + failure parsing are language-specific, so they route through the
-# LanguagePack registry. Python is the only pack today and it WRAPS discover_checks
-# / parse_failure_locations below, so behavior is byte-for-byte unchanged. The raw
-# fallbacks cover repos no pack claims (config-only or frontend-only). Imports are
-# lazy to keep verify ↔ language_packs free of an import cycle.
+# LanguagePack registry (Python is Pack #1, JS/TS is Pack #2). A repo can match more
+# than one pack: discovery collects every pack's checks (dedup by id), and failure
+# parsing tries each pack in detection order and takes the FIRST non-empty result —
+# so a polyglot repo still reads a Vitest/Jest failure even though Python is tried
+# first. PythonPack wraps parse_failure_locations below, so single-language Python
+# behavior is byte-for-byte unchanged. The raw fallbacks cover repos no pack claims
+# (config-only / frontend-only). Imports are lazy to keep verify ↔ language_packs
+# free of an import cycle.
 
 def _discover_via_packs(root) -> list:
     """discover_checks() through the language packs (dedup by check id)."""
@@ -462,9 +466,24 @@ def _discover_via_packs(root) -> list:
 
 
 def _parse_via_packs(output: str, root) -> list:
-    """parse_failure_locations() through the pack that owns the repo."""
+    """Failure locations through the detected packs — the FIRST non-empty wins.
+
+    A repo can match several packs (e.g. Python + JS/TS), but one check's output is
+    in exactly one language, so we try each detected pack in detection order and
+    return the first that actually parses something: PythonPack sees Vitest/Jest
+    output as unknown and returns [], then JsTsPack parses it. Python behavior is
+    unchanged — its parser is first, so when it succeeds it wins. A repo no pack
+    claims (or output nobody parses) falls back to the raw unittest/pytest parser.
+    """
     from openfde.language_packs import get_language_packs
     packs = get_language_packs(root)
     if not packs:
         return parse_failure_locations(output, root)
-    return [loc.as_dict() for loc in packs[0].parse_failures(output, root)]
+    for pack in packs:
+        locs = [loc.as_dict() for loc in pack.parse_failures(output, root)]
+        if locs:
+            return locs
+    # Nobody matched. PythonPack's parser IS parse_failure_locations, so if Python
+    # was among the packs this is already []; otherwise give the raw parser a last
+    # chance for Python-style output in a non-Python pack's repo.
+    return parse_failure_locations(output, root)
