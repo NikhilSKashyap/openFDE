@@ -112,13 +112,50 @@ class RenderBriefTest(unittest.TestCase):
         self.assertIn("branch main", brief)
         self.assertIn("mid-WORK", brief)                   # busy is reported, not hidden
         self.assertIn("Senior Dev", brief)                 # attributed to the work role
-        self.assertLessEqual(len(brief), 1800)
+        self.assertLessEqual(len(brief), 3200)
 
     def test_brief_idle_and_empty_are_safe(self):
         idle = C.build_council_context(agent_states=C.derive_agent_states())
         self.assertIn("all idle", C.render_brief(idle))
         self.assertIsInstance(C.render_brief({}), str)
         self.assertIsInstance(C.render_brief(None), str)
+
+
+class GroundingTest(unittest.TestCase):
+    """The CURRENT DIRECTION grounding — keeps the council on the cockpit/engines model and off the
+    deprecated Anthropic-SDK /api/execute path."""
+
+    def test_anchor_is_cockpit_and_deprecates_sdk(self):
+        d = C.assemble_direction()
+        self.assertTrue(d and "cockpit" in d[0].lower())
+        self.assertIn("EXTERNAL ENGINES", d[0])
+        self.assertIn("Anthropic-SDK", d[0])
+        self.assertIn("deprecated", d[0].lower())
+
+    def test_extracts_now_next_skips_deferred_and_placeholders(self):
+        decisions = ("# DECISIONS\n## Now\n- ship the cockpit\n## Next\n- wire engines\n"
+                     "## Deferred\n- the old SDK execute path\n")
+        flow = "## How work flows\n- <one or two lines: placeholder>\n- Intent then verify then land\n"
+        joined = " ".join(C.assemble_direction(decisions_md=decisions, flow_md=flow))
+        self.assertIn("ship the cockpit", joined)
+        self.assertIn("wire engines", joined)
+        self.assertNotIn("old SDK execute path", joined)        # Deferred section excluded
+        self.assertIn("Intent then verify then land", joined)
+        self.assertNotIn("placeholder", joined)                 # <…> template line skipped
+
+    def test_latest_roadmap_headings_from_tail(self):
+        roadmap = "## Ancient shipped step\nbody\n## Cockpit reconciliation — NEXT\nplan it\n"
+        self.assertIn("Cockpit reconciliation", " ".join(C.assemble_direction(roadmap_md=roadmap)))
+
+    def test_render_brief_puts_direction_first(self):
+        ctx = C.build_council_context(decisions_md="## Now\n- be the cockpit\n",
+                                      recent_commits=["openfde: land thing"],
+                                      agent_states=C.derive_agent_states())
+        brief = C.render_brief(ctx)
+        self.assertIn("CURRENT DIRECTION", brief)
+        self.assertLess(brief.index("CURRENT DIRECTION"), brief.index("Active episode"))
+        self.assertIn("Anthropic-SDK", brief)
+        self.assertIn("land thing", brief)                      # recently-landed surfaced
 
 
 if __name__ == "__main__":

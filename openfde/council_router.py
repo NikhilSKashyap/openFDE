@@ -141,9 +141,15 @@ def build_role_prompt(role, question, context, discuss=False, custom_prompt="") 
     system = (
         f"You are the {rh} in OpenFDE, a forward-deployed engineering tool. "
         f"{_PERSONA.get(role, '')} Answer in plain language, concise (2-6 sentences), "
-        "NO code dumps. This is a READ-ONLY discussion — you are NOT editing files or "
-        "running anything. Ground the answer in the council context; if it is "
-        f"insufficient, say what is missing instead of speculating.{extra}")
+        "NO code dumps. This is a READ-ONLY discussion — you are NOT editing files or running "
+        "anything. Ground the answer in the council context and TREAT THE 'CURRENT DIRECTION' "
+        "BLOCK AS AUTHORITATIVE — it overrides any older note, episode, or Step number elsewhere "
+        "in the context. If older material conflicts with the current direction, flag it as "
+        "HISTORICAL and do NOT recommend the deprecated plan: in particular, OpenFDE Execute means "
+        "routing/observing an external engine (Codex / Claude Code or a council backend), NOT a "
+        "direct Anthropic-SDK `/api/execute` path, unless the current direction revives it. If "
+        "sources conflict, name the conflict rather than confidently asserting a stale plan; if the "
+        f"context is insufficient, say what is missing instead of speculating.{extra}")
     cp = (custom_prompt or "").strip()
     if cp:
         system += ("\n\nAdditional style guidance from the user (tune tone and emphasis "

@@ -3846,6 +3846,19 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             active_run_ids=set(_RUN_CONTROLS))
 
     def _council_context() -> dict:
+        # Ground the council in the CURRENT direction: the watched repo's memory-kit lifecycle
+        # (.openfde/DECISIONS.md Now/Next) + flow contract, OpenFDE's own ROADMAP (tail = latest),
+        # and what just landed. Bounded reads; council_context skips template placeholders.
+        def _doc(rel, *, tail=0, cap=8000):
+            try:
+                f = path / rel
+                if not f.is_file():
+                    return ""
+                data = f.read_text(encoding="utf-8", errors="replace")
+                return data[-tail:] if tail else data[:cap]
+            except OSError:
+                return ""
+        commits = [c.get("summary", "") for c in git_timeline(path, limit=6)]
         return council_context_mod.build_council_context(
             active_episode=persistence.latest_active_episode(),
             recent_episodes=persistence.load_episodes(),
@@ -3853,7 +3866,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             verify_latest=persistence.load_verify_latest(),
             project=persistence.load_project(),
             project_log=persistence.load_project_log(),
-            agent_states=_council_agent_states())
+            agent_states=_council_agent_states(),
+            decisions_md=_doc(".openfde/DECISIONS.md"),
+            flow_md=_doc(".openfde/FLOW.md") + "\n\n" + _doc("FLOW.md"),
+            roadmap_md=_doc("ROADMAP.md", tail=16000),
+            recent_commits=commits)
 
     async def get_council_context(request: web.Request) -> web.Response:
         loop = asyncio.get_event_loop()
