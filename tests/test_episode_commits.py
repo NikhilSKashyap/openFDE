@@ -3,10 +3,15 @@ Tests for openfde.episode_commits — prompt → commit reconciliation (many pro
 
 Laws under test:
   - A commit declares episodes via OpenFDE-Episodes (plural) and/or OpenFDE-Episode (singular).
-  - Confidence ladder: explicit > high_file_overlap > time_file_inferred > ambiguous.
-  - A 0-file discussion episode is NEVER attached without an explicit trailer.
-  - attach_commit is idempotent and never downgrades a stronger confidence.
-  - One batched commit touching several episodes' files lands on all of those prompt cards.
+  - An explicit trailer ALWAYS wins, with no other gate.
+  - Inference is provenance-gated: a trailer-less commit only attaches to a SAME-repo episode that
+    shares files AND provably belongs to its turn — inside the capture window (createdAt, never
+    updatedAt), OR baseline-matched (first parent == initialHead), OR the latest open/reviewing
+    work unit with fresh activity. Strong file overlap is NOT a bypass.
+  - needs_manual_land is not "active forever": an old one is stale historical (window/baseline only).
+  - Confidence: explicit > high_file_overlap (multi-file, strong) > time_file_inferred > ambiguous.
+  - A new commit must NOT attach to stale historical episodes (incl. old needs_manual_land) that
+    merely share files.
 """
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -19,20 +24,41 @@ def _iso(dt):
 
 
 NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+OLD = NOW - timedelta(days=3)
+H12 = NOW - timedelta(hours=12)         # outside the 6h capture window, inside the 24h active window
+H13 = NOW - timedelta(hours=13)
+
+
+def _ep(eid, files, *, created=NOW, status="reviewing", signal="product",
+        session_cwd=None, operational=False, initial_head=None):
+    """A candidate-shaped episode. Defaults are 'attachable' (recent, active, product) so each
+    test overrides exactly the one field it is exercising."""
+    e = {"episodeId": eid, "files": list(files), "createdAt": _iso(created),
+         "status": status, "signal": signal}
+    if session_cwd is not None:
+        e["sessionCwd"] = session_cwd
+    if initial_head is not None:
+        e["initialHead"] = initial_head
+    if operational:
+        e["signal"] = "operational"
+        e["storyFacts"] = {"operational": True}
+    return e
+
+
+def _commit(sha, files, *, ids=None, ts=NOW, parents=None):
+    return {"sha": sha, "files": list(files), "episodeIds": list(ids or []),
+            "timestamp": _iso(ts), "parents": list(parents or [])}
 
 
 class TrailerParseTest(unittest.TestCase):
     def test_plural_comma_separated(self):
-        self.assertEqual(
-            ec.episode_ids_from_trailers({"OpenFDE-Episodes": "e1, e2, e3"}),
-            ["e1", "e2", "e3"])
+        self.assertEqual(ec.episode_ids_from_trailers({"OpenFDE-Episodes": "e1, e2, e3"}),
+                         ["e1", "e2", "e3"])
 
     def test_plural_space_separated(self):
-        self.assertEqual(
-            ec.episode_ids_from_trailers({"OpenFDE-Episodes": "e1 e2"}), ["e1", "e2"])
+        self.assertEqual(ec.episode_ids_from_trailers({"OpenFDE-Episodes": "e1 e2"}), ["e1", "e2"])
 
     def test_singular_and_plural_dedup_order(self):
-        # singular id already present in the plural list must not be duplicated
         ids = ec.episode_ids_from_trailers({"OpenFDE-Episodes": "e1,e2", "OpenFDE-Episode": "e1"})
         self.assertEqual(ids, ["e1", "e2"])
 
@@ -44,48 +70,87 @@ class TrailerParseTest(unittest.TestCase):
 
 
 class ReconcileCommitTest(unittest.TestCase):
-    def test_explicit_trailer_wins_even_without_file_overlap(self):
-        # Explicit declaration attaches regardless of files — including a 0-file episode.
-        ep = {"episodeId": "P9", "files": []}
-        commit = {"sha": "abc", "files": ["x.py"], "episodeIds": ["P9"], "timestamp": _iso(NOW)}
-        [v] = ec.reconcile_commit(commit, [ep])
-        self.assertEqual((v["episodeId"], v["confidence"], v["attach"]), ("P9", "explicit", True))
+    def test_explicit_trailer_wins_even_without_file_overlap_or_recency(self):
+        ep = {"episodeId": "P9", "files": [], "createdAt": _iso(OLD), "status": "landed"}
+        [v] = ec.reconcile_commit(_commit("abc", ["x.py"], ids=["P9"]), [ep])
+        self.assertEqual((v["confidence"], v["attach"]), ("explicit", True))
 
-    def test_high_file_overlap(self):
-        ep = {"episodeId": "P1", "files": ["a.py", "b.py"], "updatedAt": _iso(NOW)}
-        commit = {"sha": "c1", "files": ["a.py", "b.py", "README.md"], "episodeIds": [],
-                  "timestamp": _iso(NOW)}
-        [v] = ec.reconcile_commit(commit, [ep])
+    def test_multi_file_strong_overlap_recent_is_high(self):
+        ep = _ep("P1", ["a.py", "b.py"])
+        [v] = ec.reconcile_commit(_commit("c1", ["a.py", "b.py", "README.md"]), [ep])
         self.assertEqual(v["confidence"], "high_file_overlap")
-        self.assertTrue(v["attach"])
         self.assertEqual(v["matchedFiles"], ["a.py", "b.py"])
+        self.assertTrue(v["attach"])
 
-    def test_time_file_inferred_weak_overlap_but_recent(self):
-        # 1 of 4 files (25% < 50%) but the episode was active right at commit time.
-        ep = {"episodeId": "P2", "files": ["a.py", "b.py", "c.py", "d.py"], "updatedAt": _iso(NOW)}
-        commit = {"sha": "c2", "files": ["a.py"], "episodeIds": [], "timestamp": _iso(NOW)}
-        [v] = ec.reconcile_commit(commit, [ep])
+    def test_weak_multi_overlap_recent_is_time_inferred(self):
+        ep = _ep("P2", ["a.py", "b.py", "c.py", "d.py"])
+        [v] = ec.reconcile_commit(_commit("c2", ["a.py"]), [ep])
         self.assertEqual(v["confidence"], "time_file_inferred")
         self.assertTrue(v["attach"])
 
-    def test_ambiguous_weak_overlap_and_far_in_time_not_attached(self):
-        # 1 of 4 files AND the episode was active days before the commit → ambiguous, not attached.
-        old = NOW - timedelta(days=3)
-        ep = {"episodeId": "P3", "files": ["a.py", "b.py", "c.py", "d.py"], "updatedAt": _iso(old)}
-        commit = {"sha": "c3", "files": ["a.py"], "episodeIds": [], "timestamp": _iso(NOW)}
-        [v] = ec.reconcile_commit(commit, [ep])
+    def test_one_file_near_attaches_as_time_inferred(self):
+        [v] = ec.reconcile_commit(_commit("c", ["a.py"]), [_ep("P", ["a.py"])])
+        self.assertEqual(v["confidence"], "time_file_inferred")
+        self.assertTrue(v["attach"])
+
+    def test_one_file_far_in_time_not_attached(self):
+        ep = _ep("P", ["a.py"], created=OLD, status="open")
+        [v] = ec.reconcile_commit(_commit("c", ["a.py"]), [ep])
+        self.assertFalse(v["attach"])
+
+    def test_uses_createdAt_not_polluted_updatedAt(self):
+        # An ancient episode re-summarized "now" (updatedAt bumped) must NOT look active.
+        ep = _ep("P", ["a.py"], created=OLD)
+        ep["updatedAt"] = _iso(NOW)
+        [v] = ec.reconcile_commit(_commit("c", ["a.py"]), [ep])
+        self.assertFalse(v["attach"])
+
+    def test_old_needs_manual_land_strong_overlap_not_attached(self):
+        # THE P50/P52 bug: an old needs_manual_land with strong multi-file overlap is stale
+        # historical — strong overlap is NOT a timing bypass, and needs_manual_land isn't "active".
+        ep = _ep("P52", ["a.py", "b.py", "c.py"], created=OLD, status="needs_manual_land")
+        [v] = ec.reconcile_commit(_commit("new", ["a.py", "b.py", "c.py"]), [ep])
         self.assertEqual(v["confidence"], "ambiguous")
         self.assertFalse(v["attach"])
 
+    def test_baseline_match_attaches_despite_old_capture(self):
+        # A long multi-day session: createdAt is old, but the commit's first parent is the episode's
+        # captured baseline (initialHead) — proof it IS this turn's work, independent of timing.
+        ep = _ep("P", ["a.py", "b.py"], created=OLD, status="needs_manual_land", initial_head="BASE")
+        [v] = ec.reconcile_commit(_commit("c", ["a.py", "b.py"], parents=["BASE"]), [ep])
+        self.assertEqual(v["confidence"], "high_file_overlap")
+        self.assertTrue(v["attach"])
+        self.assertIn("baseline", v["reason"])
+
+    def test_latest_active_gets_wider_window_only_for_itself(self):
+        # The single latest open/reviewing episode gets the wider active window (12h here); an
+        # older active episode just outside the capture window does not.
+        latest = _ep("latest", ["a.py"], created=H12, status="reviewing")
+        older = _ep("older", ["a.py"], created=H13, status="reviewing")
+        out = {v["episodeId"]: v for v in ec.reconcile_commit(_commit("c", ["a.py"]), [latest, older])}
+        self.assertTrue(out["latest"]["attach"])
+        self.assertFalse(out["older"]["attach"])
+
+    def test_different_repo_is_excluded(self):
+        commit = _commit("c", ["frontend/src/App.jsx"])
+        same = _ep("same", ["frontend/src/App.jsx"], session_cwd="/nonexistent/watched")
+        other = _ep("other", ["frontend/src/App.jsx"], session_cwd="/nonexistent/sibling")
+        out = ec.reconcile_commit(commit, [same, other], watched_root="/nonexistent/watched")
+        self.assertEqual([v["episodeId"] for v in out if v["attach"]], ["same"])
+
+    def test_operational_episode_needs_strong_evidence(self):
+        commit = _commit("c", ["a.py", "b.py"])
+        weak = _ep("op1", ["a.py"], operational=True)
+        strong = _ep("op2", ["a.py", "b.py"], operational=True)
+        out = {v["episodeId"]: v for v in ec.reconcile_commit(commit, [weak, strong])}
+        self.assertFalse(out["op1"]["attach"])
+        self.assertTrue(out["op2"]["attach"])
+
     def test_zero_file_episode_never_attached_without_trailer(self):
-        ep = {"episodeId": "discuss", "files": [], "updatedAt": _iso(NOW)}
-        commit = {"sha": "c4", "files": ["a.py"], "episodeIds": [], "timestamp": _iso(NOW)}
-        self.assertEqual(ec.reconcile_commit(commit, [ep]), [])
+        self.assertEqual(ec.reconcile_commit(_commit("c", ["a.py"]), [_ep("d", [])]), [])
 
     def test_no_shared_file_no_link(self):
-        ep = {"episodeId": "P5", "files": ["z.py"], "updatedAt": _iso(NOW)}
-        commit = {"sha": "c5", "files": ["a.py"], "episodeIds": [], "timestamp": _iso(NOW)}
-        self.assertEqual(ec.reconcile_commit(commit, [ep]), [])
+        self.assertEqual(ec.reconcile_commit(_commit("c", ["a.py"]), [_ep("P", ["z.py"])]), [])
 
 
 class AttachCommitTest(unittest.TestCase):
@@ -110,33 +175,51 @@ class AttachCommitTest(unittest.TestCase):
 
 
 class ReconcileEpisodesTest(unittest.TestCase):
-    def test_one_commit_lands_on_three_prompt_cards(self):
-        # The headline scenario: P1 touched a.py, P2 touched b.py, P3 touched c.py; the developer
-        # then makes ONE commit covering all three. All three cards must show that commit.
-        eps = [
-            {"episodeId": "P1", "files": ["a.py"], "updatedAt": _iso(NOW)},
-            {"episodeId": "P2", "files": ["b.py"], "updatedAt": _iso(NOW)},
-            {"episodeId": "P3", "files": ["c.py"], "updatedAt": _iso(NOW)},
-        ]
-        commit = {"sha": "batched", "files": ["a.py", "b.py", "c.py"], "episodeIds": [],
-                  "timestamp": _iso(NOW)}
+    def test_one_commit_lands_on_three_fresh_prompt_cards(self):
+        eps = [_ep("P1", ["a.py"]), _ep("P2", ["b.py"]), _ep("P3", ["c.py"])]
+        commit = _commit("batched", ["a.py", "b.py", "c.py"])
         changed = ec.reconcile_episodes([commit], eps)
         self.assertEqual(set(changed), {"P1", "P2", "P3"})
         for ep in eps:
             self.assertEqual(ep["commitShas"], ["batched"])
-            self.assertEqual(ep["commitMeta"]["batched"]["confidence"], "high_file_overlap")
+            self.assertEqual(ep["commitMeta"]["batched"]["confidence"], "time_file_inferred")
 
     def test_ambiguous_excluded_by_default_included_on_request(self):
-        old = NOW - timedelta(days=3)
-        ep = {"episodeId": "P3", "files": ["a.py", "b.py", "c.py", "d.py"], "updatedAt": _iso(old)}
-        commit = {"sha": "c3", "files": ["a.py"], "episodeIds": [], "timestamp": _iso(NOW)}
-
-        ec.reconcile_episodes([commit], [ep])                       # default: surface-only
+        ep = _ep("P3", ["a.py", "b.py", "c.py", "d.py"], created=OLD, status="open")
+        commit = _commit("c3", ["a.py"])
+        ec.reconcile_episodes([commit], [ep])
         self.assertNotIn("commitShas", ep)
-
         ec.reconcile_episodes([commit], [ep], include_ambiguous=True)
         self.assertEqual(ep["commitShas"], ["c3"])
         self.assertEqual(ep["commitMeta"]["c3"]["confidence"], "ambiguous")
+
+
+class PrecisionRegressionTest(unittest.TestCase):
+    """Regression for over-attachment: a new commit must attach to ZERO stale historical episodes,
+    including old needs_manual_land with strong multi-file overlap (the real P50/P52 probe)."""
+
+    def test_new_commit_does_not_attach_to_stale_history(self):
+        WATCHED, SIBLING = "/nonexistent/watched", "/nonexistent/sibling"
+        stale = []
+        # 14 cross-repo episodes (sibling repo) touching the same RELATIVE path — coincidence.
+        stale += [_ep(f"x{i}", ["README.md"], created=NOW, status="reviewing", session_cwd=SIBLING)
+                  for i in range(14)]
+        # 13 same-repo historical (landed, days old) 1-file episodes on the common file.
+        stale += [_ep(f"o{i}", ["README.md"], created=OLD, status="landed", session_cwd=WATCHED)
+                  for i in range(13)]
+        # P50/P52-shaped: old needs_manual_land with STRONG multi-file overlap to the commit.
+        stale += [_ep(f"p{i}", ["openfde/prs.py", "openfde/server.py"], created=OLD,
+                      status="needs_manual_land", session_cwd=WATCHED) for i in range(8)]
+        # One genuinely fresh, in-repo, active episode whose files the commit actually changed.
+        fresh = _ep("fresh", ["openfde/cli.py"], created=NOW, status="reviewing", session_cwd=WATCHED)
+        episodes = stale + [fresh]
+
+        commit = _commit("new", ["README.md", "openfde/prs.py", "openfde/server.py", "openfde/cli.py"])
+        changed = ec.reconcile_episodes([commit], episodes, watched_root=WATCHED)
+
+        self.assertEqual(set(changed), {"fresh"})                       # ONLY the fresh episode
+        self.assertEqual(sum(1 for e in stale if e.get("commitShas")), 0)  # zero stale attachments
+        self.assertEqual(fresh["commitShas"], ["new"])
 
 
 if __name__ == "__main__":

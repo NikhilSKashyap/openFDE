@@ -1671,7 +1671,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                       for c in commits[:40]
                       if c.get("sha") and not c.get("episodeIds") and c.get("sha") not in already_attached]
         if candidates:
-            for eid in episode_commits_mod.reconcile_episodes(candidates, episodes):
+            for eid in episode_commits_mod.reconcile_episodes(candidates, episodes, watched_root=path):
                 ep = next((e for e in episodes if e.get("episodeId") == eid), None)
                 if ep is not None:
                     persistence.upsert_episode(ep)

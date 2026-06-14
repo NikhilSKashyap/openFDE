@@ -200,13 +200,18 @@ class WorktreeImpactTest(unittest.TestCase):
         commit = gt.git_timeline(self.root, limit=5)[0]
         self.assertIsNone(commit["episodeId"])                  # no trailer → inference territory
         enriched = {**commit, "files": gt.commit_files(self.root, commit["sha"])}
-        episodes = [{"episodeId": "P1", "files": ["alpha.py"]},
-                    {"episodeId": "P2", "files": ["beta.py"]}]
-        changed = ec.reconcile_episodes([enriched], episodes)
+        # Episodes captured in THIS repo (sessionCwd == watched root), at the commit's moment so
+        # they're inside the capture window. Single-file → honest time_file_inferred confidence.
+        ts = commit["timestamp"]
+        episodes = [{"episodeId": "P1", "files": ["alpha.py"], "createdAt": ts,
+                     "status": "reviewing", "sessionCwd": str(self.root)},
+                    {"episodeId": "P2", "files": ["beta.py"], "createdAt": ts,
+                     "status": "reviewing", "sessionCwd": str(self.root)}]
+        changed = ec.reconcile_episodes([enriched], episodes, watched_root=str(self.root))
         self.assertEqual(set(changed), {"P1", "P2"})
         for ep in episodes:
             self.assertIn(commit["sha"], ep["commitShas"])
-            self.assertEqual(ep["commitMeta"][commit["sha"]]["confidence"], "high_file_overlap")
+            self.assertEqual(ep["commitMeta"][commit["sha"]]["confidence"], "time_file_inferred")
 
 
 class EpisodeStoreTest(unittest.TestCase):
