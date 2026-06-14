@@ -288,8 +288,10 @@ def git_timeline(root: Path, limit: int = 100) -> list:
     """
     if not is_git_repo(root):
         return []
-    # %b (body) is multi-line, so delimit each commit with a record separator.
-    fmt = _US.join(["%H", "%h", "%an", "%ae", "%aI", "%s", "%b"]) + _RS
+    # %b (body) is multi-line, so delimit each commit with a record separator. %P = parent shas
+    # (space-separated), used to attribute a commit to the episode whose baseline (initialHead) it
+    # lands on.
+    fmt = _US.join(["%H", "%h", "%an", "%ae", "%aI", "%P", "%s", "%b"]) + _RS
     res = _run(["git", "log", f"--max-count={int(limit)}", f"--pretty=format:{fmt}"], root)
     if res.returncode != 0:
         return []
@@ -299,10 +301,11 @@ def git_timeline(root: Path, limit: int = 100) -> list:
         if not record.strip():
             continue
         parts = record.split(_US)
-        if len(parts) < 6:
+        if len(parts) < 7:
             continue
-        sha, short, author, email, ts, summary = parts[:6]
-        body = parts[6] if len(parts) > 6 else ""
+        sha, short, author, email, ts, parents_raw, summary = parts[:7]
+        body = parts[7] if len(parts) > 7 else ""
+        parents = parents_raw.split() if parents_raw else []
         trailers = _parse_openfde_trailers(body)
         # episodeIds is the full set a commit declares (OpenFDE-Episodes plural ∪ OpenFDE-Episode
         # singular) — the basis for *many prompts → one commit*. episodeId stays as the primary
@@ -311,7 +314,7 @@ def git_timeline(root: Path, limit: int = 100) -> list:
         episode_ids = episode_ids_from_trailers(trailers)
         commits.append({
             "sha": sha, "shortSha": short, "author": author,
-            "email": email, "timestamp": ts, "summary": summary,
+            "email": email, "timestamp": ts, "summary": summary, "parents": parents,
             "trailers": trailers, "episodeIds": episode_ids,
             "episodeId": episode_ids[0] if episode_ids else None,
         })
