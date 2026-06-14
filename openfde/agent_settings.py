@@ -65,6 +65,7 @@ _PROVIDER_LABELS = {
 _MAX_MODEL = 200
 _MAX_BASEURL = 500
 _MAX_KEY = 1000
+_MAX_CUSTOM = 2000          # per-role custom instructions (additive taste, not permissions)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────── #
@@ -114,6 +115,9 @@ def normalize_role(cfg) -> dict:
         "baseUrl": _s(cfg.get("baseUrl"), _MAX_BASEURL),
         "apiKey": _s(cfg.get("apiKey"), _MAX_KEY),
         "enabled": bool(cfg.get("enabled", True)),
+        # Additive per-role instructions (Council chat). Tunes taste/style only — it
+        # is layered AFTER OpenFDE's fixed read-only role contract, never overrides it.
+        "customPrompt": _s(cfg.get("customPrompt"), _MAX_CUSTOM),
     }
 
 
@@ -164,7 +168,7 @@ def merge(existing, incoming) -> dict:
         if not isinstance(inc, dict):
             out[role] = cur
             continue
-        for field in ("provider", "model", "baseUrl", "enabled"):
+        for field in ("provider", "model", "baseUrl", "enabled", "customPrompt"):
             if field in inc:
                 cur[field] = inc[field]
         if inc.get("clearApiKey"):
@@ -196,6 +200,7 @@ def to_public(settings) -> dict:
             "model": c["model"],
             "baseUrl": c["baseUrl"],
             "enabled": c["enabled"],
+            "customPrompt": c["customPrompt"],     # not a secret — round-trips to the UI
             "hasApiKey": bool(c["apiKey"]),
             "maskedApiKey": mask_key(c["apiKey"]),
         }

@@ -2749,6 +2749,13 @@
 .agentset-field.full select { width: 100%; }
 .agentset-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); }
 .agentset-opt { text-transform: none; letter-spacing: 0; opacity: 0.7; }
+.agentset-textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 54px;
+  padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text); font: inherit; font-size: 12px; line-height: 1.4; }
+.agentset-textarea:focus { outline: none; border-color: var(--accent); }
+.agentset-reset { float: right; background: none; border: none; color: var(--accent); cursor: pointer;
+  font: inherit; font-size: 10px; padding: 0; text-transform: none; letter-spacing: 0; }
+.agentset-reset:hover { text-decoration: underline; }
 .agentset select,
 .agentset input[type="text"],
 .agentset input[type="password"] {
@@ -3075,6 +3082,21 @@
 .concept-answer { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
 .concept-answer-text { font-size: 12px; color: var(--text); line-height: 1.45; white-space: pre-wrap; }
 .concept-answer-src { font-size: 10px; color: var(--text-muted); margin-top: 5px; }
+
+/* ── Council Chat (read-only) — the brain of Orient, embedded INLINE in WorkPanel.
+   Reuses .agentset-roles (target selector) + .work-promptbox + .concept-answer. ── */
+.council { display: flex; flex-direction: column; gap: 8px; }
+.council-settings-link { align-self: flex-start; background: none; border: none; color: var(--accent);
+  cursor: pointer; font: inherit; font-size: 11px; padding: 2px 0; }
+.council-settings-link:hover { text-decoration: underline; }
+.council-targets { flex-wrap: wrap; gap: 4px; margin-bottom: 2px; }
+.council-busy { font-size: 10.5px; line-height: 1.5; color: var(--text); margin-bottom: 8px;
+  background: var(--accent-orange-soft, rgba(124,111,247,0.08)); padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--accent-orange-border, var(--border)); }
+.council-busy.subtle { margin: 6px 0 0; padding: 0; background: none; border: none;
+  color: var(--text-muted); font-style: italic; }
+.council-meta { font-size: 10px; color: var(--text-muted); margin-top: 4px; line-height: 1.5; }
+.council-contrib, .council-prov { color: var(--text-muted); }
 .concept-foot { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
 .concept-savebtn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px;
   text-align: left; padding: 0; }

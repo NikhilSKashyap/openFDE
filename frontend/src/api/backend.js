@@ -612,6 +612,25 @@ export const getConceptCards = () => apiFetch('/api/concept-cards')
 export const saveConceptCard = (card) =>
   apiFetch('/api/concept-cards', { method: 'POST', body: JSON.stringify(card) })
 
+/**
+ * Council Chat (read-only) — the generated CouncilContext brief (active episode,
+ * repo state, verify status, agent states, recent decisions).
+ * @returns {Promise<{ok, context}|null>}
+ */
+export const getCouncilContext = () => apiFetch('/api/council/context')
+
+/**
+ * Ask the council ONE read-only question, routed by target. Never edits files.
+ * @param {string} question
+ * @param {string} target - 'auto' | 'architect' | 'senior_dev' | 'verifier' | 'discuss'
+ * @returns {Promise<{ok, answer, label, contributors, contributorsLabel, routedReason,
+ *   confidence, workBusyRoles, mode, usedRole, provider?, roleNotes?}|null>}
+ */
+export const postCouncilAsk = (question, target = 'auto') =>
+  // Routed through the role text models — answers can take 10–60s, never 4s.
+  apiFetch('/api/council/ask',
+    { method: 'POST', body: JSON.stringify({ question, target }), _timeout: 300_000 })
+
 // ── Plan ──────────────────────────────────────────────────────────────────
 
 /**

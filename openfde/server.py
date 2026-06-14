@@ -243,14 +243,15 @@ class ConnectionManager:
 # ------------------------------------------------------------------ #
 
 def _write_plan_md(persistence: Persistence, repo_root: Path) -> None:
-    """Generate and atomically write PLAN.md to the watched repo root.
+    """Generate and atomically write PLAN.md into `.openfde/` (never the repo root).
 
     Reads current state, tasks, and project from disk, generates markdown
-    via generate_plan(), and writes atomically (tmp → rename).
+    via generate_plan(), and writes atomically (tmp → rename) to
+    ``persistence.dir / PLAN.md`` so watching a foreign repo never dirties its tree.
 
     Args:
-        persistence: Persistence — the active persistence instance
-        repo_root: Path — repository root where PLAN.md is written
+        persistence: Persistence — the active persistence instance (its `.dir` is `.openfde/`)
+        repo_root: Path — repository root (used only for logging/context)
 
     Returns:
         None
@@ -816,14 +817,31 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 ep["updatedAt"] = datetime.now(timezone.utc).isoformat()
                 persistence.upsert_episode(ep)
                 await manager.broadcast({"type": "episode_updated", "episode": ep})
-                # The user ran the checks — the issue card moves to Testing,
-                # wearing the evidence's color.
-                failed = evidence.get("status") != "passed"
-                moved = persistence.move_tasks_for_episode(
-                    ep_id, "testing", "failed" if failed else "passed",
-                    from_columns=None if failed else ("todo", "doing", "testing"))
-                if moved:
-                    await manager.broadcast({"type": "tasks_updated"})
+                # Green verify lands automatically (Slice B): a passed gate on an active
+                # episode that owns scoped dirty changes auto-lands it — scoped ownership,
+                # multi-episode ambiguity, and .openfde/ignored exclusions enforced inside
+                # land_on_verify → land_episode (which syncs the card to Done/passed).
+                # Red / skipped / ambiguous: no commit; the card moves to Testing and the
+                # manual "Land changes" path stays.
+                landed = False
+                if (evidence.get("status") == "passed"
+                        and ep.get("status") in ("open", "reviewing") and (ep.get("files") or [])):
+                    from openfde import autoland
+                    res = await loop.run_in_executor(
+                        None, lambda: autoland.land_on_verify(
+                            path, persistence, ep, run_verify=lambda _r: evidence))
+                    for msg in res.get("broadcasts", []):
+                        await manager.broadcast(msg)
+                    landed = bool(res.get("committed"))
+                if not landed:
+                    # The user ran the checks — the issue card moves to Testing,
+                    # wearing the evidence's color.
+                    failed = evidence.get("status") != "passed"
+                    moved = persistence.move_tasks_for_episode(
+                        ep_id, "testing", "failed" if failed else "passed",
+                        from_columns=None if failed else ("todo", "doing", "testing"))
+                    if moved:
+                        await manager.broadcast({"type": "tasks_updated"})
         await manager.broadcast({"type": "verify_updated", "verify": evidence})
         return web.json_response({"ok": True, "verify": evidence,
                                   **({"episodeId": ep_id} if ep_id else {})})
@@ -3793,9 +3811,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             # chat role all build a _text_role caller the same way — none can edit the
             # repo. (Senior Dev's edit runner is never referenced on this path.)
             callers = {r: _text_role(settings.get(r, {})) for r in agent_settings_mod.ROLES}
+            # Additive per-role instructions (taste only) — layered after the fixed
+            # read-only contract inside build_role_prompt; never override it.
+            custom_prompts = {r: settings.get(r, {}).get("customPrompt", "")
+                              for r in agent_settings_mod.ROLES}
             result = council_router_mod.run_ask(
-                question=question, decision=decision, context=ctx,
-                callers=callers, role_human=_ROLE_HUMAN)
+                question=question, decision=decision, context=ctx, callers=callers,
+                role_human=_ROLE_HUMAN, custom_prompts=custom_prompts)
             used = result.get("usedRole")
             if used:
                 prov = settings.get(used, {}).get("provider")
@@ -3989,6 +4011,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     logger.info("Server started on port %d", port)
 
+    # ── Memory kit: bootstrap the calm `.openfde/` markdown room (FLOW/TASTE/DECISIONS
+    # once; COUNCIL/BRIEF generated). Synchronous, never dirties the tracked repo.
+    try:
+        from openfde import memory_kit
+        memory_kit.bootstrap_memory_kit(persistence, path)
+    except Exception:  # noqa: BLE001 — memory is a convenience, never blocks the watcher
+        logger.debug("memory_kit bootstrap failed", exc_info=True)
+
     # ── Watch Any Agent: glow the canvas live on ANY external edit (Cursor,
     # Claude Code, terminal, human) — suppressed while our own council run glows.
     watch_task = asyncio.create_task(fs_watch.watch_loop(
@@ -4004,13 +4034,32 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # fingerprint, deterministic fallback. No-op when no local CLI provider is available.
     summarizer_task = asyncio.create_task(_summarizer_loop(persistence, manager))
 
+    # ── Historical backfill (best-effort, once): reconstruct prompt episodes from local
+    # agent transcripts for work done BEFORE OpenFDE started watching. Idempotent (keyed
+    # by captureKey); never commits. Off the startup path so a large transcript home never
+    # delays the server; a quiet receipt event lands when done.
+    async def _run_backfill():
+        try:
+            from openfde import backfill, memory_kit
+            loop2 = asyncio.get_event_loop()
+            res = await loop2.run_in_executor(None, lambda: backfill.backfill_historical(path, persistence))
+            if res.get("imported"):
+                if res.get("event"):
+                    await manager.broadcast({"type": "event_appended", "event": res["event"]})
+                await manager.broadcast({"type": "episodes_changed",
+                                         "payload": {"reason": "backfill", "count": res["imported"]}})
+                await loop2.run_in_executor(None, lambda: memory_kit.regenerate_generated(persistence, path))
+        except Exception:  # noqa: BLE001 — backfill must never break the watcher
+            logger.debug("backfill failed", exc_info=True)
+    backfill_task = asyncio.create_task(_run_backfill())
+
     try:
         await asyncio.Event().wait()       # run until cancelled / KeyboardInterrupt
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
         logger.info("Server stopping")
-        for t in (watch_task, capture_task, summarizer_task):
+        for t in (watch_task, capture_task, summarizer_task, backfill_task):
             t.cancel()
             try:
                 await t

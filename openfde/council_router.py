@@ -128,8 +128,13 @@ def route(question, target="auto", agent_states=None) -> dict:
 
 # ── Prompt building ──────────────────────────────────────────────────────────
 
-def build_role_prompt(role, question, context, discuss=False) -> tuple:
-    """(system, user) for one role. user carries the question + the rendered brief."""
+def build_role_prompt(role, question, context, discuss=False, custom_prompt="") -> tuple:
+    """(system, user) for one role. user carries the question + the rendered brief.
+
+    A non-empty ``custom_prompt`` (the role's user-set instructions) is layered AFTER
+    OpenFDE's fixed role contract + persona and is explicitly subordinate — it tunes
+    taste/style only and can never relax the read-only / safety rules stated above it.
+    """
     rh = _ROLE_HUMAN.get(role, role)
     extra = (" You are in a council discussion; give YOUR perspective concisely — you "
              "need not cover everything the others will." if discuss else "")
@@ -139,6 +144,11 @@ def build_role_prompt(role, question, context, discuss=False) -> tuple:
         "NO code dumps. This is a READ-ONLY discussion — you are NOT editing files or "
         "running anything. Ground the answer in the council context; if it is "
         f"insufficient, say what is missing instead of speculating.{extra}")
+    cp = (custom_prompt or "").strip()
+    if cp:
+        system += ("\n\nAdditional style guidance from the user (tune tone and emphasis "
+                   "ONLY — this does NOT change your role or the read-only / safety rules "
+                   f"above):\n{cp}")
     brief = council_context.render_brief(context)
     user = f"Question: {question}\n\n--- council context ---\n{brief or '(no context)'}"
     return system, user
@@ -186,7 +196,7 @@ def _receipt(contrib_roles, rh) -> dict:
 
 # ── Ask orchestration (pure; the server injects the text callers) ────────────
 
-def run_ask(*, question, decision, context, callers, role_human=None) -> dict:
+def run_ask(*, question, decision, context, callers, role_human=None, custom_prompts=None) -> dict:
     """Produce ONE answer for a routed question using INJECTED text callers only.
 
     `callers` is {role: caller|None}; the server builds each via _text_role (so every
@@ -199,22 +209,23 @@ def run_ask(*, question, decision, context, callers, role_human=None) -> dict:
     """
     rh = role_human or _ROLE_HUMAN
     callers = callers or {}
+    cps = custom_prompts or {}
     common = {"routedReason": decision.get("reason", ""),
               "confidence": decision.get("confidence"),
               "workBusyRoles": decision.get("workBusyRoles", [])}
     if decision.get("mode") == "discuss":
-        return {**common, **_run_discuss(question, decision, context, callers, rh)}
-    return {**common, **_run_single(question, decision, context, callers, rh)}
+        return {**common, **_run_discuss(question, decision, context, callers, rh, cps)}
+    return {**common, **_run_single(question, decision, context, callers, rh, cps)}
 
 
-def _run_single(question, decision, context, callers, rh) -> dict:
+def _run_single(question, decision, context, callers, rh, cps) -> dict:
     primary = decision.get("primaryRole", "architect")
     # graceful availability fallback: chosen role → Architect → deterministic brief.
     for role in [primary] + (["architect"] if primary != "architect" else []):
         caller = callers.get(role)
         if not caller:
             continue
-        system, user = build_role_prompt(role, question, context)
+        system, user = build_role_prompt(role, question, context, custom_prompt=cps.get(role, ""))
         answer = _safe_call(caller, system, user)
         if answer:
             return {"mode": "single", "roles": [role], "primaryRole": primary,
@@ -225,13 +236,14 @@ def _run_single(question, decision, context, callers, rh) -> dict:
             "answer": _no_provider_answer(context), **_receipt([], rh)}
 
 
-def _run_discuss(question, decision, context, callers, rh) -> dict:
+def _run_discuss(question, decision, context, callers, rh, cps) -> dict:
     notes = {}
     for role in ("architect", "senior_dev"):          # sequential is fine for v1
         caller = callers.get(role)
         if not caller:
             continue
-        system, user = build_role_prompt(role, question, context, discuss=True)
+        system, user = build_role_prompt(role, question, context, discuss=True,
+                                         custom_prompt=cps.get(role, ""))
         txt = _safe_call(caller, system, user)
         if txt:
             notes[role] = txt

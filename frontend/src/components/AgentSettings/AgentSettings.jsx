@@ -41,6 +41,7 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
 
   const rd = draft[activeRole] ?? {}
   const sd = settings?.[activeRole] ?? {}
+  const roleLabel = roles.find(r => r.id === activeRole)?.label || activeRole
   const provMeta = providerById[rd.provider] ?? {}
   const showBaseUrl = !!provMeta.supportsBaseUrl
   // Transport is determined entirely by the provider (no separate "mode" axis).
@@ -83,6 +84,7 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
       provider: rd.provider,
       model: rd.model || '', baseUrl: rd.baseUrl || '',
       enabled: rd.enabled !== false,
+      customPrompt: rd.customPrompt || '',
     }
     if (typedKey) cfg.apiKey = typedKey
     else if (wantClear) cfg.clearApiKey = true
@@ -275,6 +277,25 @@ export default function AgentSettings({ settings, options, onClose, onSettingsCh
             </>
           )}
 
+          {/* Custom instructions (Council chat) — ADDITIVE taste/style only. The
+              backend layers this after OpenFDE's fixed read-only role contract; it can
+              never relax permissions. Default empty; Reset clears it. */}
+          <div className="agentset-field full">
+            <span className="agentset-lbl">
+              Instructions <span className="agentset-opt">optional · Council chat</span>
+              {(rd.customPrompt || '').trim() && (
+                <button type="button" className="agentset-reset"
+                        onClick={() => patch('customPrompt', '')}>Reset</button>
+              )}
+            </span>
+            <textarea
+              className="agentset-textarea" rows={3} maxLength={2000}
+              placeholder={`Extra guidance for ${roleLabel} in chat — tone, what to emphasize, house style. Tunes taste, not permissions.`}
+              value={rd.customPrompt || ''}
+              onChange={e => patch('customPrompt', e.target.value)}
+            />
+          </div>
+
           {/* Status line */}
           <div className={`agentset-status ${status.tone}`}>
             <span className={`agentset-dot ${status.tone}`} />
@@ -327,6 +348,7 @@ function seedDraft(settings, roles) {
       model: s.model ?? '',
       baseUrl: s.baseUrl ?? '',
       enabled: s.enabled !== false,
+      customPrompt: s.customPrompt ?? '',
     }
   }
   return out

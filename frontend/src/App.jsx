@@ -2050,6 +2050,7 @@ export default function App() {
                 onIntentChange={handleWorkIntent}
                 run={run}
                 onStop={onStopRun}
+                onOpenAgentSettings={() => setAgentSettingsOpen(true)}
               />
             )}
             {rightOpen && rightView === 'work' && (
