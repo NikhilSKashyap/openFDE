@@ -1,4 +1,4 @@
-export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onExpandAll, onCollapseAll, onOpenCommandPalette, onHome }) {
+export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onExpandAll, onCollapseAll, onOpenCommandPalette, onHome, repoName = '' }) {
   const tools = [
     { id: 'select', label: 'Select', icon: <IconCursor /> },
     { id: 'dotted', label: 'Dotted box', icon: <IconDottedBox /> },
@@ -13,6 +13,14 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
         <img src="/logo.svg" className="brand-logo" alt="" />
         openfde
       </button>
+      {/* Watched-repo identity — the session label, so it's unmistakable WHICH repo this is. */}
+      {repoName && (
+        <span title={`Watching ${repoName}`} style={{
+          fontSize: 11, fontWeight: 600, color: 'var(--text)', padding: '2px 9px',
+          borderRadius: 99, background: 'var(--surface-2)', border: '1px solid var(--border)',
+          maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{repoName}</span>
+      )}
 
       {/* Drawing tools */}
       <div className="toolbar-group">

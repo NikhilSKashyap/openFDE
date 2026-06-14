@@ -54,9 +54,20 @@ export async function isBackendAvailable() {
 /**
  * Fetch the recursive file tree for the watched repository.
  *
+ * Uses a longer timeout than the default: on a fresh `openfde watch` the event loop
+ * is briefly saturated by startup assimilation, so /api/files can take several seconds
+ * to answer. A 4 s timeout would spuriously report the repo as offline during that
+ * window — the Explorer must show the watched repo, not give up on it.
+ *
  * @returns {Promise<Object|null>} Root directory tree node, or null
  */
-export const getFiles = () => apiFetch('/api/files')
+export const getFiles = () => apiFetch('/api/files', { _timeout: 9000 })
+
+/**
+ * Authoritative watched-repo identity (runtime, not .openfde/project.json metadata).
+ * @returns {Promise<{ok, repoRoot, repoName, gitRoot, branch, startedAt, openfdeVersion}|null>}
+ */
+export const getSession = () => apiFetch('/api/session')
 
 // ── Canvas state ──────────────────────────────────────────────────────────
 

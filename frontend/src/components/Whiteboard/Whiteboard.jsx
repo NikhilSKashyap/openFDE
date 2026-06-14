@@ -12,6 +12,7 @@ export default function Whiteboard({
   onGenerateFromRepo,
   onExecute,
   executing,
+  repoName = '',
   // In-place nesting (Step 16)
   archGraph,
   expandedIds,
@@ -135,6 +136,7 @@ export default function Whiteboard({
           onGenerateFromRepo={onGenerateFromRepo}
           onExecute={onExecute}
           executing={executing}
+          repoName={repoName}
           archGraph={archGraph}
           expandedIds={expandedIds}
           onToggleExpand={onToggleExpand}

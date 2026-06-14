@@ -71,7 +71,7 @@ function spotlightLabel(spotlight) {
 
 export default function WhiteboardCanvas({
   activeTool, setActiveTool, state, dispatch,
-  onLoadSelfMap, onGenerateFromRepo, onExecute, executing = false,
+  onLoadSelfMap, onGenerateFromRepo, onExecute, executing = false, repoName = '',
   // Nesting (Step 16 in-place expansion)
   archGraph = null, expandedIds, onToggleExpand, onSelectArchEntity, archSel = null, onExpandModule = null,
   flowMode = 'focused', story = null,
@@ -1253,9 +1253,21 @@ export default function WhiteboardCanvas({
 
       {isEmpty && (
         <div className="wb-empty-cta">
-          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Select a box tool above and click to place a module</span>
-          {onLoadSelfMap && <button className="self-map-btn" onClick={onLoadSelfMap}>Load OpenFDE self-map</button>}
-          {onGenerateFromRepo && <button className="self-map-btn scan-repo-btn" onClick={onGenerateFromRepo}>Scan repo → canvas</button>}
+          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            {repoName
+              ? `${repoName}'s files are ready in Explorer — scan the repo to build its architecture canvas.`
+              : 'Select a box tool above and click to place a module'}
+          </span>
+          {onGenerateFromRepo && (
+            <button className="self-map-btn scan-repo-btn" onClick={onGenerateFromRepo}>
+              {repoName ? `Scan ${repoName} → canvas` : 'Scan repo → canvas'}
+            </button>
+          )}
+          {/* The self-map is a demo of OpenFDE's OWN architecture — only offer it when
+              watching the openfde repo, never as the dominant action elsewhere. */}
+          {onLoadSelfMap && repoName === 'openfde' && (
+            <button className="self-map-btn" onClick={onLoadSelfMap}>Load OpenFDE self-map</button>
+          )}
         </div>
       )}
 

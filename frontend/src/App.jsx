@@ -40,6 +40,7 @@ import {
   approveApproval,
   rejectApproval,
   getAgentSettings,
+  getSession,
   postAgentRun,
   postCouncilRun,
   cancelCouncilRun,
@@ -172,6 +173,8 @@ export default function App() {
   const [activeBackend, setActiveBackend] = useState('openfde-native')
   // ── Workflow result intake + approvals (Step 20) ─────────────────────────
   const [approvals, setApprovals] = useState([])
+  // ── Watched-repo identity (authoritative, from /api/session) ──────────────
+  const [session, setSession] = useState(null)
   // ── Agent role settings (Step 21) ────────────────────────────────────────
   const [agentSettings, setAgentSettings] = useState(null)
   const [agentOptions, setAgentOptions]   = useState(null)
@@ -543,6 +546,24 @@ export default function App() {
   // so reloading the app does not re-persist (and dirty PLAN.md).
   const skipStateSaveRef = useRef(false)
   const skipTasksSaveRef = useRef(false)
+
+  // ── Session identity (Priority A): learn WHICH repo the backend is watching and key
+  // the UI on repoRoot. If it changed since this browser last loaded (the same port now
+  // serving a different repo), hard-reload so no stale canvas/story/task/filetree data
+  // from another repo lingers. Runs first; cheap; never blocks the rest of hydration.
+  useEffect(() => {
+    let cancelled = false
+    getSession().then(s => {
+      if (cancelled || !s?.ok || !s.repoRoot) return
+      try {
+        const prior = localStorage.getItem('openfde-repo-root')
+        localStorage.setItem('openfde-repo-root', s.repoRoot)
+        if (prior && prior !== s.repoRoot) { window.location.reload(); return }
+      } catch { /* localStorage unavailable — the identity label still works */ }
+      setSession(s)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // ------------------------------------------------------------------ //
   //  Backend probe + hydration (runs once on mount)                     //
@@ -1897,6 +1918,7 @@ export default function App() {
           onCollapseAll={collapseAll}
           onOpenCommandPalette={() => setPaletteOpen(true)}
           onHome={goHome}
+          repoName={session?.repoName || ''}
         />
         <div className="panels">
           <div className="edge-zone left" onMouseEnter={() => setLeftOpen(true)} />
@@ -1907,7 +1929,7 @@ export default function App() {
               title={leftOpen ? 'Collapse file tree' : 'Expand file tree'}>
               {leftOpen ? '‹' : '›'}
             </button>
-            {leftOpen && <FileTree />}
+            {leftOpen && <FileTree repoName={session?.repoName || ''} />}
           </aside>
           <main className="panel-middle">
             <Whiteboard
@@ -1921,6 +1943,7 @@ export default function App() {
               onGenerateFromRepo={backendAvailable ? onGenerateFromRepo : null}
               onExecute={backendAvailable ? onWorkExecute : null}
               executing={executing}
+              repoName={session?.repoName || ''}
               archGraph={archGraph}
               expandedIds={expandedIds}
               onToggleExpand={toggleExpand}

@@ -217,6 +217,10 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   const [showFiles, setShowFiles] = useState(false)
   const [showPrompt, setShowPrompt] = useState(false)
   const episodeCommits = spotlight.commits || []
+  // Landed commits are first-class evidence: when a prompt already has them the PR
+  // readiness panel is SECONDARY — a calm "PR not ready yet", never a scary red banner
+  // that hides the fact that work shipped. Order stays prompt → commits → files → PR.
+  const hasCommits = episodeCommits.length > 0
   // Auto-Land: OpenFDE commits on completion. The manual Land button stays only as a
   // fallback while the episode is still reviewing or was held back (needs_manual_land).
   const canLand = onLand && (isWorktree
@@ -319,6 +323,16 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                 {/* Clean display title (backend `commit_display` via displayTitle), never the
                     noisy raw subject ("openfde: Here's the CC prompt"). Raw stays in the tooltip. */}
                 <span className="concept-commit-msg">{commitDisplayTitle(c)}</span>
+                {/* Inferred attribution — this commit was linked to the prompt by file overlap /
+                    timing, not an explicit trailer. Muted, so it reads as "we think" not "we know". */}
+                {c.confidence && c.confidence !== 'explicit' && (
+                  <span
+                    title={`Inferred from files${c.matchedFiles?.length ? ' (' + c.matchedFiles.join(', ') + ')' : ''} — ${c.confidence}`}
+                    style={{ fontSize: 9, fontStyle: 'italic', color: 'var(--text-muted)',
+                             marginLeft: 4, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                    inferred
+                  </span>
+                )}
                 <span className="concept-commit-meta">
                   {c.fileCount ? `${c.fileCount}f` : ''}{c.fileCount && c.timestamp ? ' · ' : ''}{relTime(c.timestamp)}
                 </span>
@@ -329,7 +343,7 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
         {isEpisode && episodeCommits.length === 0 && (
           <div className="concept-commits">
             <div className="concept-commits-head">
-              {spotlight.status === 'reviewing' ? 'Edited — not yet landed (review & Land)' : 'No commits yet'}
+              {spotlight.status === 'reviewing' ? 'Edited — not yet landed (review & Land)' : 'No landed commit yet'}
             </div>
           </div>
         )}
@@ -446,12 +460,21 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                   <div style={{
                     fontSize: 11, fontWeight: 600, marginBottom: 4,
                     color: readiness?.status === 'ready' ? 'var(--solid)'
-                      : readiness?.status === 'blocked' ? 'var(--violation)' : 'var(--text-muted)',
+                      : (readiness?.status === 'blocked' && !hasCommits) ? 'var(--violation)'
+                        : 'var(--text-muted)',
                   }}>
                     {readiness?.status === 'ready' ? 'Ready to ship'
-                      : readiness?.status === 'blocked' ? 'Not ready for PR'
+                      : readiness?.status === 'blocked'
+                        ? (hasCommits ? 'PR not ready yet' : 'Not ready for PR')
                         : 'Checking readiness…'}
                   </div>
+                  {hasCommits && readiness?.status === 'blocked' && (
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic',
+                                  marginBottom: 4 }}>
+                      {episodeCommits.length} commit{episodeCommits.length === 1 ? '' : 's'} already
+                      landed (above) — this only means a PR can’t be opened yet.
+                    </div>
+                  )}
                   {(readiness?.status === 'ready' ? readiness.reasons : readiness?.blockedBy || [])
                     .map(row => {
                       let hint = readiness?.status === 'blocked' ? blockerHint(row) : null
@@ -466,7 +489,8 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                                                 fontSize: 10.5, lineHeight: 1.6,
                                                 color: 'var(--text-muted)' }}>
                           <span style={{ flexShrink: 0, fontWeight: 700,
-                                         color: readiness?.status === 'ready' ? 'var(--solid)' : 'var(--violation)' }}>
+                                         color: readiness?.status === 'ready' ? 'var(--solid)'
+                                           : hasCommits ? 'var(--text-muted)' : 'var(--violation)' }}>
                             {readiness?.status === 'ready' ? '✓' : '✕'}
                           </span>
                           <span>

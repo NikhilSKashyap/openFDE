@@ -74,6 +74,8 @@ from openfde.openai_transport import complete as llm_complete, make_transport as
 from openfde.council import run_council
 from openfde import council_context as council_context_mod
 from openfde import council_router as council_router_mod
+from openfde import session as session_mod
+from openfde import __version__ as _OPENFDE_VERSION
 from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
 from openfde.story import build_story
@@ -87,6 +89,7 @@ from openfde import verify as verify_mod
 from openfde import prs as prs_mod
 from openfde.prs import create_episode_pr, pr_readiness
 from openfde import episode_llm_summary
+from openfde import episode_commits as episode_commits_mod
 from openfde.box_spec import apply_workflow_result, update_box_specs_from_execute
 from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend, list_backends
 from openfde.git_timeline import changed_paths, commit_files, ensure_baseline, git_commit, git_diff, git_status, git_timeline, worktree_diff, worktree_impact
@@ -335,6 +338,27 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     # ---- repo path -------------------------------------------------------
     path = Path(repo_path).expanduser().resolve()
+
+    # ---- wrong-repo startup trust ---------------------------------------
+    # Never silently serve (or fail-to-bind into) another repo. If an OpenFDE server
+    # already holds this port, identify the repo it watches and act on the truth:
+    # same canonical repo → say "already running"; a DIFFERENT repo → refuse loudly and
+    # do NOT open the browser into it. (Falls back to /api/files for pre-/api/session servers.)
+    existing = session_mod.probe_openfde_repo(port)
+    verdict, detail = session_mod.port_collision_verdict(existing, path)
+    if verdict == "already_running":
+        url = f"http://localhost:{port}"
+        print(f"\n  OpenFDE is already watching {detail} on {url}\n")
+        if auto_open:
+            webbrowser.open(url)
+        return
+    if verdict == "wrong_repo":
+        print(f"\n  ✗  Port {port} is already watching {detail}.\n"
+              f"     Stop it (Ctrl-C in that terminal) or choose another port:\n"
+              f"     openfde watch {path} --port <other>\n")
+        return
+
+    server_started_at = datetime.now(timezone.utc).isoformat()
     path.mkdir(parents=True, exist_ok=True)
 
     openfde_dir = path / ".openfde"
@@ -1622,25 +1646,40 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         persistence.backfill_episode_meta()                    # title/tag/seq/signal
         episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
         commits = git_timeline(path, limit=200)
-        by_ep: dict = {}
-        outside: list = []
-        for c in commits:
-            eid = c.get("episodeId")
-            (by_ep.setdefault(eid, []) if eid else outside).append(c)
-        known = {e.get("episodeId") for e in episodes}
-        # Enrich each episode commit with its file set (cheap name-only show) so the
-        # rail's nested commit chips and OpenPM commit tasks have files without a
-        # second fetch. Capped across the whole response so it stays a quick poll.
-        budget = 60
+
+        # Shared changed-files cache + a bounded fetch (one `git show --name-only` per sha) so the
+        # reconciliation pass and the commit views never double-read git, and a poll stays cheap.
         file_cache: dict = {}
+        fetch_budget = [80]                                    # list = mutable closure cell
+
+        def _files(sha: str) -> list:
+            if not sha:
+                return []
+            if sha not in file_cache and fetch_budget[0] > 0:
+                fetch_budget[0] -= 1
+                file_cache[sha] = commit_files(path, sha)
+            return file_cache.get(sha, [])
+
+        # Reconcile trailer-less commits onto episodes by file overlap + timing — the product model
+        # is *many prompts → one commit*, so one batched commit can land on several prompt cards.
+        # Only RECENT, not-yet-attributed commits are candidates (steady state: nothing new → no
+        # work; old unrelated commits age out of the window). Confident links only
+        # (explicit / high_file_overlap / time_file_inferred); ambiguous is surfaced elsewhere, not
+        # auto-attached; an explicit trailer is never downgraded. Persist just the changed episodes.
+        already_attached = {s for e in episodes for s in (e.get("commitShas") or [])}
+        candidates = [{**c, "files": _files(c.get("sha"))}
+                      for c in commits[:40]
+                      if c.get("sha") and not c.get("episodeIds") and c.get("sha") not in already_attached]
+        if candidates:
+            for eid in episode_commits_mod.reconcile_episodes(candidates, episodes):
+                ep = next((e for e in episodes if e.get("episodeId") == eid), None)
+                if ep is not None:
+                    persistence.upsert_episode(ep)
+        attached_shas: set = set()                            # shas shown under some episode → not Outside
 
         def _commit_view(c: dict, ep: dict) -> dict:
-            nonlocal budget
             sha = c.get("sha")
-            if sha and sha not in file_cache and budget > 0:
-                budget -= 1
-                file_cache[sha] = commit_files(path, sha)
-            cf = file_cache.get(sha, [])
+            cf = _files(sha)
             # Clean display text for OpenPM / evidence cards. A clustered Auto-Land stores a
             # per-commit title/summary on the episode (commitMeta[sha]) — use it so each commit
             # reads like its own logical change; otherwise fall back to the cleaned owning episode,
@@ -1653,8 +1692,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 dtitle, dsummary = cm["title"], cm.get("summary") or ""
             else:
                 dtitle, dsummary = commit_display(ep.get("title"), ep.get("summary"), c.get("summary"))
+            # Attribution confidence (explicit trailer vs. inferred from files/time) so the UI can
+            # quietly mark inferred links. Absent for plain trailer commits that predate commitMeta.
             return {**c, "files": cf, "fileCount": len(cf),
-                    "displayTitle": dtitle, "displaySummary": dsummary}
+                    "displayTitle": dtitle, "displaySummary": dsummary,
+                    "confidence": (cm or {}).get("confidence"),
+                    "matchedFiles": (cm or {}).get("matchedFiles") or []}
 
         # Ready-for-PR readiness (v1.1), embedded so cards/badges render without extra
         # clicks. One `git status` + one base resolution per request; merge-base only
@@ -1679,16 +1722,29 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                          "dirtyFiles": list(st.get("dirty") or []),
                          "on_base": _on_base, "gh_ok": shutil.which("gh") is not None}
 
+        def _episode_commits(e: dict) -> list:
+            # An episode's commits = those it explicitly declares (a trailer naming this episode,
+            # singular or plural) ∪ those attached to it (landed or reconciled, via commitShas).
+            # Iterate `commits` (newest-first) so order is preserved and each shows once.
+            eid = e.get("episodeId")
+            shas = set(e.get("commitShas") or [])
+            picked = []
+            for c in commits:
+                if c.get("sha") in shas or (eid and eid in (c.get("episodeIds") or [])):
+                    picked.append(c)
+                    attached_shas.add(c.get("sha"))
+            return picked
+
         enriched = []
         for e in episodes:
-            ecs = [_commit_view(c, e) for c in by_ep.get(e["episodeId"], [])]
+            ecs = [_commit_view(c, e) for c in _episode_commits(e)]
             enriched.append({**e, "commits": ecs, "commitCount": len(ecs),
                              "fileCount": len(e.get("files") or []),
                              "prReadiness": pr_readiness(path, e, _ctx=readiness_ctx)})
-        # Commits whose episode trailer references an unknown (foreign/older) id
-        # are surfaced under Outside OpenFDE too — never silently dropped.
-        foreign = [c for c in commits if c.get("episodeId") and c["episodeId"] not in known]
-        outside_commits = outside + foreign
+        # Outside OpenFDE = every commit not shown under some episode: manual commits, foreign
+        # trailers (an episode id we don't know), and anything reconciliation wasn't confident
+        # enough to attach. Never silently dropped.
+        outside_commits = [c for c in commits if c.get("sha") not in attached_shas]
         outside_bucket = {
             "episodeId": "outside", "kind": "manual", "status": "landed",
             "prompt": "Outside OpenFDE",
@@ -3756,6 +3812,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """
         return web.Response()
 
+    async def get_session(request: web.Request) -> web.Response:
+        """Authoritative watched-repo identity — runtime, NOT .openfde/project.json.name.
+        The UI keys its session on repoRoot and shows repoName from the first frame; the
+        CLI uses this to refuse a port already held by a different repo."""
+        loop = asyncio.get_event_loop()
+        payload = await loop.run_in_executor(
+            None, lambda: session_mod.session_payload(path, server_started_at, _OPENFDE_VERSION))
+        return web.json_response({"ok": True, **payload})
+
     # ── Council Chat Router (v1) — one chat, routed across the council ───────
     # Read-only Q&A: route a message to Architect / Senior Dev / Verifier (or have
     # Architect + Senior Dev DISCUSS) and answer from the generated CouncilContext.
@@ -3838,6 +3903,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # ---- register routes (order matters: specific before catch-all) -----
     app.router.add_get("/ws",                          ws_handler)
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
+    app.router.add_get( "/api/session",               get_session)
     app.router.add_get( "/api/files",                 get_files)
     app.router.add_get( "/api/state",                 get_state)
     app.router.add_put( "/api/state",                 put_state)
@@ -4007,7 +4073,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "localhost", port)
-    await site.start()
+    try:
+        await site.start()
+    except OSError as exc:
+        # The probe above catches an OpenFDE server on this port; this catches anything
+        # else holding it (a non-OpenFDE process, or a race) — fail clearly, never silently.
+        print(f"\n  ✗  Could not bind port {port}: {exc}\n"
+              f"     The port is in use. Stop the other process or choose another port.\n")
+        await runner.cleanup()
+        return
 
     logger.info("Server started on port %d", port)
 
