@@ -197,8 +197,13 @@ def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: boo
     committed_files = sorted({f for c, _ in landed for f in (c.get("files") or [])})
     meta = dict(episode.get("commitMeta") or {})
     for commit, cl in landed:
+        # confidence='explicit': OpenFDE made this commit and stamped its episode trailer, so the
+        # link is authoritative — never shown as "inferred". (Reconciled, trailer-less commits
+        # get a weaker confidence via openfde.episode_commits.)
         meta[commit["sha"]] = {"title": cl["title"],
-                               "summary": re.sub(r"^openfde:\s*", "", commit["summary"]).strip()}
+                               "summary": re.sub(r"^openfde:\s*", "", commit["summary"]).strip(),
+                               "confidence": "explicit",
+                               "matchedFiles": list(commit.get("files") or [])}
     episode["commitMeta"] = meta
     episode["commitShas"] = list(dict.fromkeys((episode.get("commitShas") or []) + new_shas))
     episode["files"] = sorted(set(files + committed_files))

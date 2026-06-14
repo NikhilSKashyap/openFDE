@@ -304,10 +304,16 @@ def git_timeline(root: Path, limit: int = 100) -> list:
         sha, short, author, email, ts, summary = parts[:6]
         body = parts[6] if len(parts) > 6 else ""
         trailers = _parse_openfde_trailers(body)
+        # episodeIds is the full set a commit declares (OpenFDE-Episodes plural ∪ OpenFDE-Episode
+        # singular) — the basis for *many prompts → one commit*. episodeId stays as the primary
+        # (first) id for back-compat with consumers that group by a single episode.
+        from openfde.episode_commits import episode_ids_from_trailers
+        episode_ids = episode_ids_from_trailers(trailers)
         commits.append({
             "sha": sha, "shortSha": short, "author": author,
             "email": email, "timestamp": ts, "summary": summary,
-            "trailers": trailers, "episodeId": trailers.get("OpenFDE-Episode"),
+            "trailers": trailers, "episodeIds": episode_ids,
+            "episodeId": episode_ids[0] if episode_ids else None,
         })
     return commits
 

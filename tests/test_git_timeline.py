@@ -178,6 +178,36 @@ class WorktreeImpactTest(unittest.TestCase):
         self.assertIn("OpenFDE-Episode: episode_land", msg)         # provenance trailer
         self.assertEqual(set(gt.commit_files(self.root, res["sha"])), {"alpha.py", "beta.py"})
 
+    # 12) Plural OpenFDE-Episodes trailer → episodeIds list; episodeId is the first (back-compat).
+    def test_plural_episodes_trailer_parses(self):
+        (self.root / "alpha.py").write_text("def a():\n    return 6\n")
+        res = gt.git_commit(self.root, "openfde: batched change",
+                            trailers={"OpenFDE-Episodes": "e1, e2, e3"})
+        self.assertTrue(res["committed"])
+        landed = gt.git_timeline(self.root, limit=5)[0]
+        self.assertEqual(landed["episodeIds"], ["e1", "e2", "e3"])
+        self.assertEqual(landed["episodeId"], "e1")             # primary, for single-episode consumers
+
+    # 13) Many prompts → one commit, end-to-end against REAL git: a trailer-less commit touching two
+    #     episodes' files reconciles onto BOTH (the same enrich-with-commit_files path the server uses).
+    def test_one_commit_reconciles_onto_many_episodes(self):
+        from openfde import episode_commits as ec
+        (self.root / "alpha.py").write_text("def a():\n    return 21\n")
+        (self.root / "beta.py").write_text("def b():\n    return 22\n")
+        _git(self.root, "add", "-A")
+        _git(self.root, "-c", "user.email=t@example.com", "-c", "user.name=Test",
+             "commit", "-q", "-m", "manual: two changes in one commit")
+        commit = gt.git_timeline(self.root, limit=5)[0]
+        self.assertIsNone(commit["episodeId"])                  # no trailer → inference territory
+        enriched = {**commit, "files": gt.commit_files(self.root, commit["sha"])}
+        episodes = [{"episodeId": "P1", "files": ["alpha.py"]},
+                    {"episodeId": "P2", "files": ["beta.py"]}]
+        changed = ec.reconcile_episodes([enriched], episodes)
+        self.assertEqual(set(changed), {"P1", "P2"})
+        for ep in episodes:
+            self.assertIn(commit["sha"], ep["commitShas"])
+            self.assertEqual(ep["commitMeta"][commit["sha"]]["confidence"], "high_file_overlap")
+
 
 class EpisodeStoreTest(unittest.TestCase):
     """The durable prompt-episode store (Prompt Story Rail backing)."""
