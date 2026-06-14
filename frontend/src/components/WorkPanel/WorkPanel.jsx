@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { MOMENT_LABEL, MOMENT_PROMPT } from '../../productFlow/deriveMoment'
+import CouncilChat from '../CouncilChat/CouncilChat'
 
 /**
  * WorkPanel — the single progressive panel from FLOW.md (Step 28 Slice 2).
@@ -30,6 +31,7 @@ export default function WorkPanel({
   specMarkdown = null, commitDiff = null, agentMessages = [], approvals = [],
   onExecute = null, onExplain = null, onOpenDiff = null, onReset = null,
   intent = '', onIntentChange = null, run = null, onStop = null,
+  onOpenAgentSettings = null,
 }) {
   const setIntent = onIntentChange || (() => {})
   const scope = scopeLabel(selectionContext)
@@ -65,12 +67,14 @@ export default function WorkPanel({
       </div>
 
       <div className="work-body">
-        {/* ── Orient ───────────────────────────────────────────────── */}
+        {/* ── Orient: the user-facing moment. Council is the brain behind it —
+            type what you want and OpenFDE routes it to the right council member
+            (read-only). Building happens once you scope it (Understand / Change). ── */}
         {moment === 'orient' && (
-          <Section title="Start work">
-            <PromptBox value={intent} onChange={setIntent} onSubmit={submit}
-              placeholder="e.g. Add login to the auth module" action="Run" disabled={!onExecute} />
-            <p className="work-hint">Select a module on the canvas to understand it, or describe a change above.</p>
+          <Section title="Ask the council">
+            <CouncilChat onOpenAgentSettings={onOpenAgentSettings} />
+            <p className="work-hint">OpenFDE routes your question to the right council member.
+              Select a module on the canvas to dig into its architecture and make a change.</p>
           </Section>
         )}
 
