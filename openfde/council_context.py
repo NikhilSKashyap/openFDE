@@ -13,12 +13,90 @@ orchestrator (council_router.run_ask) renders it into role prompts via render_br
 """
 from __future__ import annotations
 
+import re
+
 _MAX_RECENT_EP = 5
 _MAX_DIRTY = 20
 _MAX_DECISIONS = 5
 _MAX_JOBS = 5
 _STR = 200
-_BRIEF_CAP = 1800
+_BRIEF_CAP = 3200
+
+# The authoritative current architecture — the single strongest grounding. Without it the role
+# models drifted to a deprecated plan (the old Step-13 `/api/execute` + Anthropic-SDK path).
+ARCHITECTURE_ANCHOR = (
+    "OpenFDE is the cockpit / orange box — the system of record and memory for agent-built "
+    "software. Codex and Claude Code (and the council backends) are the EXTERNAL ENGINES that "
+    "actually edit and run code; OpenFDE routes work to them and OBSERVES, preserves canvas "
+    "boundaries (dotted = agent-editable, solid = protected/approval), captures prompt episodes, "
+    "verifies, lands commits, and tells the story. Execute = route/observe an engine (Codex / "
+    "Claude Code or a council backend) — NOT a direct Anthropic-SDK call. The old Step-13 "
+    "`/api/execute` Anthropic-SDK execution path is HISTORICAL and deprecated; do not recommend it "
+    "unless the current ROADMAP explicitly revives it."
+)
+
+_PLACEHOLDER = re.compile(r"<[^>]+>")                    # un-filled memory-kit template placeholders / HTML
+_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
+
+
+def _section_lines(md: str, names, cap: int = 6) -> list:
+    """Non-placeholder body lines under headings whose text matches any of ``names`` (prefix match),
+    accumulated across every matching section — so a concatenated [filled-template, real-doc] yields
+    the real lines and silently drops the template's ``<placeholder>`` rows."""
+    want = [n.lower() for n in names]
+    out, grab = [], False
+    for ln in (md or "").splitlines():
+        h = _HEADING.match(ln.strip())
+        if h:
+            head = h.group(1).strip().lower()
+            grab = any(head == n or head.startswith(n) for n in want)
+            continue
+        if not grab:
+            continue
+        s = ln.strip().lstrip("-*•0123456789. ").strip()
+        if s and not _PLACEHOLDER.search(s):
+            out.append(s[:160])
+            if len(out) >= cap:
+                break
+    return out
+
+
+def _recent_headings(md: str, cap: int = 5) -> list:
+    """The LAST ``cap`` section headings (+ first detail line) in ``md`` — the newest direction,
+    since ROADMAP-style docs are append-only. The caller passes only the TAIL of a long roadmap so
+    old/shipped sections near the top never appear."""
+    lines = (md or "").splitlines()
+    heads = []
+    for i, ln in enumerate(lines):
+        h = _HEADING.match(ln.strip())
+        if not h:
+            continue
+        title = h.group(1).strip()
+        detail = ""
+        for nxt in lines[i + 1:i + 6]:
+            t = nxt.strip().lstrip("-*•0123456789. ").strip()
+            if t and not _HEADING.match(nxt.strip()) and not _PLACEHOLDER.search(t):
+                detail = t[:140]
+                break
+        heads.append(f"{title} — {detail}" if detail else title)
+    return heads[-cap:]
+
+
+def assemble_direction(*, decisions_md: str = "", flow_md: str = "", roadmap_md: str = "") -> list:
+    """Ordered CURRENT-DIRECTION lines: the fixed architecture anchor, then Now/Next from DECISIONS,
+    the FLOW contract, and the latest roadmap headings. Empty/placeholder parts are skipped."""
+    out = [ARCHITECTURE_ANCHOR]
+    nn = _section_lines(decisions_md, ["now"]) + _section_lines(decisions_md, ["next"])
+    if nn:
+        out.append("Now / Next (DECISIONS.md): " + "; ".join(nn[:6]))
+    fl = _section_lines(flow_md, ["how work flows", "boundaries", "what this repo is",
+                                  "verification"])
+    if fl:
+        out.append("Flow contract (FLOW.md): " + "; ".join(fl[:5]))
+    rm = _recent_headings(roadmap_md)
+    if rm:
+        out.append("Latest roadmap (most recent): " + " | ".join(rm))
+    return out
 
 # Every role has TWO modes: read-only `.chat` (a _text_role call — never tracked as
 # a run) and `.work` (the role doing real OpenFDE work: planning, editing, verifying,
@@ -150,14 +228,22 @@ def _decisions(project, project_log, episodes) -> list:
 
 def build_council_context(*, active_episode=None, recent_episodes=None,
                           repo_status=None, verify_latest=None, project=None,
-                          project_log=None, agent_states=None) -> dict:
-    """Assemble the generated CouncilContext from injected store data. Capped + pure."""
+                          project_log=None, agent_states=None,
+                          decisions_md="", flow_md="", roadmap_md="", recent_commits=None) -> dict:
+    """Assemble the generated CouncilContext from injected store data. Capped + pure.
+
+    ``currentDirection`` is the authoritative grounding (architecture anchor + Now/Next + FLOW +
+    latest roadmap) and is rendered FIRST; ``recentCommits`` are the newest landed subjects. The
+    server reads the docs/commits (I/O) and injects them here."""
     repo_status = repo_status if isinstance(repo_status, dict) else {}
     verify_latest = verify_latest if isinstance(verify_latest, dict) else {}
     dirty = [p for p in (repo_status.get("dirty") or []) if isinstance(p, str)]
     recent = [v for v in (_episode_view(e) for e in (recent_episodes or [])[:_MAX_RECENT_EP]) if v]
     return {
         "generatedFrom": "openfde-stores",
+        "currentDirection": assemble_direction(decisions_md=decisions_md, flow_md=flow_md,
+                                               roadmap_md=roadmap_md),
+        "recentCommits": [_s(c) for c in (recent_commits or [])[:5] if c],
         "activeEpisode": _episode_view(active_episode),
         "recentEpisodes": recent,
         "repo": {
@@ -180,6 +266,17 @@ def render_brief(context) -> str:
     if not isinstance(context, dict):
         return ""
     lines = []
+    # CURRENT DIRECTION first — authoritative grounding the role must prefer over older activity.
+    direction = context.get("currentDirection") or []
+    if direction:
+        lines.append("CURRENT DIRECTION — authoritative; prefer this over the older activity below:")
+        lines += [f"- {d}" for d in direction]
+        rc = context.get("recentCommits") or []
+        if rc:
+            lines.append("Recently landed: " + "; ".join(rc[:5]))
+        lines.append("")
+        lines.append("Recent activity (supporting only — may include HISTORICAL items that are "
+                     "NOT current direction):")
     ae = context.get("activeEpisode")
     if ae:
         bits = [f'Active episode: {ae.get("tag") or ae.get("id") or "?"}']
