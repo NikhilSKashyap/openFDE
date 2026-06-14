@@ -219,5 +219,109 @@ class ScopedCommitTest(unittest.TestCase):
         self.assertEqual(saved["status"], "landed")
 
 
+class LandOnVerifyTest(unittest.TestCase):
+    """Slice B — `land_on_verify`: green verify lands automatically; red waits.
+
+    Stricter than land_episode's in-line gate: failed / skipped / missing all WAIT
+    (land_episode itself lands on skipped — see test #10). Scoped ownership, multi-
+    episode ambiguity, and .openfde/ignored exclusion all still apply.
+    """
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self._g("init", "-q")
+        self._g("config", "user.email", "t@e.com")
+        self._g("config", "user.name", "T")
+        self._g("config", "commit.gpgsign", "false")
+        (self.root / ".gitignore").write_text("\n".join(gt._IGNORE_ENTRIES) + "\n")
+        (self.root / "a.py").write_text("a1\n")
+        (self.root / "b.py").write_text("b1\n")
+        self._g("add", "-A")
+        self._g("commit", "-q", "-m", "init")
+        self.p = Persistence(self.root / ".openfde")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _g(self, *a):
+        return subprocess.run(["git", *a], cwd=str(self.root), capture_output=True, text=True)
+
+    def _porcelain(self):
+        return self._g("status", "--porcelain").stdout.strip()
+
+    def _landed_files(self):
+        return self._g("show", "--name-only", "--format=", "HEAD").stdout.split()
+
+    def _verify(self, status):
+        return {"status": status, "checks": [], "ranAt": "2026-06-14T00:00:00Z", "durationMs": 5}
+
+    def _ep(self, eid="e1", files=("a.py",), **extra):
+        return self.p.upsert_episode({"episodeId": eid, "prompt": "p", "status": "reviewing",
+                                      "files": list(files), "commitShas": [], **extra})
+
+    # 1) passed verify + a clear active episode → commit created.
+    def test_passed_verify_lands(self):
+        (self.root / "a.py").write_text("a2\n")
+        res = autoland.land_on_verify(self.root, self.p, self._ep(),
+                                      run_verify=lambda _r: self._verify("passed"))
+        self.assertTrue(res["committed"])
+        self.assertEqual(set(self._landed_files()), {"a.py"})
+        self.assertEqual(self.p.get_episode("e1")["status"], "landed")
+
+    # 2) failed verify → no commit.
+    def test_failed_verify_does_not_land(self):
+        (self.root / "a.py").write_text("a2\n")
+        head = self._g("rev-parse", "HEAD").stdout.strip()
+        res = autoland.land_on_verify(self.root, self.p, self._ep(),
+                                      run_verify=lambda _r: self._verify("failed"))
+        self.assertFalse(res["committed"])
+        self.assertEqual(self._g("rev-parse", "HEAD").stdout.strip(), head)
+        self.assertEqual(self._porcelain(), "M a.py")                   # work preserved
+        self.assertEqual(self.p.get_episode("e1")["verify"]["status"], "failed")
+
+    # 3) skipped / missing verify → no commit (KEY: land_episode would land on skipped).
+    def test_skipped_or_missing_verify_does_not_land(self):
+        (self.root / "a.py").write_text("a2\n")
+        for status in ("skipped", "error", None):
+            res = autoland.land_on_verify(self.root, self.p, self._ep("e_" + str(status)),
+                                          run_verify=lambda _r, s=status: {"status": s, "checks": []})
+            self.assertFalse(res["committed"], f"should not land on verify={status}")
+        self.assertEqual(self._porcelain(), "M a.py")
+
+    # 4) unrelated dirty files ignored — only the episode's scoped file is committed.
+    def test_unrelated_dirty_ignored(self):
+        (self.root / "a.py").write_text("a2\n")
+        (self.root / "b.py").write_text("b2-unrelated\n")               # not in the episode
+        res = autoland.land_on_verify(self.root, self.p, self._ep(files=["a.py"]),
+                                      run_verify=lambda _r: self._verify("passed"))
+        self.assertTrue(res["committed"])
+        self.assertEqual(set(self._landed_files()), {"a.py"})
+        self.assertEqual(self._porcelain(), "M b.py")                   # unrelated stays dirty
+
+    # 5) ambiguous multi-episode dirty state → no commit.
+    def test_ambiguous_multi_episode_does_not_land(self):
+        (self.root / "a.py").write_text("a2\n")
+        self._ep("eA", files=["a.py"])
+        self._ep("eB", files=["a.py"])                                  # overlapping claim
+        res = autoland.land_on_verify(self.root, self.p, self.p.get_episode("eA"),
+                                      run_verify=lambda _r: self._verify("passed"))
+        self.assertFalse(res["committed"])
+        self.assertEqual(res["status"], "needs_manual_land")
+        self.assertEqual(self._porcelain(), "M a.py")
+
+    # 6) .openfde/*.md is never included in a commit (git-excluded → not in the scope).
+    def test_openfde_md_never_committed(self):
+        (self.root / "a.py").write_text("a2\n")
+        (self.root / ".openfde").mkdir(exist_ok=True)
+        (self.root / ".openfde" / "FLOW.md").write_text("# flow\n")     # dirty but ignored
+        # Even if something tried to scope it in, the ignore guard drops it.
+        res = autoland.land_on_verify(self.root, self.p,
+                                      self._ep(files=["a.py", ".openfde/FLOW.md"]),
+                                      run_verify=lambda _r: self._verify("passed"))
+        self.assertTrue(res["committed"])
+        self.assertEqual(set(self._landed_files()), {"a.py"})           # only a.py
+        self.assertNotIn(".openfde/FLOW.md", self._landed_files())
+
+
 if __name__ == "__main__":
     unittest.main()

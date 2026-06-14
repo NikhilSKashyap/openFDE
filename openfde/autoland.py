@@ -249,3 +249,37 @@ def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: boo
             "commits": [{"sha": c["sha"], "shortSha": c["shortSha"], "title": cl["title"],
                          "files": c.get("files", [])} for c, cl in landed],
             "files": committed_files, "broadcasts": broadcasts}
+
+
+def land_on_verify(root, persistence, episode: dict, *, run_verify=None,
+                   allow_llm: bool = False) -> dict:
+    """Auto-land ONLY on a deterministic GREEN verify. Product law: *green verify lands
+    automatically; red verify waits.*
+
+    This is STRICTER than land_episode's in-line gate (which blocks only ``failed``):
+    here a verify that is failed / skipped / missing / anything-but-``passed`` does NOT
+    land — the manual "Land changes" path stays. No LLM decides readiness; the gate is
+    the deterministic verify status. On green it delegates to :func:`land_episode`
+    (``auto=True``), so the scoped-ownership, multi-episode ambiguity, and
+    ``.openfde``/ignored-file exclusions all apply, and a clean land syncs the OpenPM
+    card to Done/passed. A failed/skipped verify leaves the card where it is (Review/
+    Testing) and preserves the repair-hatch path.
+
+    Returns:
+        dict — the land_episode result on green; otherwise
+        ``{ok, committed: False, status, reason, episode, files: [], broadcasts: []}``
+        with the verify evidence recorded on the episode.
+    """
+    evidence = (run_verify or _default_verify)(root)
+    episode["verify"] = evidence
+    status = (evidence or {}).get("status")
+    if status != "passed":
+        # Not green → never auto-land. Red waits; skipped/missing waits; never guess.
+        episode["updatedAt"] = _now()
+        persistence.upsert_episode(episode)
+        return {"ok": True, "committed": False, "status": episode.get("status"),
+                "reason": f"verify {status or 'missing'} — green verify required to auto-land",
+                "episode": episode, "files": [], "broadcasts": []}
+    # Green: hand to the scoped lander; inject the receipt so it does not re-run verify.
+    return land_episode(root, persistence, episode, auto=True, allow_llm=allow_llm,
+                        run_verify=lambda _r: evidence)
