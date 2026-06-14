@@ -49,6 +49,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -76,8 +77,9 @@ from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
 from openfde import failure_flow as failure_flow_mod
+from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
-from openfde.episode_summary import commit_display, is_bad_title, repair_episode_tasks
+from openfde.episode_summary import commit_display, is_bad_title, reconcile_task_status, repair_episode_tasks
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
 from openfde import prs as prs_mod
@@ -256,8 +258,10 @@ def _write_plan_md(persistence: Persistence, repo_root: Path) -> None:
         persistence.load_tasks(),
         persistence.load_project(),
     )
-    plan_path = repo_root / "PLAN.md"
-    tmp_path  = repo_root / ".plan_md.tmp"
+    # PLAN.md is OpenFDE's OWN artifact — write it inside .openfde/ (excluded from
+    # git), never the repo root, so watching a foreign repo never dirties it.
+    plan_path = persistence.dir / "PLAN.md"
+    tmp_path  = persistence.dir / ".plan_md.tmp"
     try:
         tmp_path.write_text(md, encoding="utf-8")
         os.replace(tmp_path, plan_path)
@@ -464,6 +468,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         episodes = episode_llm_summary.ensure_facts(persistence)   # ensure clean episode titles first
         tasks = persistence.load_tasks()
         repaired, changed = repair_episode_tasks(tasks, episodes)
+        # Make every episode card mirror its episode's CURRENT verify/landed state
+        # — no stale FAILED next to a passed episode (one source of truth).
+        if reconcile_task_status(repaired, episodes):
+            changed = True
         if changed:
             persistence.save_tasks(repaired)
         return web.json_response(repaired)
@@ -551,6 +559,114 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         persistence.save_tasks(tasks)
         await manager.broadcast({"type": "tasks_updated"})
         return web.json_response({"ok": True, "task": task, "created": created})
+
+    async def post_issue_reproduce(request: web.Request) -> web.Response:
+        """The Reproduce button: issue card → honest repro verdict.
+
+        Re-fetches the LIVE issue (text may have changed since import), then
+        triage → locate → draft → single-test run via openfde.issue_repro.
+        Feature requests and signal-free reports come back refused, never
+        fabricated. Run-once by issue-body hash; {regenerate: true} re-runs.
+        The verdict is stored on the card (task.repro) and broadcast.
+
+        Returns:
+            web.Response — {ok, repro, reused} | 4xx/502.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            body = {}
+        task_id = str(body.get("taskId") or "")
+        task = next((t for t in persistence.load_tasks()
+                     if isinstance(t, dict) and t.get("id") == task_id), None)
+        if task is None:
+            return web.json_response({"ok": False, "error": "unknown task"}, status=404)
+        src = task.get("intentSource") or {}
+        if src.get("provider") != "github" or src.get("issueNumber") is None:
+            return web.json_response(
+                {"ok": False, "error": "not a GitHub-issue card"}, status=400)
+
+        loop = asyncio.get_event_loop()
+        try:
+            intent = await loop.run_in_executor(
+                None, lambda: gh_issue_view(int(src["issueNumber"]), str(path)))
+        except FileNotFoundError:
+            return web.json_response(
+                {"ok": False, "error": "gh CLI not installed"}, status=502)
+        except Exception as exc:  # noqa: BLE001 — gh exec/auth failure
+            return web.json_response({"ok": False, "error": str(exc)[:300]}, status=502)
+
+        bhash = issue_repro_mod.issue_body_hash(intent.get("body") or "")
+        prior = task.get("repro") or {}
+        if prior and prior.get("bodyHash") == bhash and not body.get("regenerate"):
+            return web.json_response({"ok": True, "repro": prior, "reused": True})
+
+        caller, caption = _hatch_text_role("senior_dev")
+        checks = verify_mod.discover_checks(path)
+        check_cmd = next((c["command"] for c in checks if c.get("id") == "unit-tests"),
+                         checks[0]["command"] if checks else None)
+
+        # The repro belongs to a WORK EPISODE carrying the ISSUE as its intent —
+        # created right before the test write (the watcher then attributes the
+        # edit to it), so the whole existing loop (verification → Show → the
+        # hatch with explain/prompt/flow) anchors on that episode unchanged.
+        created = {}
+
+        def _bootstrap_episode():
+            now = datetime.now(timezone.utc).isoformat()
+            ep = {"episodeId": "episode_" + secrets.token_hex(6),
+                  "createdAt": now, "updatedAt": now,
+                  "prompt": (f"GitHub issue #{src['issueNumber']} — "
+                             f"{intent.get('title') or ''}\n\n"
+                             f"{(intent.get('body') or '')[:2000]}"),
+                  "title": (intent.get("title") or "")[:90],
+                  "kind": "issue-repro", "status": "reviewing",
+                  "runIds": [], "eventIds": [], "projectEntryIds": [],
+                  "commitShas": [], "files": [],
+                  "summary": f"Reproduction of GitHub issue #{src['issueNumber']}",
+                  "intentSource": src}
+            created.update(persistence.upsert_episode(ep))
+            return created["episodeId"]
+
+        verdict = await loop.run_in_executor(None, lambda: issue_repro_mod.reproduce_issue(
+            path, title=intent.get("title") or "", body=intent.get("body") or "",
+            labels=intent.get("labels") or [], caller=caller, check_cmd=check_cmd,
+            before_write=_bootstrap_episode))
+        verdict["tail"] = (verdict.get("tail") or "")[-400:]
+        verdict["bodyHash"] = bhash
+        verdict["source"] = caption or "OpenFDE · triage"
+        verdict["ts"] = int(time.time())
+
+        task_patch = {"repro": verdict}
+        if created and verdict.get("verdict") == "reproduced":
+            # Real receipts on the episode: the full check run (the repro test
+            # fails inside it) attaches exactly like a manual Run checks.
+            evidence = await loop.run_in_executor(
+                None, lambda: verify_mod.run_verification(path))
+            persistence.save_verify_latest(evidence)
+            ep = persistence.get_episode(created["episodeId"])
+            if ep is not None:
+                ep["verify"] = evidence
+                files = set(ep.get("files") or [])
+                files.add(verdict.get("testFile") or "")
+                ep["files"] = sorted(f for f in files if f)
+                ep["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                persistence.upsert_episode(ep)
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
+                task_patch.update({"episodeId": ep["episodeId"],
+                                   "episodeTag": ep.get("tag"),
+                                   "promptTitle": ep.get("title"),
+                                   "column": "doing"})
+        elif created:
+            # The hook fired but the run didn't reproduce — keep the episode as
+            # the honest record of the attempt (status stays reviewing; no files).
+            task_patch.update({"episodeId": created.get("episodeId"),
+                               "episodeTag": created.get("tag"),
+                               "column": "doing"})
+
+        persistence.update_task(task_id, task_patch)
+        await manager.broadcast({"type": "tasks_updated"})
+        return web.json_response({"ok": True, "repro": verdict, "reused": False})
 
     # ================================================================== #
     #  REST — Land as PR v1 (episode → branch → GitHub PR via local gh)   #
@@ -654,6 +770,19 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                                               str(body.get("code", "")))
         except (source_edit.SourceEditError, ValueError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        ep_id = (body.get("episodeId") or "").strip() if isinstance(body, dict) else ""
+        if ep_id:
+            reopened = persistence.reopen_episode(ep_id)
+            if reopened is not None:
+                await manager.broadcast({"type": "episode_updated", "episode": reopened})
+            if persistence.move_tasks_for_episode(ep_id, "doing", from_columns=("todo",)):
+                await manager.broadcast({"type": "tasks_updated"})
+            ep = persistence.get_episode(ep_id)
+            rel = body.get("path")
+            if ep is not None and rel and rel not in (ep.get("files") or []):
+                ep["files"] = sorted({*(ep.get("files") or []), rel})
+                persistence.upsert_episode(ep)
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
         await manager.broadcast({"type": "source_patched", "payload": result})
         return web.json_response({"ok": True, **result})
 
@@ -685,6 +814,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 ep["updatedAt"] = datetime.now(timezone.utc).isoformat()
                 persistence.upsert_episode(ep)
                 await manager.broadcast({"type": "episode_updated", "episode": ep})
+                # The user ran the checks — the issue card moves to Testing,
+                # wearing the evidence's color.
+                failed = evidence.get("status") != "passed"
+                moved = persistence.move_tasks_for_episode(
+                    ep_id, "testing", "failed" if failed else "passed",
+                    from_columns=None if failed else ("todo", "doing", "testing"))
+                if moved:
+                    await manager.broadcast({"type": "tasks_updated"})
         await manager.broadcast({"type": "verify_updated", "verify": evidence})
         return web.json_response({"ok": True, "verify": evidence,
                                   **({"episodeId": ep_id} if ep_id else {})})
@@ -1853,6 +1990,30 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         "anthropic": "Anthropic", "openai-compatible": "OpenAI-compatible",
         "openrouter": "OpenRouter", "ollama": "Ollama", "echo": "Echo"}
 
+    def _openfde_version() -> str:
+        """The install's identity in a form the TRACKER can use: the nearest
+        commit that exists on the remote, plus the local distance — a bare
+        local HEAD hash means nothing to anyone reading the issue."""
+        own = str(Path(__file__).resolve().parents[1])
+
+        def _git(*args):
+            try:
+                p = subprocess.run(["git", "-C", own, *args],
+                                   capture_output=True, text=True, timeout=10)
+                return p.stdout.strip() if p.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                return ""
+        head = _git("rev-parse", "--short", "HEAD") or "unknown"
+        for ref in ("origin/main", "origin/master"):
+            base = _git("merge-base", "HEAD", ref)
+            if base:
+                base_short = _git("rev-parse", "--short", base) or base[:7]
+                ahead = _git("rev-list", "--count", f"{base}..HEAD") or "0"
+                return base_short if ahead == "0" else f"{base_short}+{ahead} local commits"
+        return f"{head} (local build, not on the remote)"
+
+    _OPENFDE_COMMIT = _openfde_version()
+
     def _hatch_ctx(body: dict) -> dict:
         return {"file": body.get("file", ""), "line": body.get("line", ""),
                 "test": body.get("test", ""), "funcName": body.get("funcName", ""),
@@ -1860,7 +2021,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 "code": (body.get("code") or "")[:4000],
                 "episodeId": body.get("episodeId") or "",
                 "checkId": body.get("checkId") or "",
-                "failureMsg": (body.get("failureMsg") or "")[:800]}
+                "failureMsg": (body.get("failureMsg") or "")[:2000]}
 
     def _hatch_fp(c: dict, override: str = "") -> str:
         return override or failure_flow_mod.failure_fingerprint(
@@ -2017,12 +2178,201 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             flow, used = await loop.run_in_executor(
                 None, lambda: failure_flow_mod.humanize_flow(flow, caller))
         art = {**_artifact_base(c, "failure_flow", fp),
+               "primaryPath": flow.get("primaryPath") or [],
+               "primaryEdges": flow.get("primaryEdges") or [],
                "source": caption if used else "OpenFDE · static analysis",
                "text": "", "summary": flow.get("summary", ""),
                "nodes": flow.get("nodes") or [], "edges": flow.get("edges") or []}
         art = await _hatch_store(c, art)
         return web.json_response({"ok": True, "artifact": art,
                                   "fingerprint": fp, "reused": False})
+
+    async def post_feedback_draft(request: web.Request) -> web.Response:
+        """Draft the report-to-OpenFDE issue — the USER's senior_dev writes it
+        (their provider, their cost), fed the ACCURATE receipt for precision.
+        Two guarantees keep the tracker repo-clean anyway: a hard output
+        contract, then a deterministic scrub of every known repo string
+        (paths, basenames, test names, repo name) from the draft. The template
+        is the fallback when no provider answers.
+
+        Returns:
+            web.Response — {ok, title, body, source}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        run = body.get("run") if isinstance(body.get("run"), dict) else {}
+        hctx = body.get("hatch") if isinstance(body.get("hatch"), dict) else {}
+        run = {k: run.get(k) for k in ("status", "error", "summary", "recheck",
+                                       "scope", "source", "openfdeVersion", "writes")}
+        # Cost never reaches any display or report — strip the legacy "(cost $X)"
+        # suffix from receipts written before the runner stopped embedding it.
+        for k in ("error", "summary"):
+            if isinstance(run.get(k), str):
+                run[k] = re.sub(r"\s*\(cost \$[\d.]+\)", "", run[k])
+        run["openfdeVersion"] = run.get("openfdeVersion") or _OPENFDE_COMMIT
+        repls = issue_repro_mod.report_replacements(
+            run.get("scope") or [], hctx.get("file") or "", hctx.get("test") or "",
+            Path(str(path)).name)
+        caller, caption = _hatch_text_role("senior_dev")
+        if caller:
+            sys_prompt = (
+                "You are the Senior Dev in OpenFDE, drafting a bug report for "
+                "OPENFDE'S OWN public tracker about a failure of OpenFDE's repair-run "
+                "machinery — NOT about the user's repository. You receive the full "
+                "receipt, including private repo details, for accuracy. You MUST NOT "
+                "reproduce any repo-identifying detail: no file paths, no test names, "
+                "no code, no check output — refer to them generically ('the test leg', "
+                "'the source file', 'the failing check'). Quote OpenFDE's own contract "
+                "reason verbatim (it is OpenFDE's string). Structure: '## OpenFDE bug "
+                "report'; bullet Feature / OpenFDE "
+                "commit / Provider path; '## How it was produced (OpenFDE actions "
+                "only)' numbered steps; '## Expected'; '## Actual' with status/reason/"
+                "recheck; '## Suspected area / possible fix' naming the OpenFDE "
+                "module(s) likely responsible and a concrete fix idea. Return ONLY "
+                'JSON {"title": str, "body": str} — body is markdown.')
+            user = json.dumps({
+                "feature": "Repair hatch → Run with Senior Dev (scoped repair runner; "
+                           "pipeline: failing receipt → Show → hatch → Generate prompt "
+                           "(fingerprint-cached) → runner with editable scope + "
+                           "allow_dirty + no-commit directive → single-test recheck)",
+                "run_receipt": run,
+                "failure_context": {"file": hctx.get("file"), "line": hctx.get("line"),
+                                    "test": hctx.get("test"),
+                                    "check_output_tail": (hctx.get("failureMsg") or "")[:900]},
+            }, ensure_ascii=False)
+            try:
+                loop = asyncio.get_event_loop()
+                raw = await loop.run_in_executor(None, lambda: caller(sys_prompt, user))
+                m = re.search(r"\{.*\}", raw or "", re.S)
+                data = json.loads(m.group(0)) if m else {}
+                title = (data.get("title") or "").strip()
+                text = (data.get("body") or "").strip()
+                if title and text:
+                    title = issue_repro_mod.scrub_report(title, repls)[:200]
+                    text = ("<!-- openfde:report v=1 kind=repair-run -->\n"
+                            + issue_repro_mod.scrub_report(text, repls))
+                    return web.json_response({"ok": True, "title": title, "body": text,
+                                              "source": caption})
+            except Exception as exc:  # noqa: BLE001 — fall through to the template
+                logger.warning("report draft failed: %s", exc)
+        title, text = issue_repro_mod.deterministic_report(run, hctx)
+        text = "<!-- openfde:report v=1 kind=repair-run -->\n" + text
+        return web.json_response({"ok": True, "title": title, "body": text,
+                                  "source": "OpenFDE · template"})
+
+    async def post_feedback_issue(request: web.Request) -> web.Response:
+        """File an OpenFDE bug — on OUR tracker, never the watched repo's.
+
+        The UI shows the prefilled title/body for review; THIS endpoint only
+        fires on the user's explicit click. Repo slug comes from the OpenFDE
+        install's own git remote.
+
+        Returns:
+            web.Response — {ok, url} | {ok: False, error}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        title = (body.get("title") or "").strip()[:200]
+        text = (body.get("body") or "").strip()[:8000]
+        if not title:
+            return web.json_response({"ok": False, "error": "title required"}, status=400)
+        own_root = Path(__file__).resolve().parents[1]
+        try:
+            url = subprocess.run(["git", "-C", str(own_root), "remote", "get-url", "origin"],
+                                 capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            url = ""
+        m = re.search(r"github\.com[:/]([^/]+/[^/.]+)", url)
+        if not m:
+            return web.json_response({"ok": False,
+                                      "error": "OpenFDE install has no GitHub remote"})
+        slug = m.group(1)
+        if not shutil.which("gh"):
+            return web.json_response({"ok": False, "error": "gh CLI not installed"})
+
+        loop = asyncio.get_event_loop()
+
+        # ── Labels — the future auto-pull triages by these. Exhaustive seeds
+        # exist idempotently; the user's sr_dev classifies among EXISTING labels
+        # and may mint ONE new kebab-case label only when nothing fits (GitHub
+        # allows label creation, so the taxonomy grows with the product). ──
+        seeds = [("bug", "Something in OpenFDE misbehaves"),
+                 ("feature", "New capability request"),
+                 ("auto-report", "Raised from inside OpenFDE by the report card"),
+                 ("repair-hatch", "The failure→repair loop surfaces"),
+                 ("runner", "Senior Dev / council runners"),
+                 ("verify-gate", "Checks, receipts, fingerprints"),
+                 ("canvas", "Architecture canvas and lenses"),
+                 ("openpm", "Board, intents, card lifecycle")]
+
+        def _gh(args, timeout=30):
+            return subprocess.run(["gh", *args], capture_output=True, text=True,
+                                  timeout=timeout)
+
+        def _prepare_labels():
+            try:
+                proc = _gh(["label", "list", "-R", slug, "--json",
+                            "name,description", "--limit", "200"])
+                have = {l["name"]: (l.get("description") or "")
+                        for l in (json.loads(proc.stdout or "[]")
+                                  if proc.returncode == 0 else [])}
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                have = {}
+            for n, d in seeds:
+                if n not in have:
+                    _gh(["label", "create", n, "-R", slug, "-d", d])
+                    have[n] = d
+            return have
+
+        have = await loop.run_in_executor(None, _prepare_labels)
+        chosen = ["auto-report"]
+        caller, _cap = _hatch_text_role("senior_dev")
+        if caller:
+            listing = "\n".join(f"- {n}: {d}" for n, d in sorted(have.items()))
+            sys2 = ("Classify a GitHub issue for the OpenFDE repo. Prefer EXISTING "
+                    "labels (pick 1-3). Only when none fit, propose ONE new label "
+                    "(kebab-case, short description). Return ONLY JSON "
+                    '{"labels": ["..."], "new": {"name": "...", "description": "..."} '
+                    "or null}.")
+            user2 = f"title: {title}\n\nbody:\n{text[:3000]}\n\nexisting labels:\n{listing}"
+            try:
+                raw = await loop.run_in_executor(None, lambda: caller(sys2, user2))
+                m2 = re.search(r"\{.*\}", raw or "", re.S)
+                data = json.loads(m2.group(0)) if m2 else {}
+                picked = [l for l in (data.get("labels") or [])
+                          if isinstance(l, str) and l in have][:3]
+                new = data.get("new")
+                if not picked and isinstance(new, dict) and new.get("name"):
+                    nm = re.sub(r"[^a-z0-9-]+", "-", str(new["name"]).lower()).strip("-")[:40]
+                    if nm and nm not in have:
+                        await loop.run_in_executor(None, lambda: _gh(
+                            ["label", "create", nm, "-R", slug,
+                             "-d", str(new.get("description") or "")[:90]]))
+                    if nm:
+                        picked = [nm]
+                chosen += picked or ["bug"]
+            except Exception as exc:  # noqa: BLE001 — labels degrade, never block
+                logger.warning("label classification failed: %s", exc)
+                chosen += ["bug"]
+        else:
+            chosen += ["bug", "repair-hatch"]
+        chosen = list(dict.fromkeys(chosen))
+
+        def _post():
+            args = ["issue", "create", "-R", slug, "--title", title, "--body", text]
+            for l in chosen:
+                args += ["--label", l]
+            return _gh(args, timeout=60)
+        proc = await loop.run_in_executor(None, _post)
+        if proc.returncode != 0:
+            return web.json_response({"ok": False,
+                                      "error": (proc.stderr or "gh failed").strip()[:300]})
+        return web.json_response({"ok": True, "url": (proc.stdout or "").strip(),
+                                  "labels": chosen})
 
     async def post_hatch_artifacts(request: web.Request) -> web.Response:
         """Hydrate: all saved artifacts for this failure meaning (hatch reopen).
@@ -2059,10 +2409,25 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         if not c["file"]:
             return web.json_response({"ok": False, "error": "file required"}, status=400)
         fp = _hatch_fp(c, body.get("fingerprint") or "")
+        # The agent is starting work on this episode's failure: the card leaves
+        # To Do now (not at completion), and a LANDED episode reopens — the fix
+        # of a fix joins the SAME story, never a new episode.
+        if c["episodeId"]:
+            reopened = persistence.reopen_episode(c["episodeId"])
+            if reopened is not None:
+                await manager.broadcast({"type": "episode_updated", "episode": reopened})
+            if persistence.move_tasks_for_episode(c["episodeId"], "doing",
+                                                  from_columns=("todo",)):
+                await manager.broadcast({"type": "tasks_updated"})
         prompt_text = (body.get("prompt") or "").strip() or _hatch_fallback_prompt(c)
-        task = ("Repair task — scoped to a single failing check. Edit ONLY "
-                f"{c['file']} (function {c['funcName']}, lines {c['start']}-{c['end']}); "
-                "do not touch other files. " + prompt_text)
+        # The editable scope is the FAILURE, not one file: a failing test is a
+        # two-legged contract (test ↔ product code) and the fix may live on
+        # either leg — the chain's files are both, and nothing else.
+        scope_files = failure_flow_mod.chain_files(path, c["failureMsg"], c["file"])
+        task = ("Repair task — scoped to a single failing check. Edit ONLY within "
+                f"these files: {', '.join(scope_files)} "
+                f"(the failure is at {c['file']} line {c['line']}, "
+                f"function {c['funcName']}); touch nothing else. " + prompt_text)
         settings = persistence.load_agent_settings()
         cfg = settings.get("senior_dev", {}) or {}
         prov, model = cfg.get("provider"), cfg.get("model")
@@ -2070,13 +2435,17 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         def _go():
             if prov == "claude-code-local":
                 out = run_claude_code(repo_root=path, prompt=task, allow_dirty=True,
-                                      editable=[c["file"]], protected=[], model=model)
+                                      editable=scope_files, protected=[], model=model)
                 res = out.get("result") or {}   # run_agent-shaped: {status, reportSummary, …}
-                return {"status": res.get("status") or "failed",
-                        "summary": (res.get("reportSummary") or "")[:400],
+                status = res.get("status") or "failed"
+                summary = (res.get("reportSummary") or "")[:400]
+                # A failed run must NEVER be mute — the contract's reportSummary
+                # carries the why whenever the error field is empty.
+                err = out.get("error") or (summary if status == "failed" else None)
+                return {"status": status, "summary": summary,
                         "writes": out.get("writes") or [],
                         "rejected": out.get("rejected") or [],
-                        "error": out.get("error"), "costUsd": out.get("costUsd")}
+                        "error": err, "costUsd": out.get("costUsd")}
             if prov == "codex-local":
                 out = run_codex_local_edit(repo_root=path, prompt=task, model=model)
                 return {"status": "passed" if out.get("ok") else "failed",
@@ -2090,10 +2459,45 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         loop = asyncio.get_event_loop()
         out = await loop.run_in_executor(None, _go)
         label = _HATCH_PROVIDER_LABELS.get(prov, prov or "?")
+        for k in ("error", "summary"):
+            if isinstance(out.get(k), str):
+                out[k] = re.sub(r"\s*\(cost \$[\d.]+\)", "", out[k])
         art = {**_artifact_base(c, "repair_run", fp), **out,
-               "source": f"Senior Dev · {label}",
+               "scope": scope_files, "source": f"Senior Dev · {label}",
                "text": out.get("error") or out.get("summary") or ""}
+        # Fast honest verdict for the repair ring: does the EXACT failing test
+        # pass now? Green is earned, never assumed; the full gate still owns
+        # the real receipt (Run checks).
+        if art.get("status") not in (None, "failed") and c["test"]:
+            checks = verify_mod.discover_checks(path)
+            cmd = next((ch["command"] for ch in checks
+                        if ch.get("id") == "unit-tests"), None)
+            rc = await loop.run_in_executor(
+                None, lambda: verify_mod.recheck_single_test(path, cmd, c["test"]))
+            art["recheck"] = rc["status"]
+            art["recheckTail"] = rc["tail"][-300:]
+        # Whose failure is this? A failed RUN is OURS (reportable to OpenFDE's
+        # tracker); a clean run whose recheck still fails is the repo's trail.
+        # The receipt must answer "which file? what changed?" itself — attach the
+        # uncommitted diff of everything the run wrote (vs HEAD; when the file was
+        # clean before the run this IS the run's delta, labeled honestly in the UI).
+        if art.get("writes"):
+            try:
+                proc = subprocess.run(["git", "diff", "--", *art["writes"]],
+                                      cwd=str(path), capture_output=True,
+                                      text=True, timeout=15)
+                art["diff"] = (proc.stdout or "")[:4000]
+            except (OSError, subprocess.SubprocessError):
+                pass
+        art["faultDomain"] = verify_mod.run_fault_domain(art)
+        art["openfdeVersion"] = _OPENFDE_COMMIT
         art = await _hatch_store(c, art)
+        if c["episodeId"] and art.get("status") not in (None, "failed"):
+            ep = persistence.get_episode(c["episodeId"])
+            if ep is not None and c["file"] not in (ep.get("files") or []):
+                ep["files"] = sorted({*(ep.get("files") or []), c["file"]})
+                persistence.upsert_episode(ep)
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
         return web.json_response({"ok": art.get("status") not in (None, "failed"),
                                   "run": art})
 
@@ -2382,13 +2786,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         text role (keyless — uses the user's login); 'anthropic' / OpenAI-compatible
         use the API (key + model required)."""
         prov = cfg.get("provider")
+        # Every text-role call is an OpenFDE-internal machine prompt (ask, hatch
+        # compose/explain, flow humanize) — local CLIs write transcripts, and
+        # passive capture must never read those as human work episodes. The
+        # summarizer's marker is the established skip signal; carry it here too.
+        mark = lambda user: f"{episode_llm_summary.INTERNAL_MARKER}\n\n{user}"  # noqa: E731
         # Claude Code (local CLI) text role — no key, runs on the user's login.
         if prov == "claude-code-local":
             if not claude_cli_available():
                 return None
             model = cfg.get("model") or "sonnet"
             return lambda system, user: run_claude_code_text(
-                system=system, user=user, model=model, cwd=path)
+                system=system, user=mark(user), model=model, cwd=path)
         # Codex (local CLI) text role — Day 3B. Drives `codex exec -s read-only`,
         # keyless (uses the local Codex login); never mutates the repo.
         if prov == "codex-local":
@@ -2396,7 +2805,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 return None
             model = cfg.get("model") or None
             return lambda system, user: run_codex_local_text(
-                system=system, user=user, model=model, cwd=path)
+                system=system, user=mark(user), model=model, cwd=path)
         # API providers (Anthropic / OpenAI-compatible) — require a key + model.
         if not cfg.get("apiKey") or not cfg.get("model"):
             return None
@@ -3337,6 +3746,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_put( "/api/tasks",                 put_tasks)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
+    app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)
     app.router.add_get( "/api/verify/status",         get_verify_status)
     app.router.add_post("/api/verify/run",            post_verify_run)
     app.router.add_get( "/api/source",                get_source_slice)
@@ -3368,6 +3778,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/hatch/flow",                post_hatch_flow)
     app.router.add_post("/api/hatch/run",                 post_hatch_run)
     app.router.add_post("/api/hatch/artifacts",           post_hatch_artifacts)
+    app.router.add_post("/api/feedback/github-issue",     post_feedback_issue)
+    app.router.add_post("/api/feedback/draft",            post_feedback_draft)
     app.router.add_get( "/api/concept-cards",             get_concept_cards)
     app.router.add_post("/api/concept-cards",             post_concept_card)
     app.router.add_post("/api/execution/compile-workflow", post_compile_workflow)

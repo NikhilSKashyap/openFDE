@@ -4,24 +4,6 @@ function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-// Demo tasks that reflect the real OpenFDE build log.
-// linkedBoxIds are empty at seed time — IDs are dynamic; user links boxes
-// via [+ Add] with a box selected, or by task Inspector in the right panel.
-function makeDemoTasks() {
-  return [
-    { id: makeId(), title: 'Vite + React scaffold',        description: 'Initial project setup with CSS design system and 3-panel IDE layout.',           linkedBoxIds: [], column: 'done',    verificationStatus: 'passed'  },
-    { id: makeId(), title: 'Whiteboard canvas',            description: 'SVG canvas: box creation, drag, resize, in-place editing, rubber-band select.',   linkedBoxIds: [], column: 'done',    verificationStatus: 'passed'  },
-    { id: makeId(), title: 'Connection ports + arrows',    description: 'Port hover, bezier arrow drawing, arrowhead markers, pending arrow preview.',      linkedBoxIds: [], column: 'done',    verificationStatus: 'passed'  },
-    { id: makeId(), title: 'Right panel + self-map',       description: 'Inspector, Agent, Plan modes wired to canvas selection context.',                  linkedBoxIds: [], column: 'done',    verificationStatus: 'passed'  },
-    { id: makeId(), title: 'Arrow labels + edge inspector',description: 'Click-to-select arrows, bezier midpoint label pills, UPDATE_ARROW action.',        linkedBoxIds: [], column: 'done',    verificationStatus: 'passed'  },
-    { id: makeId(), title: 'PLAN.md live preview',         description: 'generatePlanPreview — Why/What/Dataflow/Permissions/Outcome/Open Questions.',      linkedBoxIds: [], column: 'done',    verificationStatus: 'passed'  },
-    { id: makeId(), title: 'Command palette ⌘K',           description: 'Global palette: commands, box search, ranked label-first filtering.',              linkedBoxIds: [], column: 'testing', verificationStatus: 'passed'  },
-    { id: makeId(), title: 'OpenPM board',                 description: 'Real Kanban wired to canvas boxes: drag, verification gates, design events.',      linkedBoxIds: [], column: 'doing',   verificationStatus: 'pending' },
-    { id: makeId(), title: 'Timeline + event log',         description: 'Design and code event playback from in-memory events.',                            linkedBoxIds: [], column: 'todo',    verificationStatus: 'pending' },
-    { id: makeId(), title: 'Backend CLI',                  description: 'openfde watch <path> → aiohttp server + WebSocket + MCP server.',                  linkedBoxIds: [], column: 'todo',    verificationStatus: 'pending' },
-  ]
-}
-
 // A title that is operational/meta and should never be an OpenPM card's primary text —
 // mirrors the backend's is_bad_title semantics, kept tiny + focused. Used to (a) pick a
 // new card's title and (b) migrate older cards that captured raw commit text.
@@ -167,6 +149,10 @@ function pmReducer(state, action) {
   }
 }
 
+// Boards start EMPTY — never seeded with OpenFDE's own dev cards. (Observed live:
+// a fresh repo's board showed OpenFDE's bootstrap cards, then the debounced PUT
+// persisted them into that repo's tasks.json.) Cards come from the backend
+// (HYDRATE_TASKS), episode sync, or the user.
 export function usePMState() {
-  return useReducer(pmReducer, undefined, makeDemoTasks)
+  return useReducer(pmReducer, [])
 }

@@ -581,6 +581,13 @@ async def _link_changes(root, persistence, baselines, manager, last_change=None)
         active["files"] = new_files
         active["updatedAt"] = _now()
         persistence.upsert_episode(active)
+        # The agent started changing files — the episode's card leaves To Do.
+        try:
+            if persistence.move_tasks_for_episode(active["episodeId"], "doing",
+                                                  from_columns=("todo",)):
+                await manager.broadcast({"type": "tasks_updated"})
+        except Exception:  # noqa: BLE001 — board sync must never block capture
+            pass
         if last_change is not None:
             last_change[active["episodeId"]] = time.time()      # reset the quiet timer
         await _safe_broadcast(manager, {"type": "episode_updated", "episode": active})

@@ -176,6 +176,26 @@ class ClaudeCodeRunnerScopeTest(unittest.TestCase):
         # We must not have reverted it back to HEAD ("ORIGINAL NOTE").
         self.assertNotEqual(self._read("other/note.txt"), "ORIGINAL NOTE\n")
 
+    # 4b) OpenFDE's OWN metadata (.openfde/) churns during a run — the watcher
+    # re-assimilates and rewrites semantic_graph.json while Senior Dev works. That
+    # is not user work and never in scope, so it must NOT abort the repair with a
+    # false data-loss conflict: the in-scope write still lands, the metadata is
+    # left exactly as the watcher wrote it (never reverted).
+    def test_openfde_metadata_churn_does_not_abort(self):
+        meta = self.root / ".openfde"
+        meta.mkdir()
+        (meta / "semantic_graph.json").write_text('{"v":1}\n')      # dirty before the run
+        os.environ["FAKE_CLAUDE_WRITES"] = json.dumps(
+            [["ingest/reader.py", "REPAIRED\n"],
+             [".openfde/semantic_graph.json", '{"v":2}\n']])         # concurrent watcher rewrite
+        out = run_claude_code(
+            repo_root=self.root, prompt="repair it", allow_dirty=True,
+            editable=["ingest/reader.py"], protected=[], claude_bin=str(self.fake))
+        self.assertNotEqual(out["result"]["status"], "failed", out["result"]["reportSummary"])
+        self.assertEqual(out["writes"], ["ingest/reader.py"])        # only the real repair
+        self.assertEqual(self._read("ingest/reader.py"), "REPAIRED\n")
+        self.assertEqual(self._read(".openfde/semantic_graph.json"), '{"v":2}\n')  # untouched
+
 
     # 5) stream-json mode emits live read/write progress + still enforces scope.
     def test_stream_emits_read_and_write_progress(self):

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { conceptMeaning, fileRole, whyCheck, nextActions } from './conceptMeta'
 import { cardTitleFor as commitDisplayTitle } from '../../store/pmState'
-import { createEpisodePr, getPrReadiness, runVerify } from '../../api/backend'
+import { createEpisodePr, getPrReadiness, getVerifyStatus, runVerify } from '../../api/backend'
 
 // Each shipping blocker carries its next action — the panel must answer "so what
 // do I click?" without the user asking (user-feel defect #2).
@@ -86,6 +86,22 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
     }
   }
 
+  // The worktree spotlight carries no embedded evidence (episodes do) — read the
+  // worktree verify slot on open so prior receipts paint without a re-run.
+  // Functional update: a Run-checks result landing first must not be overwritten
+  // by this slower status read.
+  useEffect(() => {
+    if (!isWorktree) return undefined
+    let alive = true
+    ;(async () => {
+      // `latest` is `{}` until the first run — only real evidence (has a
+      // status) may paint, else the header would lose its "not run" state.
+      const r = await getVerifyStatus()
+      if (alive && r?.ok && r.latest?.status) setVerifyLocal(v => v || r.latest)
+    })()
+    return () => { alive = false }
+  }, [isWorktree])
+
   // Land as PR (manual, v1): branch + push + gh pr create with the story as the body.
   const [prLocal, setPrLocal] = useState(null)
   const [prBusy, setPrBusy] = useState(false)
@@ -107,8 +123,16 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
   // a fresh read-only check replaces it when the card opens (worktree state moves).
   // Results are keyed by episode so a stale fetch never leaks across spotlights.
   const [readyLocal, setReadyLocal] = useState(null)
-  const readiness = (spotlight.episodeId && readyLocal?.eid === spotlight.episodeId ? readyLocal.data : null)
+  const rawReadiness = (spotlight.episodeId && readyLocal?.eid === spotlight.episodeId ? readyLocal.data : null)
     || spotlight.prReadiness || null
+  // One source of truth: never render "Ready to ship" while the verify block on
+  // THIS panel is failed (guards against a stale readiness fetch outliving a new
+  // failed run). The displayed verify result wins.
+  const readiness = (verify?.status === 'failed' && rawReadiness?.status === 'ready')
+    ? { ...rawReadiness, status: 'blocked',
+        blockedBy: ['unit tests are failing — fix the check, then Run checks',
+                    ...(rawReadiness.blockedBy || [])] }
+    : rawReadiness
 
   useEffect(() => {
     if (!isEpisode || !spotlight.episodeId) return undefined
@@ -310,10 +334,11 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
           </div>
         )}
 
-        {/* Verification — the Verify Gate's receipts for this episode: each local check
-            with status + one-line summary (output tail in the tooltip). Run checks
-            re-verifies now and attaches fresh evidence to the episode. */}
-        {isEpisode && (
+        {/* Verification — the Verify Gate's receipts for this episode OR the
+            uncommitted worktree: each local check with status + one-line summary
+            (output tail in the tooltip). Run checks re-verifies now; evidence
+            attaches to the episode when there is one, else to the worktree slot. */}
+        {(isEpisode || isWorktree) && (
           <div className="concept-commits" onClick={e => e.stopPropagation()}>
             <div className="concept-commits-head" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span>
@@ -331,7 +356,9 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
               <span style={{ flex: 1 }} />
               <button
                 onClick={runChecks} disabled={verifyBusy}
-                title="Run the repo's local checks now and attach the evidence to this episode"
+                title={isEpisode
+                  ? 'Run the repo’s local checks now and attach the evidence to this episode'
+                  : 'Run the repo’s local checks now and store the evidence for these changes'}
                 style={{
                   padding: '1px 8px', borderRadius: 99, cursor: verifyBusy ? 'wait' : 'pointer',
                   fontFamily: 'inherit', fontSize: 10, color: 'var(--accent)',
@@ -390,7 +417,9 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
             {/* Shipping panel (v1.1) — the deterministic ready-for-PR verdict, with
                 its receipts (✓) or blockers (✕). Evidence + policy decide; the
                 Create button is enabled ONLY when the gate says ready. An existing
-                PR replaces the whole panel with its link. */}
+                PR replaces the whole panel with its link. Episode-only: readiness
+                is keyed to an episode; uncommitted worktree changes Land first. */}
+            {isEpisode && (
             <div style={{ margin: '6px 6px 2px', padding: '7px 9px', borderRadius: 6,
                           border: '1px solid var(--border)', background: 'var(--surface-2)' }}>
               {pr?.url ? (
@@ -476,6 +505,7 @@ export default function ConceptPanel({ spotlight, cards = [], onAsk, onSaveCard,
                 </>
               )}
             </div>
+            )}
           </div>
         )}
 

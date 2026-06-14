@@ -90,7 +90,10 @@ def _git(args: list, root: Path, timeout: int = _GIT_TIMEOUT) -> subprocess.Comp
 
 
 def _dirty_set(root: Path) -> set:
-    """Repo-relative paths that differ from HEAD or are untracked (the dirty set)."""
+    """Repo-relative paths that differ from HEAD or are untracked (the dirty set).
+
+    OpenFDE-owned metadata under ``.openfde/`` is excluded: the watcher rewrites it
+    during a run, so it must never trip the runner's scope/conflict guards."""
     out = set()
     r1 = _git(["diff", "--name-only", "HEAD"], root)
     for ln in (r1.stdout or "").splitlines():
@@ -100,7 +103,7 @@ def _dirty_set(root: Path) -> set:
     for ln in (r2.stdout or "").splitlines():
         if ln.strip():
             out.add(_norm(ln.strip()))
-    return out
+    return {p for p in out if not (p == ".openfde" or p.startswith(".openfde/"))}
 
 
 def _build_cmd(codex_bin: str, repo_root, model, out_path: str) -> list:

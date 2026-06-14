@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { getTasks, importGithubIssue } from '../../api/backend'
+import { getTasks, importGithubIssue, reproduceIssue } from '../../api/backend'
 
 const COLS = [
   { id: 'todo',    label: 'To Do' },
@@ -40,6 +40,7 @@ export default function OpenPM({
   onSpotlightCommit,
   highlightTags = null,
   onClearHighlight,
+  onFocusFile,
 }) {
   // Story concept filter: when a concept is selected, dim cards whose prompt tag
   // isn't part of that concept (non-destructive — nothing is hidden or reordered).
@@ -53,6 +54,17 @@ export default function OpenPM({
   // clusters a prompt's commits since they share its sequence); 'tag' = by prompt
   // tag oldest-first (chronological). Kanban columns + gates are unchanged.
   const [sortMode, setSortMode]       = useState('story')
+  // The Reproduce button (issue cards): triage → locate → draft → run, with
+  // honest refusals. Run-once by issue-body hash; ↻ regenerates explicitly.
+  const [reproBusyId, setReproBusyId] = useState(null)
+  async function onReproduce(task, regenerate = false) {
+    if (reproBusyId) return
+    setReproBusyId(task.id)
+    const r = await reproduceIssue(task.id, regenerate)
+    setReproBusyId(null)
+    if (r?.repro) pmDispatch({ type: 'UPDATE_TASK', id: task.id, fields: { repro: r.repro } })
+  }
+
   // GitHub issue import (durable intent v1): issue # → To Do card with intentSource.
   const [issueOpen, setIssueOpen]     = useState(false)
   const [issueVal, setIssueVal]       = useState('')
@@ -331,6 +343,9 @@ export default function OpenPM({
                     onCommitClick={onSpotlightCommit ? (e, sha) => { e.stopPropagation(); onSpotlightCommit(sha) } : null}
                     dimmed={!!(filterTags && !filterTags.has(task.episodeTag))}
                     onVerify={status => pmDispatch({ type: 'UPDATE_TASK', id: task.id, fields: { verificationStatus: status } })}
+                    reproBusy={task.id === reproBusyId}
+                    onReproduce={onReproduce}
+                    onFocusFile={onFocusFile}
                   />
                 ))}
 
@@ -367,8 +382,93 @@ export default function OpenPM({
   )
 }
 
+// ── Reproduce strip — issue card → honest verdict chip ────────────────
+// reproduced = red (a real failing test now exists); everything else is a
+// refusal with its reason: feature requests have nothing to reproduce, vague
+// reports list what's missing, stale issues report not-reproduced (reverted).
+const REPRO_VIEW = {
+  reproduced:        { color: 'var(--violation)', bg: 'rgba(227,51,51,0.10)', br: 'rgba(227,51,51,0.4)' },
+  not_a_bug:         { color: 'var(--text-muted)', bg: 'rgba(255,255,255,0.04)', br: 'var(--border)' },
+  insufficient:      { color: 'var(--active)', bg: 'rgba(255,179,71,0.10)', br: 'rgba(255,179,71,0.35)' },
+  not_reproduced:    { color: 'var(--active)', bg: 'rgba(255,179,71,0.10)', br: 'rgba(255,179,71,0.35)' },
+  no_agent:          { color: 'var(--active)', bg: 'rgba(255,179,71,0.10)', br: 'rgba(255,179,71,0.35)' },
+  unsupported_runner:{ color: 'var(--active)', bg: 'rgba(255,179,71,0.10)', br: 'rgba(255,179,71,0.35)' },
+  draft_failed:      { color: 'var(--active)', bg: 'rgba(255,179,71,0.10)', br: 'rgba(255,179,71,0.35)' },
+  run_error:         { color: 'var(--active)', bg: 'rgba(255,179,71,0.10)', br: 'rgba(255,179,71,0.35)' },
+}
+const REPRO_LABEL = {
+  reproduced: r => `reproduced ✕ — ${r.testName || 'failing test written'}`,
+  not_a_bug: () => 'not a bug — nothing to reproduce',
+  insufficient: () => 'can’t reproduce from issue text',
+  not_reproduced: () => 'did not reproduce on main',
+  no_agent: () => 'needs an agent (Agents → Senior Dev)',
+  unsupported_runner: () => 'needs a pytest check (v1)',
+  draft_failed: () => 'could not draft a valid test',
+  run_error: () => 'repro run errored',
+}
+
+function ReproStrip({ task, busy, onReproduce, onFocusFile }) {
+  const r = task.repro
+  if (!r) {
+    return (
+      <div style={{ marginBottom: 4 }}>
+        <button
+          onClick={e => { e.stopPropagation(); onReproduce(task) }}
+          disabled={busy}
+          title="Read the issue, verify it against the code, draft ONE failing test, and run it — refuses honestly when there's nothing to reproduce"
+          style={{
+            fontSize: 9.5, fontWeight: 700, fontFamily: 'inherit', cursor: busy ? 'wait' : 'pointer',
+            color: 'var(--accent-orange)', background: 'var(--accent-orange-soft)',
+            border: '1px solid var(--accent-orange-border)', borderRadius: 99, padding: '1px 8px',
+          }}
+        >
+          {busy ? 'reproducing…' : '⌖ Reproduce'}
+        </button>
+      </div>
+    )
+  }
+  const v = REPRO_VIEW[r.verdict] || REPRO_VIEW.run_error
+  const label = (REPRO_LABEL[r.verdict] || REPRO_LABEL.run_error)(r)
+  const tip = (r.summary || '')
+    + (r.missing?.length ? `\nmissing: ${r.missing.join('; ')}` : '')
+    + (r.testFile ? `\ntest: ${r.testFile}::${r.testName}` : '')
+    + (r.source ? `\n${r.source}` : '')
+  return (
+    <div title={tip} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+      <span style={{
+        fontSize: 9, fontWeight: 700, color: v.color, background: v.bg,
+        border: `1px solid ${v.br}`, borderRadius: 5, padding: '0 5px',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180,
+      }}>{label}</span>
+      <button
+        onClick={e => { e.stopPropagation(); onReproduce(task, true) }}
+        disabled={busy}
+        title="Regenerate — re-triage the live issue text and try again"
+        style={{
+          fontSize: 9, fontFamily: 'inherit', cursor: busy ? 'wait' : 'pointer',
+          color: 'var(--text-muted)', background: 'transparent',
+          border: '1px solid var(--border)', borderRadius: 5, padding: '0 4px',
+        }}
+      >{busy ? '…' : '↻'}</button>
+      {(r.links || []).slice(0, 2).map(f => (
+        <button
+          key={f}
+          onClick={e => { e.stopPropagation(); onFocusFile?.(f) }}
+          title={`open ${f} on the canvas — where this issue lives`}
+          style={{
+            fontSize: 9, fontFamily: 'ui-monospace, monospace', cursor: 'pointer',
+            color: 'var(--accent-orange)', background: 'transparent',
+            border: '1px solid var(--accent-orange-border)', borderRadius: 5, padding: '0 4px',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110,
+          }}
+        >⌖ {f.split('/').pop()}</button>
+      ))}
+    </div>
+  )
+}
+
 // ── TaskCard ──────────────────────────────────────────────────────────
-function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelect, onDragStart, onDragEnd, onChipClick, onCommitClick, onVerify }) {
+function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelect, onDragStart, onDragEnd, onChipClick, onCommitClick, onVerify, reproBusy, onReproduce, onFocusFile }) {
   const vc = veriBadge[task.verificationStatus] || veriBadge.pending
   const sha = task.shortSha || (task.commitSha ? task.commitSha.slice(0, 7) : '')
 
@@ -420,6 +520,10 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
             }}>{l}</span>
           ))}
         </div>
+      )}
+
+      {task.intentSource?.provider === 'github' && onReproduce && (
+        <ReproStrip task={task} busy={reproBusy} onReproduce={onReproduce} onFocusFile={onFocusFile} />
       )}
 
       {/* Prompt tag — the chapter this card belongs to (e.g. "P12 · Polish prompt

@@ -102,6 +102,33 @@ http://127.0.0.1:7420
   styles plus arrows. The **Arrow** tool inherits the source box's style; the
   **Solid arrow** tool always draws solid.
 
+## Fix a real issue, end to end
+
+OpenFDE 0.5 closes the forward-deployed loop on **any repo it watches** — import a
+GitHub issue and take it all the way to a reviewable PR, with proof at every step:
+
+1. **Import the issue** (OpenPM → paste an issue number). It becomes a To-Do card with
+   the issue as its durable intent.
+2. **Reproduce.** OpenFDE triages the issue, locates the code it names, **drafts a
+   failing test that proves the bug, and runs it** — keeping the test only if it
+   actually reproduces (a stale or already-fixed issue reverts the test and says so).
+   On a repo with no test setup it pins a pytest check (`.openfde/verify.json`) and
+   creates the test, so a test-less repo is no longer a dead end.
+3. **Show the failure flow.** The canvas dims to a single causal path — *test → the
+   function that failed* — ringing the failing function red. Left-click a node to focus
+   its arrows; **right-click → open it in an editor** (the failing function and the test
+   side by side, the relevant line highlighted).
+4. **Fix it in place.** Edit in the hatch and ⌘S, or run the Senior Dev. The change
+   renders **inline in the editor for the file it touched** — review it, then re-run
+   checks.
+5. **Verify → Land / PR.** Checks go green, the OpenPM card flips to passed, and the
+   episode becomes landable. Land commits **only the fix + its test** — OpenFDE keeps
+   its own metadata out of your tree (excluded via `.git/info/exclude`, never your
+   `.gitignore`). Readiness is honest: no green check, no "ready for PR."
+
+Proven live on foreign Python repos. The loop is Python/pytest today; multi-language
+(JS/TS, Go, Rust) and big-repo support are the next milestone — see `ROADMAP.md`.
+
 ## Running the Council
 
 Two settings, both from the command palette (`⌘K`):

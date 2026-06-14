@@ -21,9 +21,13 @@ export default function Whiteboard({
   onExpandModule,
   flowMode = 'story',
   failFocus = null,
+  onFocusFile,
   flowLens = null,
+  repairPhase = null,
   onExitFlowLens,
   onRegenFlowLens,
+  onOpenEditor = null,
+  openFlowFns = null,
   story = null,
   runNodeStates,
   runEdgeStates,
@@ -83,6 +87,7 @@ export default function Whiteboard({
         setSelectedTaskId={setSelectedTaskId}
         onTaskEvent={onTaskEvent}
         onSpotlightCommit={onSpotlightCommit}
+        onFocusFile={onFocusFile}
         highlightTags={highlightTags}
         onClearHighlight={onSelectConcept ? () => onSelectConcept(null) : null}
       />
@@ -140,8 +145,11 @@ export default function Whiteboard({
           story={story}
           failFocus={failFocus}
           flowLens={flowLens}
+          repairPhase={repairPhase}
           onExitFlowLens={onExitFlowLens}
           onRegenFlowLens={onRegenFlowLens}
+          onOpenEditor={onOpenEditor}
+          openFlowFns={openFlowFns}
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
           watchBoxIds={watchBoxIds}

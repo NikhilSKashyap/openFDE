@@ -8,6 +8,7 @@ import { DEFAULT_W, DEFAULT_H } from '../../store/canvasState'
 import { computeArchLayout, computeFlowArrows } from './archLayout'
 import { computeArchLayoutElk } from './elkArchLayout'
 import { computeStoryLayout } from './storyLayout'
+import { pickPrimaryFn } from '../../lib/flowResolve'
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s || ''))
@@ -76,8 +77,11 @@ export default function WhiteboardCanvas({
   flowMode = 'focused', story = null,
   failFocus = null,   // {fnId, fileId} — red-ring + auto-scroll to the failing function
   flowLens = null,    // {artifact:{summary,nodes,edges,source}, busy} — failure-flow lens
+  repairPhase = null, // 'failing' | 'fixing' | 'fixed' — the focused function's ring state
   onExitFlowLens,
   onRegenFlowLens,
+  onOpenEditor = null,  // (node{file,function,line,role}) → RIGHT-CLICK "Open in editor"
+  openFlowFns = null,   // Set of `file::baseName` currently open in an editor → 'selected' lens nodes
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
   watchBoxIds = null,
@@ -94,9 +98,11 @@ export default function WhiteboardCanvas({
   const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
   const [contextMenu, setContextMenu] = useState(null)
+  const [lensFocusId, setLensFocusId] = useState(null)  // left-clicked lens node → focus its arrows
   const [editOverlay, setEditOverlay] = useState(null)
   const [pendingArrow, setPendingArrow] = useState(null)
   const [scale, setScale] = useState(1)
+  const failScrollRef = useRef(null)   // one auto-scroll per focused failure
   const [hoverFn, setHoverFn] = useState(null)
 
   const { boxes, arrows, selectedIds, selectedArrowIds, editingBoxId, editingField } = state
@@ -106,18 +112,13 @@ export default function WhiteboardCanvas({
   // layout — important since hover updates happen on pointer move.
   const manualExpanded = expandedIds instanceof Set ? expandedIds : EMPTY_SET
 
-  // Semantic zoom — ALTITUDE IS THE FILTER. The zoom level decides the deepest
-  // granularity that may render: far out = modules only, mid = files, close =
-  // functions. Manual expansion survives in state but is clamped by altitude,
-  // so "expand all" at world view can never produce the spaghetti screenshot.
-  const altitude = scale < 0.5 ? 0 : scale < 1.0 ? 1 : 2
-  const expanded = useMemo(() => {
-    if (altitude >= 2) return manualExpanded
-    if (altitude === 0) return EMPTY_SET
-    const keep = new Set()
-    for (const id of manualExpanded) if (!id.startsWith('box:file:')) keep.add(id)
-    return keep
-  }, [manualExpanded, altitude])
+  // No semantic-zoom hiding: if a module/file is expanded, its children render at
+  // ANY zoom. Structure is never hidden by altitude — we solve focus by
+  // INTERACTION (left-click focuses a function's arrows), not by hiding boxes. So
+  // `Show →` always shows the failed function's ring, even at 50-70% zoom. It's OK
+  // if a fully-expanded repo looks busy; that's the honest structure.
+  const altitude = 2
+  const expanded = manualExpanded
   // Dagre lays out files/functions synchronously — this is the instant first
   // paint and the fallback if ELK hasn't resolved yet or fails. It is NOT shown
   // once ELK is ready; it only seeds the canvas so there's never a blank frame.
@@ -498,7 +499,7 @@ export default function WhiteboardCanvas({
     }
 
     if (activeTool === 'select') {
-      if (!e.shiftKey) { dispatch({ type: 'CLEAR_SELECTION' }); onSelectArchEntity?.(null, null) }
+      if (!e.shiftKey) { dispatch({ type: 'CLEAR_SELECTION' }); onSelectArchEntity?.(null, null); setLensFocusId(null) }
       interaction.current = { mode: 'rubber-band', startX: pos.x, startY: pos.y, additive: e.shiftKey, pointerId: e.pointerId }
       svgRef.current.setPointerCapture(e.pointerId)
       e.preventDefault()
@@ -631,6 +632,13 @@ export default function WhiteboardCanvas({
 
   function handleContextMenu(e) {
     e.preventDefault()
+    // Right-click a FUNCTION node → open it in an editor directly (no extra menu).
+    // Functions use data-node-id, not data-box-id; lens rings handle their own.
+    const fnEl = e.target.closest?.('[data-node-kind="function"]')
+    if (fnEl && onOpenEditor) {
+      const fn = layoutRef.current.fnById?.[fnEl.dataset.nodeId]?.fn
+      if (fn) { setContextMenu(null); onOpenEditor({ file: fn.path, function: fn.name, line: fn.line }); return }
+    }
     const boxId = e.target.dataset?.boxId || e.target.closest?.('[data-box-id]')?.dataset.boxId
     if (!boxId) return
     const ids = selectedIdsRef.current
@@ -665,7 +673,11 @@ export default function WhiteboardCanvas({
   // ── Watch Any Agent: calm ambient ring on each box an external editor just
   //    touched (file_activity). Keyed by box id; geometry straight from nodes. ──
   const watchRings = useMemo(() => {
-    const ids = watchBoxIds ? Object.keys(watchBoxIds) : []
+    // While the repair ring owns a function's story, the generic file-level
+    // edit glow for THAT file is suppressed — the edit is happening inside the
+    // function, and the phase ring (red→orange→green) tells it truthfully.
+    const ids = (watchBoxIds ? Object.keys(watchBoxIds) : [])
+      .filter(id => !(failFocus && (id === failFocus.fileId || id === failFocus.fnId)))
     if (!ids.length || !nodes.length) return []
     // watchBoxIds: fileNodeId (box:file:<path>) -> 'active'|'trail'. computeRunRings
     // resolves each to the lowest VISIBLE node — the file box when its module is
@@ -676,7 +688,7 @@ export default function WhiteboardCanvas({
       states[id] = tier === 'trail' ? 'wtrail' : 'wactive'
     }
     return computeRunRings(states, nodes, layout)
-  }, [watchBoxIds, nodes, layout])
+  }, [watchBoxIds, nodes, layout, failFocus])
   const watching = !!watchBoxIds
 
   // ── Live follow: pan the camera to center the file an agent is actively editing
@@ -709,14 +721,93 @@ export default function WhiteboardCanvas({
   // Show →: smooth-scroll the failing function into view once its geometry
   // exists (expansion + ELK settle re-run this via the layout dep).
   useEffect(() => {
-    if (!failFocus) return
+    if (!failFocus) { failScrollRef.current = null; return }
+    // Scroll ONCE per focused failure — re-running on every layout change made
+    // boxes snap back mid-drag while the hatch was open.
+    const key = failFocus.fnId || failFocus.fileId
+    if (failScrollRef.current === key) return
     const g = layout.fnById?.[failFocus.fnId] || layout.fileById?.[failFocus.fileId]
     const el = scrollRef.current
     if (!g || !el) return
+    failScrollRef.current = key
     el.scrollTo({ left: Math.max(0, (g.x + g.w / 2) * scale - el.clientWidth * 0.38),
                   top: Math.max(0, (g.y + g.h / 2) * scale - el.clientHeight * 0.5),
                   behavior: 'smooth' })
   }, [failFocus, scale, layout])
+
+  // Resolve a primaryPath node to its on-canvas FUNCTION box — line+name aware
+  // (pickPrimaryFn), then the rendered geometry from the layout. Shared by the
+  // lens render and the viewport-fit effect so they always agree.
+  const flowFnBox = useCallback((n) => {
+    if (!n || !n.file) return null
+    if (n.function) {
+      const base = String(n.function).split('.').pop()
+      const direct = layout.fnById?.[`box:function:${n.file}:${n.function}`]
+          || layout.fnById?.[`box:function:${n.file}:${base}`]
+      if (direct) return direct
+    }
+    const pick = pickPrimaryFn(archGraph?.functions, n)
+    return pick ? layout.fnById?.[`box:function:${n.file}:${pick.name}`] : null
+  }, [layout, archGraph])
+
+  // ── Failure-flow VIEWPORT FIT. Two-phase so the scroll lands after the scale
+  //    settles. Phase 1 (lens active + path function boxes exist): if BOTH path
+  //    endpoints fit in the free area at a legible scale (≥ 0.45) frame the whole
+  //    path; otherwise the functions are too far apart on canvas to show legibly
+  //    together, so frame the FAILURE function (the aha) at a readable scale with
+  //    the incoming arrow/source reading in from the left. Phase 2 scrolls once
+  //    `scale` matches. Once per failure fingerprint; left-biased for the hatch. ──
+  const FLOW_FIT_FOCUS = 0.7
+  const flowFitRef = useRef(null)
+  const pendingFitRef = useRef(null)       // {scale, cx, cy, anchorX}
+  useEffect(() => {
+    if (!flowLens?.artifact) { flowFitRef.current = null; pendingFitRef.current = null; return }
+    const art = flowLens.artifact
+    const fp = art.fingerprint || 'lens'
+    if (flowFitRef.current === fp) return
+    const ppath = art.primaryPath || []
+    const failNode = ppath.find(n => n.role === 'failure') || ppath[ppath.length - 1]
+    const failBox = failNode && flowFnBox(failNode)
+    const el = scrollRef.current
+    if (!failBox || !el) return            // wait for expansion + layout to settle
+    flowFitRef.current = fp
+    const rects = ppath.map(flowFnBox).filter(Boolean)
+    const minX = Math.min(...rects.map(r => r.x)), maxX = Math.max(...rects.map(r => r.x + r.w))
+    const minY = Math.min(...rects.map(r => r.y)), maxY = Math.max(...rects.map(r => r.y + r.h))
+    const usableW = Math.max(360, el.clientWidth - 440)   // keep the right clear for the hatch
+    const bothFit = clamp(Math.min(usableW / ((maxX - minX) + 240),
+                                   el.clientHeight / ((maxY - minY) + 240)), 0.2, 1.1)
+    let scl, cx, cy, anchorX
+    if (rects.length >= 2 && bothFit >= 0.45) {
+      // Both functions fit legibly → frame the whole path, centred in the free area.
+      scl = bothFit; cx = (minX + maxX) / 2; cy = (minY + maxY) / 2; anchorX = usableW / 2
+    } else {
+      // Too far apart → centre the FAILURE function; the labelled arrow + source
+      // read in from the left (anchor the fail box at ~58% of the free area).
+      scl = FLOW_FIT_FOCUS
+      cx = failBox.x + failBox.w / 2; cy = failBox.y + failBox.h / 2; anchorX = usableW * 0.58
+    }
+    pendingFitRef.current = { scale: scl, cx, cy, anchorX }
+    if (Math.abs(scale - scl) < 0.001) {
+      const p = pendingFitRef.current; pendingFitRef.current = null
+      el.scrollTo({ left: Math.max(0, p.cx * scl - p.anchorX),
+                    top: Math.max(0, p.cy * scl - el.clientHeight / 2), behavior: 'smooth' })
+    } else {
+      setScale(scl)
+    }
+  }, [flowLens, layout, archGraph, flowFnBox, scale])
+
+  // Phase 2: scale settled to the pending fit — the scroll math is now exact.
+  useEffect(() => {
+    const p = pendingFitRef.current
+    const el = scrollRef.current
+    if (!p || !el || Math.abs(scale - p.scale) > 0.001) return
+    pendingFitRef.current = null
+    requestAnimationFrame(() => {
+      el.scrollTo({ left: Math.max(0, p.cx * p.scale - p.anchorX),
+                    top: Math.max(0, p.cy * p.scale - el.clientHeight / 2), behavior: 'smooth' })
+    })
+  }, [scale])
 
   // ── Spotlight geometry: which visible boxes are lit (hold the concept / were
   //    touched by the commit) and which are amber (a tethered concept the commit
@@ -764,7 +855,7 @@ export default function WhiteboardCanvas({
       )}
       {flowLens?.artifact && (
         <div className="flow-lens-strip">
-          <span className="flow-lens-strip-title">Failure flow</span>
+          <span className="flow-lens-strip-title">Focus</span>
           <span className="flow-lens-strip-summary">{flowLens.artifact.summary}</span>
           <span className="flow-lens-strip-src">{flowLens.artifact.source}</span>
           {onRegenFlowLens && (
@@ -812,8 +903,10 @@ export default function WhiteboardCanvas({
           <rect x="0" y="0" width={viewBounds.w} height={viewBounds.h} fill="url(#dot-grid)" />
 
           {/* Ambient dependency trunks — UNDER the boxes: weighted module↔module
-              aggregates (and dimmed leftovers). The signal layer, not the noise. */}
-          {!storyStage && (
+              aggregates (and dimmed leftovers). The signal layer, not the noise.
+              While the failure-flow lens is active it owns the visual field —
+              every ambient arrow is hidden so the ONLY arrow is the lens edge. */}
+          {!storyStage && !flowLens?.artifact && (
             <g pointerEvents="none">
               {flowsUnder.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
             </g>
@@ -828,8 +921,9 @@ export default function WhiteboardCanvas({
               {/* Arrows behind boxes (anchored to effective/expanded geometry).
                   When a module is expanded its function-level flow (purple)
                   arrows resolve precisely into the box, so the coarse module
-                  (blue) arrow touching it is a duplicate — hide it. */}
-              {arrows
+                  (blue) arrow touching it is a duplicate — hide it. Hidden
+                  entirely while the failure lens owns the field. */}
+              {!flowLens?.artifact && arrows
                 .filter(arrow => !(expanded.has(arrow.fromBox) || expanded.has(arrow.toBox)))
                 .map(arrow => (
                   <Arrow key={arrow.id} arrow={arrow} boxes={effectiveBoxes}
@@ -863,10 +957,12 @@ export default function WhiteboardCanvas({
 
               {/* Attention edges — the focused / story flows, ON TOP of boxes so
                   the selected node's 1-hop detail reads; non-interactive so they
-                  never intercept port clicks. */}
-              <g pointerEvents="none">
-                {flowsOver.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
-              </g>
+                  never intercept port clicks. Suppressed under the failure lens. */}
+              {!flowLens?.artifact && (
+                <g pointerEvents="none">
+                  {flowsOver.map(flow => <FlowArrow key={flow.id} flow={flow} />)}
+                </g>
+              )}
 
               {/* Story-mode step badges (Batch 5) — numbered, non-interactive. */}
               <g pointerEvents="none">
@@ -888,79 +984,148 @@ export default function WhiteboardCanvas({
               rx={14} fill="none" pointerEvents="none" />
           ))}
 
-          {/* Failure-flow LENS: how the failure got there. Dim everything; show
-              ONLY the failure path — involved boxes stay lit (mask holes), flow
-              nodes without a box render as pills beside the failing function,
-              and the labeled arrows are the deterministic evidence. The red
-              failing-function ring renders after this layer, so it stays on top. */}
+          {/* Failure-flow LENS — a causal SENTENCE, not a graph: the distilled
+              primaryPath (funcA → funcB → ✕ failure) drawn function-to-function.
+              Only the path FUNCTIONS get rings (red = failure, orange = path);
+              their containing FILE boxes stay bright (mask holes) but unringed —
+              no giant file-level red ring. A name chip appears beside a node
+              ONLY when its function box can't be rendered. Everything else dims. */}
           {flowLens?.artifact && (() => {
             const art = flowLens.artifact
-            const fnodes = art.nodes || []
-            const fedges = art.edges || []
-            const anchorBox = layout.fnById?.[failFocus?.fnId] || layout.fileById?.[failFocus?.fileId]
-            if (!fnodes.length) return null
-            const placed = {}
-            let synth = 0
-            const baseX = anchorBox ? anchorBox.x + anchorBox.w + 110 : 240
-            const baseY = anchorBox ? anchorBox.y - 30 : 240
-            fnodes.forEach((n, i) => {
-              const base = String(n.id).split('.').pop()
-              let g = null
-              if (i === 0 && anchorBox) g = anchorBox          // the failing test IS the anchor
-              if (!g && n.file) g = layout.fnById?.[`box:function:${n.file}:${n.id}`]
-                || layout.fnById?.[`box:function:${n.file}:${base}`]
-              if (g) {
-                placed[n.id] = { x: g.x, y: g.y, w: g.w, h: g.h, real: true, label: n.label }
+            let ppath = art.primaryPath || []
+            let pedges = art.primaryEdges || []
+            // Legacy / degenerate artifact (no primaryPath): distill one here so
+            // the path view still works — distinct files, last node = failure.
+            if (!ppath.length && (art.nodes || []).length) {
+              const seen = new Set(); const order = []
+              for (const n of (art.nodes || [])) {
+                if (!n.file) continue
+                const k = `${n.file}::${n.label}`
+                if (seen.has(k)) continue
+                seen.add(k); order.push({ id: n.id, file: n.file, function: n.label, line: n.line })
+              }
+              order.forEach((o, j) => { o.role = j === order.length - 1 ? 'failure' : (j === 0 ? 'source' : 'step') })
+              ppath = order
+              pedges = order.slice(1).map((b, i) => ({ from: order[i].id, to: b.id, label: `calls ${b.function}` }))
+            }
+            if (!ppath.length) return null
+
+            const fnBoxFor = flowFnBox   // shared line+name resolver (pickPrimaryFn)
+            // A node is 'selected' when its function is open in an editor (hatch or
+            // a trail editor) — keyed by file::baseName to bridge bare vs qualified.
+            const isOpen = (n) => !!(openFlowFns && openFlowFns.has(`${n.file}::${String(n.function || '').split('.').pop()}`))
+            const fileBoxFor = (n) => n.file ? layout.fileById?.[`box:file:${n.file}`] : null
+            const moduleBoxFor = (file) => file ? nodes.find(m => {
+              const lp = m.box?.linkedPath
+              return lp && (file === lp || file.startsWith(`${lp}/`))
+            }) : null
+
+            const placed = {}              // path node id → { rect, role, ring|chip, label, sub }
+            const fileHoles = {}           // path file/module boxes → bright (mask hole), NO ring
+            const chipStack = {}
+            ppath.forEach((n) => {
+              const fnBox = fnBoxFor(n)
+              const fileBox = fileBoxFor(n)
+              // Keep the file bright whenever it's on canvas; only fall through to
+              // the MODULE box when the file box itself isn't rendered.
+              const modBox = !fileBox ? moduleBoxFor(n.file) : null
+              if (fileBox) fileHoles[fileBox.id || `${fileBox.x}:${fileBox.y}`] = fileBox
+              else if (modBox) fileHoles[modBox.id || `${modBox.x}:${modBox.y}`] = modBox
+              if (fnBox) {
+                // The function box IS the node — ring it directly (red/orange).
+                placed[n.id] = { rect: { x: fnBox.x, y: fnBox.y, w: fnBox.w, h: fnBox.h },
+                                 role: n.role, label: n.function, file: n.file, line: n.line, selected: isOpen(n), ring: true }
               } else {
-                placed[n.id] = { x: baseX, y: baseY + synth * 74, w: 196, h: 40, real: false,
-                                 label: n.label, sub: n.file ? `${n.file}${n.line ? ':' + n.line : ''}` : (n.line ? `line ${n.line}` : '') }
-                synth += 1
+                // Function box not laid out → fallback chip beside its file/module
+                // header (the ONLY time a detached label appears).
+                const host = fileBox || modBox
+                if (host) {
+                  fileHoles[host.id || `${host.x}:${host.y}`] = host
+                  const k = host.id || `${host.x}:${host.y}`
+                  const stack = chipStack[k] || 0; chipStack[k] = stack + 1
+                  const cw = Math.max(120, n.function.length * 7.2 + 24)
+                  placed[n.id] = { rect: { x: host.x + 4 + stack * 18, y: host.y - 42 - stack * 40, w: cw, h: 34 },
+                                   role: n.role, label: n.function, file: n.file, line: n.line, selected: isOpen(n), chip: true,
+                                   sub: `${n.file || ''}${n.line ? ':' + n.line : ''}` }
+                } else {
+                  const anchor = layout.fnById?.[failFocus?.fnId] || layout.fileById?.[failFocus?.fileId]
+                  const bx = anchor ? anchor.x + anchor.w + 110 : 240
+                  const by = anchor ? anchor.y - 30 : 240
+                  const idx = Object.keys(placed).length
+                  placed[n.id] = { rect: { x: bx, y: by + idx * 74, w: 196, h: 44 },
+                                   role: n.role, label: n.function, file: n.file, line: n.line, selected: isOpen(n), chip: true,
+                                   sub: `${n.file || ''}${n.line ? ':' + n.line : ''}` }
+                }
               }
             })
-            const mid = (g) => ({ cx: g.x + g.w / 2, cy: g.y + g.h / 2 })
+            const ringCls = (p) => `flow-lens-lit${p.role === 'failure' ? ' fail' : ''}${p.selected ? ' selected' : ''}`
+            const pillCls = (p) => `flow-lens-pill${p.role === 'failure' ? ' fail' : ''}${p.selected ? ' selected' : ''}`
+            const mid = (r) => ({ cx: r.x + r.w / 2, cy: r.y + r.h / 2 })
+            const holes = [...Object.values(fileHoles), ...Object.values(placed).map(p => p.rect)]
             return (
               <g className="flow-lens-layer" pointerEvents="none">
                 <defs>
                   <mask id="flow-lens-mask">
                     <rect x="0" y="0" width={viewBounds.w} height={viewBounds.h} fill="white" />
-                    {Object.values(placed).filter(g => g.real).map((g, i) => (
-                      <rect key={`fl-hole-${i}`} x={g.x - 10} y={g.y - 10}
-                        width={g.w + 20} height={g.h + 20} rx={16} fill="black" />
+                    {holes.map((r, i) => (
+                      <rect key={`fl-hole-${i}`} x={r.x - 10} y={r.y - 10}
+                        width={r.w + 20} height={r.h + 20} rx={16} fill="black" />
                     ))}
                   </mask>
                 </defs>
                 <rect className="flow-lens-dim" x="0" y="0" width={viewBounds.w} height={viewBounds.h}
                   fill="var(--bg)" mask="url(#flow-lens-mask)" />
-                {Object.values(placed).filter(g => g.real).map((g, i) => (
-                  <rect key={`fl-lit-${i}`} className="flow-lens-lit" x={g.x - 8} y={g.y - 8}
-                    width={g.w + 16} height={g.h + 16} rx={14} fill="none" />
+                {/* Function rings — the WHOLE ringed box IS the hit target (visible ==
+                    clickable, no invisible overlay). LEFT-click focuses this node's
+                    arrows; RIGHT-click opens its editor. Generous padding + CSS hover. */}
+                {Object.entries(placed).filter(([, p]) => p.ring).map(([id, p], i) => (
+                  <rect key={`fl-ring-${i}`} className={`${ringCls(p)}${lensFocusId === id ? ' focused' : ''}`}
+                    x={p.rect.x - 9} y={p.rect.y - 9} width={p.rect.w + 18} height={p.rect.h + 18}
+                    rx={14} fill="transparent"
+                    pointerEvents={onOpenEditor ? 'all' : 'none'}
+                    onPointerDown={ev => ev.stopPropagation()}
+                    onClick={ev => { ev.stopPropagation(); setLensFocusId(cur => cur === id ? null : id) }}
+                    onContextMenu={onOpenEditor ? (ev) => { ev.preventDefault(); ev.stopPropagation(); onOpenEditor({ file: p.file, function: p.label, line: p.line, role: p.role }) } : undefined}>
+                    <title>Right-click to open editor · left-click to focus arrows</title>
+                  </rect>
                 ))}
-                {Object.values(placed).filter(g => !g.real).map((g, i) => (
-                  <g key={`fl-pill-${i}`}>
-                    <rect className="flow-lens-pill" x={g.x} y={g.y} width={g.w} height={g.h} rx={11} />
-                    <text className="flow-lens-pill-label" x={g.x + 12} y={g.y + (g.sub ? 17 : 24)}>{g.label}</text>
-                    {g.sub && <text className="flow-lens-pill-sub" x={g.x + 12} y={g.y + 31}>{g.sub}</text>}
+                {/* Fallback chips — only when the function box can't render. The pill
+                    is the hit target (labels are pointer-transparent). Same contract:
+                    left-click focuses arrows, right-click opens the editor. */}
+                {Object.entries(placed).filter(([, p]) => p.chip).map(([id, p], i) => (
+                  <g key={`fl-chip-${i}`}>
+                    <rect className={`${pillCls(p)}${lensFocusId === id ? ' focused' : ''}`} x={p.rect.x} y={p.rect.y} width={p.rect.w} height={p.rect.h} rx={10}
+                      pointerEvents={onOpenEditor ? 'all' : 'none'}
+                      onPointerDown={ev => ev.stopPropagation()}
+                      onClick={ev => { ev.stopPropagation(); setLensFocusId(cur => cur === id ? null : id) }}
+                      onContextMenu={onOpenEditor ? (ev) => { ev.preventDefault(); ev.stopPropagation(); onOpenEditor({ file: p.file, function: p.label, line: p.line, role: p.role }) } : undefined}>
+                      <title>Right-click to open editor · left-click to focus arrows</title>
+                    </rect>
+                    <text className="flow-lens-pill-label" pointerEvents="none" x={p.rect.x + 12} y={p.rect.y + 15}>{p.role === 'failure' ? '✕ ' : ''}{p.label}</text>
+                    {p.sub && <text className="flow-lens-pill-sub" pointerEvents="none" x={p.rect.x + 12} y={p.rect.y + 28}>{p.sub}</text>}
                   </g>
                 ))}
-                {fedges.map((e, i) => {
+                {/* One clean arrow per causal step, short label near the arrow. */}
+                {pedges.map((e, i) => {
                   const a = placed[e.from], b = placed[e.to]
                   if (!a || !b) return null
-                  const am = mid(a), bm = mid(b)
-                  const x1 = am.cx < bm.cx ? a.x + a.w + 6 : a.x - 6
+                  // Left-click focus: only arrows touching the focused node stay lit.
+                  const dim = lensFocusId && e.from !== lensFocusId && e.to !== lensFocusId
+                  const am = mid(a.rect), bm = mid(b.rect)
+                  const x1 = am.cx < bm.cx ? a.rect.x + a.rect.w + 6 : a.rect.x - 6
                   const y1 = am.cy
-                  const x2 = am.cx < bm.cx ? b.x - 8 : b.x + b.w + 8
+                  const x2 = am.cx < bm.cx ? b.rect.x - 8 : b.rect.x + b.rect.w + 8
                   const y2 = bm.cy
                   const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - 14
-                  const failing = /fails/i.test(e.label || '')
-                  const lw = Math.min(220, Math.max(40, (e.label || '').length * 5.4))
+                  const lw = Math.min(180, Math.max(36, (e.label || '').length * 5.6))
                   return (
-                    <g key={`fl-edge-${i}`}>
-                      <path className={`flow-lens-edge${failing ? ' failing' : ''}${e.confidence === 'low' ? ' low' : ''}`}
+                    <g key={`fl-edge-${i}`} opacity={dim ? 0.16 : 1}>
+                      <path className="flow-lens-edge"
                         d={`M ${x1} ${y1} Q ${mx} ${my - 12} ${x2} ${y2}`}
                         fill="none" markerEnd="url(#arrowhead-flow)" />
                       <rect className="flow-lens-label-bg" x={mx - lw / 2} y={my - 22} width={lw} height={16} rx={8} />
-                      <text className={`flow-lens-label${failing ? ' failing' : ''}`} x={mx} y={my - 10} textAnchor="middle">
-                        {(e.label || '').slice(0, 40)}
+                      <text className="flow-lens-label" x={mx} y={my - 10} textAnchor="middle">
+                        {(e.label || '').slice(0, 28)}
                       </text>
                     </g>
                   )
@@ -969,11 +1134,19 @@ export default function WhiteboardCanvas({
             )
           })()}
 
-          {/* Repair-hatch focus: the FAILING function wears a red boundary. */}
+          {/* Repair-hatch focus: the FAILING function wears a red boundary — on
+              its FUNCTION box only (never a giant file ring). While the lens is
+              open it owns the failing color, so the idle 'failing' ring is
+              suppressed; the repair phases (orange fixing / green fixed) still show. */}
           {failFocus && (() => {
-            const g = layout.fnById?.[failFocus.fnId] || layout.fileById?.[failFocus.fileId]
+            const g = layout.fnById?.[failFocus.fnId]
             if (!g) return null
-            return <rect className="watch-ring active fail-focus" x={g.x - 6} y={g.y - 6}
+            const phase = repairPhase || 'failing'
+            if (flowLens?.artifact && phase === 'failing') return null
+            const cls = phase === 'fixed' ? 'watch-ring repair-fixed'
+              : phase === 'fixing' ? 'watch-ring active repair-fixing'
+              : 'watch-ring active fail-focus'
+            return <rect className={cls} x={g.x - 6} y={g.y - 6}
               width={g.w + 12} height={g.h + 12} rx={13} fill="none" pointerEvents="none" />
           })()}
 
@@ -988,7 +1161,7 @@ export default function WhiteboardCanvas({
           {/* Canvas spotlight (Step 37a Slice 2/3): dim everything except the boxes
               that hold the concept / were touched by the commit; thread the lit
               boxes to a labeled centroid; amber-ring the partially-missed ones. */}
-          {spot && (spot.lit.length > 0 || spot.amber.length > 0) && (
+          {spot && !flowLens?.artifact && (spot.lit.length > 0 || spot.amber.length > 0) && (
             <g className="tether-layer" pointerEvents="none">
               <defs>
                 <mask id="tether-mask">
@@ -1126,6 +1299,7 @@ export default function WhiteboardCanvas({
           onDelete={ids => dispatch({ type: 'DELETE_BOXES', ids })}
           onExpandModule={onExpandModule} />
       )}
+
     </div>
   )
 }

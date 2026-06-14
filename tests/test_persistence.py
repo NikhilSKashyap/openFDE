@@ -46,6 +46,17 @@ class AtomicWriteTest(unittest.TestCase):
                 + list((Path(d) / ".openfde").glob(".*.tmp"))
             self.assertEqual(leftovers, [])
 
+    def test_fresh_persistence_loads_empty_task_list(self):
+        # Regression: a fresh repo's OpenPM board must start EMPTY. (Observed live:
+        # an instance watching the aisuite clone showed OpenFDE's own bootstrap dev
+        # cards — the frontend seeded demo tasks and the debounced PUT persisted
+        # them into the target repo's tasks.json.) Backend contract: no tasks.json
+        # → load_tasks() == [] — never a seed, and loading must not create the file.
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d) / ".openfde")
+            self.assertEqual(p.load_tasks(), [])
+            self.assertFalse(p.tasks_path.exists())
+
     def test_corrupt_store_reads_as_default(self):
         # _read_json degrades gracefully (this is what kept the server alive during
         # the live incident) — the repair/recovery happens outside, never a crash.

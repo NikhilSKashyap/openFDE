@@ -203,6 +203,12 @@ def land_episode(root, persistence, episode: dict, *, auto: bool, allow_llm: boo
     episode["commitShas"] = list(dict.fromkeys((episode.get("commitShas") or []) + new_shas))
     episode["files"] = sorted(set(files + committed_files))
     episode["status"] = LANDED
+    # The issue card (if any) follows its episode: landed work is Done.
+    try:
+        persistence.move_tasks_for_episode(episode.get("episodeId"), "done", "passed")
+    except Exception:  # noqa: BLE001 — board sync must never block a land
+        logger.warning("could not move cards for landed episode %s",
+                       episode.get("episodeId"))
     # Evidence overrides classification: an episode that lands real commits is not
     # operational chatter, whatever the LLM summarizer guessed — the mislabel hid
     # episodes from the rail and hard-blocked their PR readiness (observed live).

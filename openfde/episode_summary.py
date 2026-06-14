@@ -290,6 +290,55 @@ def repair_episode_tasks(tasks, episodes):
     return out, changed
 
 
+def reconcile_task_status(tasks, episodes):
+    """Make OpenPM cards mirror their episode's CURRENT verification — one source
+    of truth, no split-brain badges.
+
+    The episode's ``verify.status`` (and landed state) is authoritative; a card
+    linked to it must not show a stale FAILED while the episode reads passed (or
+    vice-versa). Landed episodes → Done/passed. Otherwise the card's
+    ``verificationStatus`` mirrors the episode's verify result, and a card still
+    in To Do / Doing when a result exists is promoted to Testing. Cards the user
+    already pushed to Done, and non-episode cards, are left alone.
+
+    Args:
+        tasks: list[dict] — persisted OpenPM tasks.
+        episodes: list[dict] — episodes (source of truth).
+
+    Returns:
+        bool — whether any task changed (caller persists).
+    """
+    if not isinstance(tasks, list):
+        return False
+    by_id = {e["episodeId"]: e for e in (episodes or [])
+             if isinstance(e, dict) and e.get("episodeId")}
+    changed = False
+    for t in tasks:
+        if not isinstance(t, dict) or not t.get("episodeId"):
+            continue
+        ep = by_id.get(t["episodeId"])
+        if not ep:
+            continue
+        if ep.get("status") == "landed":
+            if t.get("column") != "done" or t.get("verificationStatus") != "passed":
+                t["column"] = "done"
+                t["verificationStatus"] = "passed"
+                changed = True
+            continue
+        if t.get("column") == "done":
+            continue                      # the user shipped it — leave it
+        vs = (ep.get("verify") or {}).get("status")
+        if vs not in ("passed", "failed"):
+            continue
+        want = "passed" if vs == "passed" else "failed"
+        if t.get("verificationStatus") != want:
+            t["verificationStatus"] = want
+            if t.get("column") in ("todo", "doing"):
+                t["column"] = "testing"   # a result exists → at least Testing
+            changed = True
+    return changed
+
+
 def _scope_names(files) -> list:
     """Up to two distinct top-level dir/module scopes from changed paths."""
     names = []

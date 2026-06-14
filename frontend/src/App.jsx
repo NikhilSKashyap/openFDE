@@ -10,7 +10,8 @@ import CommandPalette from './components/CommandPalette/CommandPalette'
 import AgentSettings from './components/AgentSettings/AgentSettings'
 import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
-import FunctionPatch from './components/Whiteboard/FunctionPatch'
+import FunctionPatch, { TrailEditor } from './components/Whiteboard/FunctionPatch'
+import { pickPrimaryFn } from './lib/flowResolve'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
@@ -65,6 +66,28 @@ function mergeEvents(existing, incoming) {
     .slice(0, 200)
 }
 
+// Split a multi-file unified diff into { path: sectionText } keyed by the b/ path,
+// so each file's hunks can be routed to that file's editor.
+function splitDiffByFile(text) {
+  const out = {}
+  let cur = null, buf = []
+  const flush = () => { if (cur) out[cur] = buf.join('\n') }
+  for (const ln of (text || '').split('\n')) {
+    const m = ln.match(/^diff --git a\/.+? b\/(.+)$/)
+    if (m) { flush(); cur = m[1]; buf = [ln] }
+    else if (cur) buf.push(ln)
+  }
+  flush()
+  return out
+}
+
+// The new-file start line of a diff section's first hunk (`@@ -a,b +c,d @@` → c),
+// used to open the editor at the function the change landed in.
+function firstHunkNewLine(section) {
+  const m = (section || '').match(/^@@ -\d+(?:,\d+)? \+(\d+)/m)
+  return m ? parseInt(m[1], 10) : null
+}
+
 export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('openfde-theme') || 'dark')
   const [activeTool, setActiveTool] = useState('select')
@@ -94,7 +117,16 @@ export default function App() {
   // The repair hatch — function-scoped fix surface, summoned ONLY by a failure
   // receipt's "Show →" ({file, line, func, funcName, test, start, end} | null).
   const [hatch, setHatch] = useState(null)
+  // The repair hatch stays pinned to the FAILING function. Clicking another node
+  // in the failure trail opens it in its OWN floating editor (so test + product
+  // functions read side-by-side) — never replacing the hatch. Each entry:
+  // {id, file, funcName, start, end, line, minimized, seq}. seq = z/raise order.
+  const [flowEditors, setFlowEditors] = useState([])
+  const editorSeq = useRef(60)
+  const [hatchZ, setHatchZ] = useState(60)         // hatch window z (raised on "Open in editor")
   const [flowLens, setFlowLens] = useState(null)   // {artifact, busy} — failure-flow lens
+  const [repairPhase, setRepairPhase] = useState(null) // failing | fixing | fixed
+  const flowExpandRef = useRef('')                 // last fingerprint auto-expanded (once per failure)
   // ── Execution run / live trace (Step 17) ─────────────────────────────────
   // run: { runId, status, scopedBoxIds, scopedArrowIds, nodeStates, edgeStates,
   //        trace: {id:[events]}, failures: {id:{...}} } | null
@@ -217,12 +249,31 @@ export default function App() {
     return eps     // enriched list — onLandChanges re-spotlights the landed episode from it
   }
 
+  // Pull the SERVER's reconciled task list and adopt it as local truth. GET
+  // /api/tasks heals each card to its episode's current verification, so this is
+  // how OpenPM stops showing a stale FAILED next to a passed episode. We set the
+  // skip flag so adopting the server's list doesn't immediately echo it back via
+  // the debounced save (that would be a pointless round-trip / churn loop).
+  const refetchTasks = async () => {
+    if (document.hidden) return
+    const savedTasks = await getTasks()
+    if (Array.isArray(savedTasks) && savedTasks.length > 0) {
+      skipTasksSaveRef.current = true
+      pmDispatch({ type: 'HYDRATE_TASKS', tasks: savedTasks })
+    }
+  }
+
   // Click a prompt chip → spotlight that episode: its edited files turn AMBER on
   // the canvas (intent-level highlight, distinct from a single commit's green),
   // and the panel lists the prompt's commits + files.
   function onSpotlightEpisode(ep) {
     if (!ep) return
-    const files = ep.files || []
+    // A failed episode spotlights ONLY where it hurts: the failing file(s)
+    // from its receipts, not the whole touched set.
+    const failFiles = [...new Set(((ep.verify?.checks) || [])
+      .flatMap(ch => (ch.failures || []).map(f => f.file)).filter(Boolean))]
+    const files = (ep.verify?.status === 'failed' && failFiles.length)
+      ? failFiles : (ep.files || [])
     const title = (ep.title || (ep.prompt || ep.summary || 'Prompt').split('\n')[0].slice(0, 40)) || 'Prompt'
     setCanvasSpotlight({
       kind: 'episode', episodeId: ep.episodeId,
@@ -464,8 +515,12 @@ export default function App() {
       (s.kind === 'commit' && c.commitSha === s.sha) ||
       (c.tetherId && conceptIds.has(c.tetherId)))
   })()
-  const [leftOpen, setLeftOpen]   = useState(true)
-  const [rightOpen, setRightOpen] = useState(true)
+  // Side panels are hidden by default — the canvas is the room. Cursor at a
+  // screen edge rolls them out; Orient (right) pins itself open the moment the
+  // user starts working in it and stays until they roll it back in.
+  const [leftOpen, setLeftOpen]   = useState(false)
+  const [rightOpen, setRightOpen] = useState(false)
+  const [rightPinned, setRightPinned] = useState(false)
   const [flowMode, setFlowMode]   = useState('focused') // Story | Focused | All (Batch 5)
   const [story, setStory]         = useState(null)
   const [rightView, setRightView] = useState('work')    // 'work' (primary) | 'technical' (old tabbed panel)
@@ -680,16 +735,22 @@ export default function App() {
       // Watch Any Agent: an external editor touched a repo file — ambient glow.
       else if (msg?.type === 'file_activity') { handleFileActivity(msg.payload || {}) }
       // Prompt captured / landed: refresh the Prompt Story Rail live (a captured
-      // Claude Code prompt, a wrapper run, or a Land all push this).
-      else if (msg?.type === 'episode_updated') { refreshEpisodes() }
+      // Claude Code prompt, a wrapper run, or a Land all push this). The episode's
+      // verify/landed state is the source of truth for OpenPM, so refetch tasks
+      // too — GET /api/tasks reconciles each card to its episode (no split-brain).
+      else if (msg?.type === 'episode_updated') { refreshEpisodes(); refetchTasks() }
+      // The SERVER moved/relabelled a card (verify result, lifecycle, land) — pull
+      // the reconciled list so OpenPM never shows a stale FAILED beside a passed
+      // episode. (This used to be a no-op; the server is now a task writer too.)
+      else if (msg?.type === 'tasks_updated') { refetchTasks() }
       // A commit landed (the only commit path) — refresh the rail's nested beats,
       // the OpenPM commit cards, and the git timeline so all three stay in sync.
       else if (msg?.type === 'commit_created') {
         refreshEpisodes()
+        refetchTasks()
         getGitTimeline().then(c => { if (Array.isArray(c)) setGitCommits(c) })
       }
-      // state_updated / tasks_updated: no-op; this client's own writes are the
-      // source of truth for its local state.
+      // state_updated: no-op; this client's own canvas writes are local truth.
     })
     return () => closeWS()
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -855,6 +916,51 @@ export default function App() {
   }
   function collapseAll() { setExpandedIds(new Set()); setArchSel(null) }
 
+  // Show failure flow → enter the lens. Expand exactly the files on the distilled
+  // causal path (so their FUNCTION boxes render — the lens rings functions, not
+  // files), ONCE per failure fingerprint. Mirrors onShowFailure's archGraph
+  // fallback so the expansion lands even when the graph isn't preloaded yet.
+  function onShowFlow(art) {
+    const fp = art?.fingerprint || (hatch ? `${hatch.file}:${hatch.line}` : '')
+    const pathNodes = art?.primaryPath?.length ? art.primaryPath : (art?.nodes || [])
+    const files = [...new Set(pathNodes.map(n => n.file).filter(Boolean))]
+    const expand = (graph) => {
+      if (!files.length || flowExpandRef.current === fp) return
+      flowExpandRef.current = fp
+      setExpandedIds(prev => {
+        const next = new Set(prev)
+        for (const f of files) {
+          const meta = (graph?.files || []).find(x => x.path === f)
+          const modBox = meta ? canvasState.boxes.find(b => b.moduleId === meta.moduleId) : null
+          if (modBox) next.add(modBox.id)   // reveal the module…
+          next.add(`box:file:${f}`)         // …and the file box inside it (renders its functions)
+        }
+        return next
+      })
+    }
+    if (archGraph) expand(archGraph)
+    else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); expand(g) } })
+    setFlowLens({ artifact: art })
+  }
+
+  // Tie an issue card to the canvas: expand the file's module + the file box
+  // and go there — the issue gets a HOME in the architecture even without a repro.
+  function onFocusFile(file) {
+    const open = (graph) => {
+      const f = (graph?.files || []).find(x => x.path === file)
+      const modBox = f ? canvasState.boxes.find(b => b.moduleId === f.moduleId) : null
+      setActiveView('whiteboard')
+      setExpandedIds(prev => {
+        const next = new Set(prev)
+        if (modBox) next.add(modBox.id)
+        next.add(`box:file:${file}`)
+        return next
+      })
+    }
+    if (archGraph) open(archGraph)
+    else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); open(g) } })
+  }
+
   // "Show →" on a failed check: resolve the failing line to its FUNCTION via the
   // ArchGraph (containing function = greatest start-line ≤ failure line; range
   // ends where the next function begins), focus the canvas there (expand the
@@ -883,13 +989,117 @@ export default function App() {
         next.add(`box:file:${failure.file}`)
         return next
       })
+      setRepairPhase(null)
+      setFlowEditors([])          // a fresh hatch starts with no extra trail editors
+      setHatchZ(60)               // reset hatch window z
       setHatch({ ...failure, start, end, funcName: fn?.name || failure.func,
                  episodeId: episodeId || '', checkId: _check?.id || '',
-                 failureMsg: (_check?.summary || _check?.outputTail || '').slice(0, 800) })
+                 failureMsg: (_check?.outputTail || _check?.summary || '').slice(0, 2000) })
     }
     if (archGraph) open(archGraph)
     else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); open(g) } })
   }
+
+  // Resolve a failure-trail node {file, function, line} to its function SLICE,
+  // using the SAME line+name resolver the lens uses to place the ring
+  // (pickPrimaryFn) so the editor shows exactly the box you clicked; the span ends
+  // where the next function begins. Used to open trail editors.
+  function sliceForNode(graph, node) {
+    const fns = (graph?.functions || []).filter(f => f.path === node.file)
+      .sort((a, b) => (a.line || 0) - (b.line || 0))
+    const fn = pickPrimaryFn(graph?.functions || [], node)
+    if (!fn) {                       // no arch function → a small window around the line
+      const line = node.line || 1
+      return { file: node.file, funcName: node.function, start: Math.max(1, line - 8), end: line + 22, line }
+    }
+    const idx = fns.indexOf(fn)
+    const isLast = idx === fns.length - 1
+    const start = fn.line || 1
+    const end = isLast ? start + 30 : Math.max(node.line || start, (fns[idx + 1].line || 0) - 1)
+    return { file: node.file, funcName: fn.name, start, end, line: node.line || start }
+  }
+
+  // Open a function in its own floating editor — the explicit "Open in editor"
+  // action (RIGHT-click; never a left-click, which only focuses arrows). Works
+  // with or without a hatch (right-click any function on the canvas, or a failure
+  // trail node). The failing function's editor IS the hatch, so right-clicking it
+  // just brings the hatch forward (no duplicate). Any other function opens/raises
+  // its own editor; a repeat open raises the existing one (and un-minimizes it).
+  function onOpenEditor(node) {
+    if (!node || !node.file) return
+    const base = (s) => String(s || '').split('.').pop()
+    if (hatch && node.file === hatch.file && base(node.function) === base(hatch.funcName || hatch.func)) {
+      raiseHatch(); return            // the hatch already IS this function's editor
+    }
+    const open = (graph) => {
+      const slice = sliceForNode(graph, node)
+      if (!slice || !slice.funcName) return
+      const id = `${slice.file}::${slice.funcName}`
+      setFlowEditors(prev => {
+        const seq = (editorSeq.current += 1)            // newest/raised → highest z
+        const i = prev.findIndex(e => e.id === id)
+        if (i >= 0) {                                    // already open → raise + un-minimize
+          const next = prev.slice()
+          next[i] = { ...next[i], ...slice, line: node.line ?? next[i].line, minimized: false, seq }
+          return next
+        }
+        return [...prev, { ...slice, id, line: node.line ?? slice.line, minimized: false, seq }]
+      })
+    }
+    if (archGraph) open(archGraph)
+    else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); open(g) } })
+  }
+  // Bring the repair hatch forward (shared z counter with the trail editors).
+  const raiseHatch = () => setHatchZ(editorSeq.current += 1)
+
+  // Trail-editor lifecycle: close removes it, minimize parks it as a dock chip,
+  // raise bumps its z above the others (and the hatch) on focus/repeat-click.
+  const closeFlowEditor = (id) => setFlowEditors(prev => prev.filter(e => e.id !== id))
+  const minFlowEditor = (id, val) => setFlowEditors(prev => prev.map(e => e.id === id ? { ...e, minimized: val } : e))
+  const raiseFlowEditor = (id) => setFlowEditors(prev => prev.map(e => e.id === id ? { ...e, seq: (editorSeq.current += 1) } : e))
+
+  // A Senior-Dev run finished and wrote files. Route EACH file's hunks into that
+  // file's editor — the change shows where it landed (e.g. Completions.create in
+  // client.py), not the test hatch. An editor already open for the file gets the
+  // diff and is raised; a file with no editor opens one at the changed function.
+  function onRepairDiff(diffText) {
+    if (!diffText) return
+    const byFile = splitDiffByFile(diffText)
+    const files = Object.keys(byFile)
+    if (!files.length) return
+    const apply = (graph) => {
+      setFlowEditors(prev => {
+        let next = prev.slice()
+        for (const file of files) {
+          const section = byFile[file]
+          const line = firstHunkNewLine(section) || 1
+          const i = next.findIndex(e => e.file === file)
+          const seq = (editorSeq.current += 1)
+          if (i >= 0) {                       // already open → stamp the diff, raise
+            next[i] = { ...next[i], minimized: false, seq, diff: section }
+            continue
+          }
+          const slice = sliceForNode(graph, { file, function: null, line })
+          if (!slice || !slice.funcName) continue
+          next = [...next, { ...slice, id: `${slice.file}::${slice.funcName}`, line, minimized: false, seq, diff: section }]
+        }
+        return next
+      })
+    }
+    if (archGraph) apply(archGraph)
+    else getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); apply(g) } })
+  }
+
+  // Which trail functions are open in a (trail) editor, keyed by file::baseName so
+  // the lens can show them in a subtle 'selected' state. The failing function is
+  // excluded — it keeps its red failure ring (it lives in the hatch, not a trail
+  // editor).
+  const openFlowFns = (() => {
+    const s = new Set()
+    const base = (x) => String(x || '').split('.').pop()
+    flowEditors.forEach(e => s.add(`${e.file}::${base(e.funcName)}`))
+    return s
+  })()
 
   // Expand a single module; with deep=true also expand every file inside it
   // (so all its functions become visible) — wired to the module right-click menu.
@@ -935,6 +1145,12 @@ export default function App() {
   // clears it — e.g. when a module box itself is selected.
   function selectArchEntity(kind, data) {
     if (!kind || !data) { setArchSel(null); return }
+    // Click-toggle: selecting the already-selected box clears it (its flow
+    // arrows disappear with the selection).
+    if (archSel?.data?.id != null && archSel.data.id === data.id) {
+      setArchSel(null)
+      return
+    }
     setArchSel({ kind, data })
     setPanelMode('Inspector')
   }
@@ -1683,7 +1899,10 @@ export default function App() {
           onHome={goHome}
         />
         <div className="panels">
-          <aside className={`panel-left${leftOpen ? '' : ' collapsed'}`}>
+          <div className="edge-zone left" onMouseEnter={() => setLeftOpen(true)} />
+          <div className="edge-zone right" onMouseEnter={() => setRightOpen(true)} />
+          <aside className={`panel-left${leftOpen ? '' : ' collapsed'}`}
+                 onMouseLeave={() => setLeftOpen(false)}>
             <button className="panel-collapse-btn left" onClick={() => setLeftOpen(o => !o)}
               title={leftOpen ? 'Collapse file tree' : 'Expand file tree'}>
               {leftOpen ? '‹' : '›'}
@@ -1710,8 +1929,12 @@ export default function App() {
               onExpandModule={expandModule}
               flowMode={flowMode}
               failFocus={hatch ? { fnId: `box:function:${hatch.file}:${hatch.funcName || hatch.func}`, fileId: `box:file:${hatch.file}` } : null}
+              onFocusFile={onFocusFile}
               flowLens={flowLens}
-              onExitFlowLens={() => setFlowLens(null)}
+              onOpenEditor={onOpenEditor}
+              openFlowFns={openFlowFns}
+              repairPhase={hatch ? repairPhase : null}
+              onExitFlowLens={() => { setFlowLens(null); flowExpandRef.current = '' }}
               onRegenFlowLens={async () => {
                 if (!hatch || !flowLens?.artifact || flowLens.busy) return
                 setFlowLens(l => ({ ...l, busy: true }))
@@ -1771,12 +1994,42 @@ export default function App() {
                 onShowFailure={onShowFailure}
               />
             )}
-            {hatch && <FunctionPatch hatch={hatch}
-                                     onClose={() => { setHatch(null); setFlowLens(null) }}
-                                     onShowFlow={(art) => setFlowLens({ artifact: art })} />}
+            {hatch && <FunctionPatch hatch={hatch} z={hatchZ}
+                                     onClose={() => { setHatch(null); setFlowEditors([]); setFlowLens(null); setRepairPhase(null); flowExpandRef.current = '' }}
+                                     onShowFlow={onShowFlow}
+                                     onRepairPhase={setRepairPhase}
+                                     onRepairDiff={onRepairDiff}
+                                     lensActive={!!flowLens?.artifact} />}
+            {/* Floating editors opened via "Open in editor" — coexist with the
+                hatch; each independently movable, minimizable, closable. Rendered
+                whether or not a hatch is open (right-click any function on canvas). */}
+            {flowEditors.map((ed, i) => ed.minimized ? null : (
+              <TrailEditor key={ed.id} editor={ed} episodeId={hatch?.episodeId || ''}
+                           lensActive={!!flowLens?.artifact}
+                           onClose={() => closeFlowEditor(ed.id)}
+                           onMinimize={() => minFlowEditor(ed.id, true)}
+                           onFocus={() => raiseFlowEditor(ed.id)}
+                           style={{ left: 24 + i * 34, top: 96 + i * 34, right: 'auto',
+                                    transform: 'none', zIndex: ed.seq }} />
+            ))}
+            {/* Minimized editors → labelled chips, docked above the hatch's own
+                card dock so nothing overlaps. One click restores. */}
+            {flowEditors.some(e => e.minimized) && (
+              <div className={`hatch-min-dock trail${flowLens?.artifact ? ' lens' : ''}`}>
+                {flowEditors.filter(e => e.minimized).map(e => (
+                  <button key={e.id} className="hatch-min-chip" onClick={() => minFlowEditor(e.id, false)}
+                          title="Restore editor">
+                    <span className="hatch-min-dot trail" /> {e.funcName} · {e.file.split('/').pop()}
+                  </button>
+                ))}
+              </div>
+            )}
           </main>
-          <aside className={`panel-right${rightOpen ? '' : ' collapsed'}`}>
-            <button className="panel-collapse-btn right" onClick={() => setRightOpen(o => !o)}
+          <aside className={`panel-right${rightOpen ? '' : ' collapsed'}`}
+                 onMouseLeave={() => { if (!rightPinned) setRightOpen(false) }}
+                 onFocusCapture={() => setRightPinned(true)}
+                 onPointerDownCapture={() => setRightPinned(true)}>
+            <button className="panel-collapse-btn right" onClick={() => { setRightPinned(false); setRightOpen(o => !o) }}
               title={rightOpen ? 'Collapse panel' : 'Expand panel'}>
               {rightOpen ? '›' : '‹'}
             </button>

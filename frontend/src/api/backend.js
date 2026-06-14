@@ -166,8 +166,8 @@ export const getSourceSlice = (path, start, end) =>
   apiFetch(`/api/source?path=${encodeURIComponent(path)}&start=${start}&end=${end}`)
 
 /** Splice the function back (⌘S). The watcher records it like any edit. */
-export const patchSource = (path, start, end, code) =>
-  apiFetch('/api/source/patch', { method: 'POST', body: JSON.stringify({ path, start, end, code }) })
+export const patchSource = (path, start, end, code, episodeId = '') =>
+  apiFetch('/api/source/patch', { method: 'POST', body: JSON.stringify({ path, start, end, code, episodeId }) })
 
 /** Repair prompt via the senior_dev role — once per failure fingerprint;
     pass {regenerate: true} to replace. → {ok, artifact, fingerprint, reused} */
@@ -185,6 +185,20 @@ export const hatchFlow = (payload) =>
 /** Run the repair through OpenFDE's configured senior_dev, scoped to the file. */
 export const hatchRun = (payload) =>
   apiFetch('/api/hatch/run', { method: 'POST', body: JSON.stringify(payload), _timeout: 660_000 })
+
+/** The Reproduce button: issue card → honest repro verdict (run-once by body hash). */
+export const reproduceIssue = (taskId, regenerate = false) =>
+  apiFetch('/api/issues/reproduce',
+    { method: 'POST', body: JSON.stringify({ taskId, regenerate }), _timeout: 300_000 })
+
+/** Draft the report-to-OpenFDE issue — the USER's senior_dev writes it from
+    the accurate receipt; output is repo-scrubbed server-side. Template fallback. */
+export const draftOpenfdeReport = (run, hatch) =>
+  apiFetch('/api/feedback/draft', { method: 'POST', body: JSON.stringify({ run, hatch }), _timeout: 120_000 })
+
+/** File an OpenFDE bug on OUR tracker — fires only on the user's click. */
+export const reportOpenfdeIssue = (title, body) =>
+  apiFetch('/api/feedback/github-issue', { method: 'POST', body: JSON.stringify({ title, body }), _timeout: 90_000 })
 
 /** Hydrate: every saved artifact for this failure meaning (hatch reopen). */
 export const hydrateHatch = (payload) =>

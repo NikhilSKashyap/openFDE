@@ -65,6 +65,17 @@ def _norm(p: str) -> str:
     return s[2:] if s.startswith("./") else s
 
 
+def _is_openfde_owned(rel: str) -> bool:
+    """True for OpenFDE's OWN metadata (``.openfde/…``). It is managed by OpenFDE,
+    not the user, and churns during a run — the watcher re-assimilates the repo and
+    rewrites ``semantic_graph.json`` while Senior Dev works. It is never user-authored
+    work and never in a repair scope, so the scope/conflict guards must ignore it
+    (otherwise an unrelated metadata write aborts the repair with a false data-loss
+    conflict). Genuine user files outside scope keep their fail-safe."""
+    n = _norm(rel)
+    return n == ".openfde" or n.startswith(".openfde/")
+
+
 def _child_env() -> dict:
     """Environment for the spawned `claude` process. Strips ANTHROPIC_API_KEY /
     AUTH_TOKEN so the CLI uses the user's Claude Code LOGIN (the whole point —
@@ -97,7 +108,11 @@ def _git(args: list, root: Path, timeout: int = _GIT_TIMEOUT) -> subprocess.Comp
 
 
 def _dirty_set(root: Path) -> set:
-    """Repo-relative paths that differ from HEAD or are untracked (the dirty set)."""
+    """Repo-relative paths that differ from HEAD or are untracked (the dirty set).
+
+    OpenFDE-owned metadata under ``.openfde/`` is excluded: the watcher rewrites it
+    (semantic_graph.json, episodes.json, …) throughout a run, so leaving it in would
+    falsely trip the runner's scope/conflict guards on OpenFDE's own churn."""
     out = set()
     r1 = _git(["diff", "--name-only", "HEAD"], root)
     for ln in (r1.stdout or "").splitlines():
@@ -107,7 +122,7 @@ def _dirty_set(root: Path) -> set:
     for ln in (r2.stdout or "").splitlines():
         if ln.strip():
             out.add(_norm(ln.strip()))
-    return out
+    return {p for p in out if not _is_openfde_owned(p)}
 
 
 def _hash(root: Path, rel: str):
@@ -561,36 +576,33 @@ def run_claude_code_cli(*, repo_root, prompt, model=None, timeout=_DEFAULT_TIMEO
             "costUsd": cost if isinstance(cost, (int, float)) else 0.0, "error": error}
 
 
-def _cost_note(cost) -> str:
-    return f" (cost ${cost:.2f})" if isinstance(cost, (int, float)) else ""
-
-
 def _build_contract(writes, protected_attempts, rejected, error, summary_text, cost) -> dict:
     """Honest, fail-clear Step-20 contract. No silent success: a run with no
-    in-scope diff is reported as failed with an explicit reason."""
+    in-scope diff is reported as failed with an explicit reason. Cost stays a
+    DATA field (costUsd on the outcome) and never enters display strings —
+    OpenFDE doesn't put a meter in front of the work."""
     reject_reasons = [f"{r['path']}: {r['reason']}" for r in (rejected or [])]
     errors = []
-    note = _cost_note(cost)
 
     if protected_attempts:
         status = "needs_approval"
         report = (f"Claude Code requested changes to protected file(s): "
-                  f"{', '.join(protected_attempts)}.{note}")
+                  f"{', '.join(protected_attempts)}.")
     elif error and not writes:
         status = "failed"
-        report = f"Claude Code did not complete: {error}{note}"
+        report = f"Claude Code did not complete: {error}"
         errors.append(error)
     elif not writes:
         status = "failed"
         if rejected:
             report = (f"Claude Code ran but only touched out-of-scope files "
-                      f"(reverted): {', '.join(reject_reasons)}.{note}")
+                      f"(reverted): {', '.join(reject_reasons)}.")
         else:
-            report = f"Claude Code ran but produced no in-scope changes — no diff.{note}"
+            report = "Claude Code ran but produced no in-scope changes — no diff."
     else:
         status = "passed"
         head = summary_text.splitlines()[0] if summary_text else f"Edited {', '.join(writes)}."
-        report = head[:240] + note
+        report = head[:240]
 
     errors.extend(reject_reasons)
     return {

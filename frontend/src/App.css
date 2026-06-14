@@ -183,12 +183,25 @@
   position: relative;
 }
 
-/* ─── Collapsible side panels ────────────────────────────────────── */
+/* ─── Collapsible side panels — hidden by default, edge-reveal ───── */
+.panel-left, .panel-right {
+  transition: width .26s cubic-bezier(.4, 0, .2, 1),
+              min-width .26s cubic-bezier(.4, 0, .2, 1),
+              border-color .26s;
+}
 .panel-left.collapsed,
 .panel-right.collapsed {
-  width: 26px;
-  min-width: 26px;
+  width: 0;
+  min-width: 0;
+  border-color: transparent;
 }
+.panel-left.collapsed .panel-collapse-btn,
+.panel-right.collapsed .panel-collapse-btn { display: none; }
+.edge-zone {
+  position: fixed; top: 0; bottom: 0; width: 10px; z-index: 80;
+}
+.edge-zone.left { left: 0; }
+.edge-zone.right { right: 0; }
 
 .panel-collapse-btn {
   position: absolute;
@@ -1340,8 +1353,38 @@
 .repair-hatch-close { margin-left: auto; border: none; background: none; color: var(--text-muted);
   font-size: 15px; cursor: pointer; padding: 0 4px; }
 .repair-hatch-close:hover { color: var(--text); }
+/* Minimize (–) sits just left of close; the first margin-left:auto claims the
+   slack so both controls hug the right edge together. */
+.repair-hatch-min { margin-left: auto; border: none; background: none; color: var(--text-muted);
+  font-size: 17px; line-height: 1; cursor: pointer; padding: 0 5px 3px; }
+.repair-hatch-min:hover { color: var(--text); }
+/* Minimized dock: a calm row of chips in the bottom-right, above the canvas and
+   clear of the (centre/left) failure path. z above hatch(60)/cards(59). */
+.hatch-min-dock { position: absolute; right: 16px; bottom: 16px; z-index: 62;
+  display: flex; flex-direction: row-reverse; gap: 8px; align-items: center; }
+.hatch-min-chip { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  padding: 6px 11px; border-radius: 9px; font-size: 11px; font-weight: 600; color: var(--text);
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; white-space: nowrap;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  border: 0.5px solid color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34), 0 0 0 0.5px var(--accent-orange-border); }
+.hatch-min-chip:hover { border-color: var(--accent-orange-border);
+  background: color-mix(in srgb, var(--surface) 95%, transparent); }
+.hatch-min-dot { width: 7px; height: 7px; border-radius: 2px; background: var(--accent-orange); flex-shrink: 0; }
 .repair-hatch-fail { padding: 3px 12px 6px; font-size: 10.5px; font-family: ui-monospace, monospace;
   color: var(--violation); }
+/* Navigated a step up the trail — orange (trail), not red (failure), with a
+   one-click return to the function that actually failed. */
+.repair-hatch-fail.nav { display: flex; align-items: center; gap: 8px;
+  color: var(--accent-orange, #d98a3d); }
+.repair-hatch-fail.nav span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repair-hatch-backfn { margin-left: auto; flex: none; cursor: pointer;
+  border: 0.5px solid color-mix(in srgb, var(--accent-orange, #d98a3d) 50%, transparent);
+  background: color-mix(in srgb, var(--accent-orange, #d98a3d) 12%, transparent);
+  color: var(--accent-orange, #d98a3d); border-radius: 7px; padding: 2px 8px;
+  font-size: 10px; font-family: ui-monospace, monospace; white-space: nowrap; }
+.repair-hatch-backfn:hover { background: color-mix(in srgb, var(--accent-orange, #d98a3d) 22%, transparent); }
 .repair-hatch-code {
   margin: 0 12px; padding: 10px 12px; border-radius: 9px; resize: vertical;
   background: color-mix(in srgb, var(--bg) 86%, transparent);
@@ -1350,6 +1393,58 @@
   white-space: pre; overflow-x: auto; tab-size: 4;
 }
 .repair-hatch-code:focus { outline: none; border-color: var(--accent-orange-border); }
+
+/* Editor chrome: absolute-numbered gutter + the failing-line band */
+.repair-hatch-codewrap { position: relative; display: flex; margin: 0 12px; overflow: hidden; }
+.repair-hatch-codewrap .repair-hatch-code { margin: 0; flex: 1; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.repair-hatch-gutter {
+  flex-shrink: 0; width: 44px; padding: 10px 8px 10px 0; overflow: hidden;
+  text-align: right; user-select: none;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 10%, transparent); border-right: 0;
+  border-radius: 9px 0 0 9px;
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.6;
+  color: color-mix(in srgb, var(--text) 38%, transparent);
+}
+.repair-hatch-ln.fail { color: var(--violation); font-weight: 700; }
+/* Inline diff rendered IN the editor's code area (a div, not the textarea):
+   added/removed lines coloured in place; the gutter numbers stay truthful. */
+.repair-diff-view { white-space: pre; overflow: auto; cursor: default;
+  display: flex; flex-direction: column; }
+.repair-diff-line { display: block; padding: 0 6px; }
+.repair-diff-sign { display: inline-block; width: 1.1em; color: var(--text-muted); }
+.repair-diff-line.add { background: color-mix(in srgb, #5bbf6a 16%, transparent); }
+.repair-diff-line.add .repair-diff-sign { color: #5bbf6a; }
+.repair-diff-line.del { background: color-mix(in srgb, var(--violation) 13%, transparent); }
+.repair-diff-line.del .repair-diff-sign { color: var(--violation); }
+.repair-hatch-ln.add { color: #5bbf6a; font-weight: 700; }
+.repair-hatch-ln.del { color: var(--violation); }
+.repair-hatch-failband {
+  position: absolute; left: 0; right: 0; pointer-events: none; z-index: 1;
+  background: color-mix(in srgb, var(--violation) 10%, transparent);
+  border-left: 2px solid var(--violation);
+}
+
+/* Post-repair diff — removed/added lines, in place of the editor */
+.repair-hatch-diff { margin: 0 12px; }
+.repair-hatch-diff-rows {
+  max-height: 46vh; overflow: auto; border-radius: 9px; padding: 8px 0;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 10%, transparent);
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.6;
+}
+.repair-diff-row { display: flex; white-space: pre; }
+.repair-diff-row.meta .repair-diff-src { color: var(--text-muted); font-size: 9.5px; }
+.repair-diff-row.meta { opacity: 0.8; }
+.repair-diff-row.del { background: color-mix(in srgb, var(--violation) 13%, transparent); }
+.repair-diff-row.add { background: color-mix(in srgb, var(--solid) 13%, transparent); }
+.repair-diff-ln { flex-shrink: 0; width: 40px; text-align: right; padding-right: 8px;
+  color: color-mix(in srgb, var(--text) 38%, transparent); user-select: none; }
+.repair-diff-mark { flex-shrink: 0; width: 16px; font-weight: 700; }
+.repair-diff-row.del .repair-diff-mark { color: var(--violation); }
+.repair-diff-row.add .repair-diff-mark { color: var(--solid); }
+.repair-diff-src { padding-right: 12px; }
+.repair-hatch-diff-foot { display: flex; align-items: center; gap: 8px; padding: 6px 2px 0; }
 .repair-hatch-foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px; }
 .repair-hatch-save {
   padding: 3px 12px; border-radius: 99px; cursor: pointer; font-family: inherit;
@@ -1380,6 +1475,14 @@
 }
 .repair-card.dock-a { top: 30%; transform: translateY(-50%); }
 .repair-card.dock-b { top: 66%; transform: translateY(-50%); }
+/* Failure-flow lens: the path (upper-left/centre, bright client.py + the failing
+   function) must read FIRST. Park the artifact cards as a compact row along the
+   bottom-left, clear of the path bounding box — secondary, not hidden, still
+   draggable. */
+.repair-card.lens { top: auto; bottom: 16px; right: auto; transform: none;
+  width: 332px; max-height: 30vh; }
+.repair-card.lens.dock-a { left: 16px; }
+.repair-card.lens.dock-b { left: 360px; }
 .repair-card-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px 5px;
   cursor: grab; user-select: none; touch-action: none; }
 .repair-card-head:active { cursor: grabbing; }
@@ -1402,14 +1505,57 @@
 .repair-card-src, .repair-card-runline { font-size: 9.5px; color: var(--text-muted); }
 
 /* ── Failure-flow lens — dim the canvas, show only the failure path ── */
-.flow-lens-dim { opacity: 0.78; }
-.flow-lens-lit { stroke: color-mix(in srgb, var(--text) 55%, transparent); stroke-width: 1.2; }
-.flow-lens-pill { fill: color-mix(in srgb, var(--surface) 92%, transparent);
-  stroke: var(--accent-orange-border); stroke-width: 1; }
+.flow-lens-dim { opacity: 0.42; }
+/* Failure flow is a PATH, not a point: every involved node glows. Orange =
+   the recorded path (the whole train), red = the crash site — same language as
+   the edit glow, and bright enough to read at a glance across modules. */
+/* The ring IS the click target — pointer cursor + a hover fill/glow make the
+   whole box obviously interactive (no invisible hit zones). The base fill is
+   transparent (set inline) so hover can tint it. */
+.flow-lens-lit { stroke: var(--accent-orange); stroke-width: 2; cursor: pointer;
+  filter: drop-shadow(0 0 6px var(--accent-orange)); transition: fill 0.12s ease, filter 0.12s ease; }
+.flow-lens-lit:hover { fill: color-mix(in srgb, var(--accent-orange) 18%, transparent);
+  filter: drop-shadow(0 0 11px var(--accent-orange)); }
+.flow-lens-lit.fail { stroke: var(--violation); stroke-width: 2.4;
+  filter: drop-shadow(0 0 8px var(--violation)); }
+.flow-lens-lit.fail:hover { fill: color-mix(in srgb, var(--violation) 18%, transparent);
+  filter: drop-shadow(0 0 12px var(--violation)); }
+.flow-lens-pill.fail { stroke: var(--violation); stroke-width: 1.4; }
+.flow-lens-pill { fill: color-mix(in srgb, var(--surface) 92%, transparent); cursor: pointer;
+  stroke: var(--accent-orange-border); stroke-width: 1; transition: fill 0.12s ease, stroke-width 0.12s ease; }
+.flow-lens-pill:hover { fill: color-mix(in srgb, var(--surface) 99%, transparent); stroke-width: 1.8; }
+/* A trail node already open in an editor → calm violet 'selected' state (matches
+   the trail-editor accent). Never overrides the red failure ring. */
+.flow-lens-lit.selected:not(.fail) { stroke: var(--accent); stroke-width: 3.4;
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--accent) 75%, transparent)); }
+.flow-lens-pill.selected:not(.fail) { stroke: var(--accent); stroke-width: 1.8; }
+/* Left-click focus: the focused node's ring brightens (its arrows stay lit while
+   the rest dim) — focus by interaction, not by hiding structure. */
+.flow-lens-lit.focused { stroke-width: 3.2; filter: drop-shadow(0 0 12px var(--accent-orange)); }
+.flow-lens-lit.fail.focused { filter: drop-shadow(0 0 13px var(--violation)); }
+.flow-lens-pill.focused { stroke-width: 2; }
+
+/* ── Trail editors — additional floating function editors opened from the failure
+   trail. Violet accent marks them as REFERENCE views, distinct from the orange
+   repair hatch, so test + product functions read side-by-side without confusion. */
+.trail-editor { width: 452px; max-height: 70vh;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42), 0 0 0 0.5px color-mix(in srgb, var(--accent) 55%, transparent); }
+.repair-hatch-dot.trail { background: var(--accent); }
+.repair-hatch-fail.trail { color: var(--text-muted); display: flex; gap: 6px; align-items: center; }
+/* Senior Dev changed this file → the diff is showing right here. */
+.repair-hatch-fail.trail.applied { color: #5bbf6a; font-weight: 600; }
+/* The trail line — highlighted AMBER (the relevant line in this hop), distinct
+   from the red failing assertion. Shows in the code row (band) AND the gutter. */
+.repair-hatch-failband.trail { background: var(--accent-orange-soft);
+  border-left: 2px solid var(--accent-orange); }
+.repair-hatch-ln.hi { color: var(--accent-orange); font-weight: 700; }
+/* Minimized trail editors dock — stacked just above the hatch's own card dock. */
+.hatch-min-dock.trail { bottom: 54px; }
+.hatch-min-dot.trail { background: var(--accent); }
 .flow-lens-pill-label { font-size: 12px; font-weight: 600; fill: var(--text);
   font-family: 'SF Mono', ui-monospace, Menlo, monospace; }
 .flow-lens-pill-sub { font-size: 9px; fill: var(--text-muted); }
-.flow-lens-edge { stroke: var(--accent-orange); stroke-width: 1.6; }
+.flow-lens-edge { stroke: var(--accent-orange); stroke-width: 2; }
 .flow-lens-edge.failing { stroke: var(--violation); }
 .flow-lens-edge.low { stroke-dasharray: 4 4; opacity: 0.75; }
 .flow-lens-label-bg { fill: color-mix(in srgb, var(--surface) 94%, transparent);
@@ -1478,6 +1624,17 @@
 .tlv3-repair-flowedge { margin: 5px 0; font-size: 10.5px; color: var(--text); }
 .tlv3-repair-flowlabel { margin: 1px 0 0 10px; font-size: 10px; color: var(--text-muted); }
 .tlv3-repair-detail-md { margin: 6px 0; font-size: 11px; line-height: 1.6; color: var(--text); }
+
+/* Report-to-OpenFDE card inputs */
+.report-title, .report-body {
+  width: 100%; box-sizing: border-box; margin: 0 0 6px; padding: 6px 8px;
+  border-radius: 8px; font-family: inherit; font-size: 11px; color: var(--text);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 12%, transparent);
+}
+.report-body { font-family: 'SF Mono', ui-monospace, Menlo, monospace; font-size: 10.5px;
+  line-height: 1.5; resize: vertical; }
+.report-title:focus, .report-body:focus { outline: none; border-color: var(--accent-orange-border); }
 
 /* Markdown inside artifact cards / Story drawer */
 .md p { margin: 0 0 7px; }
@@ -2345,6 +2502,19 @@
 .watch-ring.active.fail-focus {
   stroke: var(--violation);
   filter: drop-shadow(0 0 6px var(--violation));
+}
+
+/* The repair ring's other two phases: Senior Dev working → orange, still
+   breathing; the exact failing test passes → green, still. Earned, not assumed. */
+.watch-ring.repair-fixing, .watch-ring.active.repair-fixing {
+  stroke: var(--accent-orange);
+  filter: drop-shadow(0 0 7px var(--accent-orange));
+}
+.watch-ring.repair-fixed {
+  stroke: var(--solid);
+  filter: drop-shadow(0 0 5px var(--solid));
+  animation: none;
+  opacity: 1;
 }
 
 .wb-watching {

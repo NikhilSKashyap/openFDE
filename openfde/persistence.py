@@ -230,6 +230,26 @@ class Persistence:
         # Latest worktree-level verification evidence (.openfde/verify.json stays
         # reserved for the user's check CONFIG — see openfde/verify.py).
         self.verify_latest_path = openfde_dir / "verify_latest.json"
+        self._ensure_excluded()
+
+    def _ensure_excluded(self) -> None:
+        """Keep OpenFDE's OWN footprint out of the watched repo — without touching
+        any TRACKED file. We append ``.openfde/`` to ``.git/info/exclude`` (git's
+        local, uncommitted ignore), NOT the repo's ``.gitignore`` (which would
+        itself show up as a change and leak into the user's PR). Idempotent; silent
+        on any error (no-git / read-only must never break startup)."""
+        try:
+            info = self.dir.parent / ".git" / "info"
+            if not info.is_dir():
+                return                       # not a standard git repo — nothing to do
+            excl = info / "exclude"
+            existing = excl.read_text(encoding="utf-8") if excl.exists() else ""
+            if any(ln.strip().rstrip("/") == ".openfde" for ln in existing.splitlines()):
+                return
+            sep = "" if (not existing or existing.endswith("\n")) else "\n"
+            excl.write_text(existing + sep + ".openfde/\n", encoding="utf-8")
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
@@ -345,6 +365,60 @@ class Persistence:
         """
         return self._read_json(self.tasks_path, [])
 
+    def move_tasks_for_episode(self, episode_id: str, column: str,
+                               verification: str = None,
+                               from_columns: tuple = None) -> int:
+        """Move every card tied to an episode to a board column (the card
+        lifecycle rides the EPISODE's real transitions: created → doing,
+        checks run → testing, landed → done).
+
+        Returns:
+            int — number of cards moved.
+        """
+        tasks = self.load_tasks()
+        n = 0
+        for t in tasks:
+            if isinstance(t, dict) and t.get("episodeId") == episode_id:
+                if from_columns is not None and t.get("column") not in from_columns:
+                    continue                      # monotonic: never demote silently
+                t["column"] = column
+                if verification:
+                    t["verificationStatus"] = verification
+                n += 1
+        if n:
+            self.save_tasks(tasks)
+        return n
+
+    def reopen_episode(self, episode_id: str):
+        """Reopen a LANDED episode for follow-up repair — the fix of a fix
+        belongs to the SAME story, never a new episode. Moves it back to
+        'reviewing' and to the front of the store (the watcher attributes
+        subsequent edits to the newest active episode).
+
+        Returns:
+            dict | None — the reopened episode, or None (unknown / not landed).
+        """
+        ep = self.get_episode(episode_id)
+        if not ep or ep.get("status") != "landed":
+            return None
+        ep["status"] = "reviewing"
+        ep["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        return self.upsert_episode(ep)
+
+    def update_task(self, task_id: str, patch: dict):
+        """Merge ``patch`` into one task by id and persist.
+
+        Returns:
+            dict | None — the updated task, or None when the id is unknown.
+        """
+        tasks = self.load_tasks()
+        for t in tasks:
+            if isinstance(t, dict) and t.get("id") == task_id:
+                t.update(patch)
+                self.save_tasks(tasks)
+                return t
+        return None
+
     def save_tasks(self, tasks: list) -> None:
         """Persist the OpenPM task list.
 
@@ -438,8 +512,10 @@ class Persistence:
         # NOTE: written as PROJECT_META.md (not PROJECT.md) so it cannot collide
         # with the lowercase conversation ledger project.md on case-insensitive
         # filesystems (macOS APFS/HFS+ default).
-        project_md_path = repo_root / "PROJECT_META.md"
-        tmp = repo_root / ".project_meta_md.tmp"
+        # OpenFDE's own artifact → inside .openfde/ (git-excluded), never the repo
+        # root, so watching a foreign repo leaves its tree untouched.
+        project_md_path = self.dir / "PROJECT_META.md"
+        tmp = self.dir / ".project_meta_md.tmp"
         try:
             tmp.write_text(md, encoding="utf-8")
             os.replace(tmp, project_md_path)
