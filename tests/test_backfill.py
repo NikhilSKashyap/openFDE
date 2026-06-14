@@ -66,6 +66,17 @@ class BackfillTest(unittest.TestCase):
     def _backfilled(self):
         return [e for e in self.p.load_episodes() if e.get("source") == "openfde-backfill"]
 
+    # ── cross-cwd transcript builders (a session rooted in ANOTHER repo) ──
+    def _cross_transcript(self, name, entries, other):
+        d = claude_projects_dir(other, self.home)        # transcript lives in other cwd's dir
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    def _cross_prompt(self, uuid, text, ts, other, sid="s2"):
+        return {"type": "user", "uuid": uuid, "sessionId": sid, "timestamp": ts,
+                "cwd": str(other),                       # rooted elsewhere, NOT the watched repo
+                "message": {"role": "user", "content": text}}
+
     # ── tests ──
     def test_imports_and_links_commit_high_confidence(self):
         self._transcript("t1.jsonl", [
@@ -127,6 +138,47 @@ class BackfillTest(unittest.TestCase):
         self.assertIn("event", res)
         self.assertEqual(res["event"]["type"], "backfill_imported")
         self.assertIn("Imported 1 historical prompt", res["event"]["payload"]["detail"])
+
+    # ── cwd attribution accuracy (the fix) ──
+    def test_same_cwd_discussion_prompt_imports(self):
+        # A session rooted AT the watched repo imports human prompts even with no edits.
+        self._transcript("t1.jsonl", [
+            self._prompt("u1", "should we split the calc module?", "2026-06-10T00:00:00Z")])
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 1)
+        self.assertEqual(res["discussion"], 1)
+        self.assertEqual(self._backfilled()[0]["status"], "open")
+
+    def test_cross_cwd_discussion_without_edits_is_ignored(self):
+        # THE BUG: a session rooted ELSEWHERE that only discussed (no edits under this
+        # repo) must NOT import — unrelated /csvflow-demo, /interview chatter stays out.
+        other = Path(self.tmp.name) / "other-repo"
+        self._cross_transcript("x.jsonl", [
+            self._cross_prompt("u9", "how should I structure this csv loader?",
+                               "2026-06-10T00:00:00Z", other)], other)
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 0)
+        self.assertEqual(self._backfilled(), [])
+
+    def test_cross_cwd_prompt_with_repo_edits_imports_as_needs_review(self):
+        # A session rooted elsewhere that edits a file UNDER this repo is real work here →
+        # import as needs_review (high-signal cross-cwd attribution); idempotent on rerun.
+        other = Path(self.tmp.name) / "other-repo"
+        self._cross_transcript("x.jsonl", [
+            self._cross_prompt("u8", "patch the shared util", "2026-06-10T00:00:00Z", other),
+            self._edit("s2", "util.py")], other)           # file_path is under self.root
+        res = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res["imported"], 1)
+        self.assertEqual(res["needsReview"], 1)
+        ep, = self._backfilled()
+        self.assertEqual(ep["status"], "needs_manual_land")
+        self.assertEqual(ep["files"], ["util.py"])
+        self.assertEqual(ep["backfillConfidence"], "needs_review")
+        self.assertEqual(ep["kind"], "claude-code")
+        # idempotency still holds on the cross-cwd path
+        res2 = backfill.backfill_historical(self.root, self.p, home=self.home)
+        self.assertEqual(res2["imported"], 0)
+        self.assertEqual(len(self._backfilled()), 1)
 
 
 if __name__ == "__main__":
