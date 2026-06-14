@@ -1,3 +1,3 @@
 """OpenFDE — AI-native IDE where you draw architecture and the agent builds it."""
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"

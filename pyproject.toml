@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openfde"
-version = "0.5.3"
+version = "0.5.4"
 description = "AI-native IDE where you draw architecture and the agent builds it"
 requires-python = ">=3.9"
 dependencies = ["aiohttp>=3.9"]
