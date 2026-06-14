@@ -3097,6 +3097,47 @@
   color: var(--text-muted); font-style: italic; }
 .council-meta { font-size: 10px; color: var(--text-muted); margin-top: 4px; line-height: 1.5; }
 .council-contrib, .council-prov { color: var(--text-muted); }
+
+/* ── Council Chat v2 — a real bottom-docked conversation (Codex/CC/Cursor feel). The chat fills
+   the panel height (bounded) so the thread scrolls and the composer stays docked at the bottom. ── */
+.council.council-chat { display: flex; flex-direction: column; gap: 8px;
+  height: clamp(340px, calc(100vh - 260px), 720px); }
+.council-thread { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex;
+  flex-direction: column; gap: 10px; padding: 4px 2px 6px; }
+.council-empty { margin: auto 0; display: flex; flex-direction: column; gap: 10px;
+  align-items: flex-start; }
+.council-empty-hint { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+
+/* messages */
+.cmsg { display: flex; flex-direction: column; gap: 3px; max-width: 100%; }
+.cmsg-user { align-items: flex-end; }
+.cmsg-assistant { align-items: flex-start; }
+.cmsg-body { font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  padding: 7px 11px; border-radius: 12px; max-width: 88%; }
+.cmsg-user .cmsg-body { background: var(--accent-orange-soft, rgba(124,111,247,0.12));
+  border: 1px solid var(--accent-orange-border, var(--border)); border-bottom-right-radius: 4px; color: var(--text); }
+.cmsg-assistant .cmsg-body { background: var(--surface-2); border: 1px solid var(--border);
+  border-bottom-left-radius: 4px; color: var(--text); }
+.cmsg-src { font-size: 10px; color: var(--text-muted); padding: 0 4px; }
+.cmsg-thinking { color: var(--text-muted); font-style: italic; }
+.cmsg-ell { animation: cmsg-blink 1.2s steps(3, end) infinite; }
+@keyframes cmsg-blink { 0%, 20% { opacity: 0.2; } 50% { opacity: 1; } 100% { opacity: 0.2; } }
+.cmsg-action { align-self: flex-start; margin-top: 2px; font-size: 10.5px; cursor: pointer;
+  background: none; border: 1px solid var(--border); color: var(--text-muted);
+  border-radius: 8px; padding: 2px 9px; }
+.cmsg-action:hover { border-color: var(--accent); color: var(--text); }
+
+/* bottom-docked composer */
+.council-composer { flex: 0 0 auto; display: flex; gap: 6px; align-items: flex-end;
+  border-top: 1px solid var(--border); padding-top: 8px; }
+.council-input { flex: 1 1 auto; resize: none; min-height: 38px; max-height: 140px;
+  font: inherit; font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.council-input:focus { outline: none; border-color: var(--accent); }
+.council-send { flex: 0 0 auto; align-self: stretch; padding: 0 14px; border-radius: 9px;
+  border: none; background: var(--accent); color: #fff; font: inherit; font-size: 12px;
+  font-weight: 600; cursor: pointer; }
+.council-send:disabled { opacity: 0.45; cursor: default; }
 .concept-foot { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
 .concept-savebtn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px;
   text-align: left; padding: 0; }

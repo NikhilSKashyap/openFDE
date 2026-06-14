@@ -21,13 +21,19 @@ const PROBE_TIMEOUT_MS = 1500
  * @returns {Promise<any|null>} Parsed JSON, plain text, or null on error
  */
 async function apiFetch(path, opts = {}) {
+  const { _timeout, signal: extSignal, ...rest } = opts
   try {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), opts._timeout ?? TIMEOUT_MS)
+    const timer = setTimeout(() => controller.abort(), _timeout ?? TIMEOUT_MS)
+    // Honor an external AbortSignal (e.g. a Cancel button) alongside the timeout.
+    if (extSignal) {
+      if (extSignal.aborted) controller.abort()
+      else extSignal.addEventListener('abort', () => controller.abort(), { once: true })
+    }
     const res = await fetch(path, {
-      ...opts,
+      ...rest,
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', ...(opts.headers ?? {}) },
+      headers: { 'Content-Type': 'application/json', ...(rest.headers ?? {}) },
     })
     clearTimeout(timer)
     if (!res.ok) return null
@@ -637,10 +643,17 @@ export const getCouncilContext = () => apiFetch('/api/council/context')
  * @returns {Promise<{ok, answer, label, contributors, contributorsLabel, routedReason,
  *   confidence, workBusyRoles, mode, usedRole, provider?, roleNotes?}|null>}
  */
-export const postCouncilAsk = (question, target = 'auto') =>
-  // Routed through the role text models — answers can take 10–60s, never 4s.
+export const postCouncilAsk = (question, target = 'auto', { signal } = {}) =>
+  // Routed through the role text models — answers can take 10–60s, never 4s. `signal` lets the
+  // chat Cancel a stalled request so the user never stares at an infinite "Thinking…".
   apiFetch('/api/council/ask',
-    { method: 'POST', body: JSON.stringify({ question, target }), _timeout: 300_000 })
+    { method: 'POST', body: JSON.stringify({ question, target }), _timeout: 300_000, signal })
+
+/**
+ * Load the recent council chat thread (oldest-first) so a refresh restores it.
+ * @returns {Promise<{ok, turns:Array}|null>}
+ */
+export const getCouncilHistory = () => apiFetch('/api/council/history')
 
 // ── Plan ──────────────────────────────────────────────────────────────────
 

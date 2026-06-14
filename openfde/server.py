@@ -1735,12 +1735,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     attached_shas.add(c.get("sha"))
             return picked
 
+        # PR readiness runs git merge-base per landed episode; on a large history that is the
+        # dominant per-poll cost. Compute it only for the most recent episodes (the ones a user
+        # acts on); older episodes get null here and fetch readiness on demand when spotlighted
+        # (ConceptPanel already does this). Episodes arrive newest-first.
+        _READINESS_CAP = 40
         enriched = []
-        for e in episodes:
+        for i, e in enumerate(episodes):
             ecs = [_commit_view(c, e) for c in _episode_commits(e)]
             enriched.append({**e, "commits": ecs, "commitCount": len(ecs),
                              "fileCount": len(e.get("files") or []),
-                             "prReadiness": pr_readiness(path, e, _ctx=readiness_ctx)})
+                             "prReadiness": (pr_readiness(path, e, _ctx=readiness_ctx)
+                                             if i < _READINESS_CAP else None)})
         # Outside OpenFDE = every commit not shown under some episode: manual commits, foreign
         # trailers (an episode id we don't know), and anything reconciliation wasn't confident
         # enough to attach. Never silently dropped.
@@ -3898,7 +3904,24 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         except Exception as exc:  # noqa: BLE001 — read-only chat must fail soft
             logger.error("council ask failed: %s", exc)
             return web.json_response({"ok": False, "error": "council ask failed"}, status=500)
+        # Persist the turn so a browser refresh restores the thread (read-only: this writes only
+        # OpenFDE's own .openfde/ state, never the repo). Best-effort — never block the answer.
+        ts = datetime.now(timezone.utc).isoformat()
+        try:
+            persistence.append_council_chat([
+                {"role": "user", "text": question, "ts": ts},
+                {"role": "assistant", "text": result.get("answer", ""),
+                 "label": result.get("label", ""), "provider": result.get("provider"),
+                 "contributorsLabel": result.get("contributorsLabel"),
+                 "routedTarget": result.get("routedTarget"), "ts": ts},
+            ])
+        except Exception:  # noqa: BLE001
+            logger.warning("could not persist council chat turn")
         return web.json_response({"ok": True, **result})
+
+    async def get_council_history(request: web.Request) -> web.Response:
+        """Recent council chat thread (oldest-first) so a refresh restores it, never an empty box."""
+        return web.json_response({"ok": True, "turns": persistence.load_council_chat()})
 
     # ---- register routes (order matters: specific before catch-all) -----
     app.router.add_get("/ws",                          ws_handler)
@@ -3954,6 +3977,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/council/{runId}/cancel",     post_council_cancel)
     app.router.add_get( "/api/council/context",           get_council_context)
     app.router.add_post("/api/council/ask",               post_council_ask)
+    app.router.add_get("/api/council/history",            get_council_history)
     app.router.add_get( "/api/execution/workflows",       get_workflows)
     app.router.add_post("/api/execution/workflow/{workflowId}/result", post_workflow_result)
     app.router.add_get( "/api/execution/workflow/{workflowId}", get_workflow_one)
