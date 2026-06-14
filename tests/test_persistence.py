@@ -67,5 +67,24 @@ class AtomicWriteTest(unittest.TestCase):
             self.assertEqual(p.load_tasks(), [])
 
 
+class CouncilChatStoreTest(unittest.TestCase):
+    """The council chat thread store — survives a browser refresh, capped, degrades to []."""
+
+    def test_append_load_and_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d) / ".openfde")
+            self.assertEqual(p.load_council_chat(), [])             # empty when never written
+            p.append_council_chat([{"role": "user", "text": "hi"},
+                                   {"role": "assistant", "text": "hello", "label": "Architect"}])
+            thread = p.load_council_chat()
+            self.assertEqual([t["role"] for t in thread], ["user", "assistant"])
+            self.assertEqual(thread[1]["label"], "Architect")
+            for i in range(120):                                   # cap keeps the most recent
+                p.append_council_chat({"role": "user", "text": f"q{i}"}, cap=80)
+            capped = p.load_council_chat()
+            self.assertEqual(len(capped), 80)
+            self.assertEqual(capped[-1]["text"], "q119")           # newest retained
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -237,16 +237,25 @@ def _run_single(question, decision, context, callers, rh, cps) -> dict:
 
 
 def _run_discuss(question, decision, context, callers, rh, cps) -> dict:
-    notes = {}
-    for role in ("architect", "senior_dev"):          # sequential is fine for v1
+    # Ask both roles CONCURRENTLY — each is a slow subprocess LLM call, and running them
+    # sequentially doubled the "thinking" wait. They are independent processes, so a small thread
+    # pool is safe and roughly halves discuss latency.
+    from concurrent.futures import ThreadPoolExecutor
+    roles = ("architect", "senior_dev")
+
+    def _one(role):
         caller = callers.get(role)
         if not caller:
-            continue
+            return role, None
         system, user = build_role_prompt(role, question, context, discuss=True,
                                          custom_prompt=cps.get(role, ""))
-        txt = _safe_call(caller, system, user)
-        if txt:
-            notes[role] = txt
+        return role, _safe_call(caller, system, user)
+
+    notes = {}
+    with ThreadPoolExecutor(max_workers=len(roles)) as ex:
+        for role, txt in ex.map(_one, roles):
+            if txt:
+                notes[role] = txt
     if not notes:
         return {"mode": "discuss", "roles": [], "primaryRole": "architect",
                 "usedRole": None, "fallback": True, "roleNotes": {},

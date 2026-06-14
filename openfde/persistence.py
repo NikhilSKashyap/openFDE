@@ -227,6 +227,7 @@ class Persistence:
         self.agent_settings_path = openfde_dir / "agent_settings.json"
         self.concept_cards_path = openfde_dir / "concept_cards.json"
         self.episodes_path = openfde_dir / "episodes.json"
+        self.council_chat_path = openfde_dir / "council_chat.json"
         # Latest worktree-level verification evidence (.openfde/verify.json stays
         # reserved for the user's check CONFIG — see openfde/verify.py).
         self.verify_latest_path = openfde_dir / "verify_latest.json"
@@ -607,6 +608,36 @@ class Persistence:
             evidence: dict — run_verification() result.
         """
         self._write_json(self.verify_latest_path, evidence or {})
+
+    # ------------------------------------------------------------------ #
+    #  Council chat thread (read-only Q&A; survives a browser refresh)     #
+    # ------------------------------------------------------------------ #
+
+    def load_council_chat(self) -> list:
+        """Recent council chat turns (oldest-first), so a refresh restores the thread.
+
+        Returns:
+            list[dict] — each {role: 'user'|'assistant', text, label?, provider?,
+                contributorsLabel?, ts}.
+        """
+        raw = self._read_json(self.council_chat_path, [])
+        return raw if isinstance(raw, list) else []
+
+    def append_council_chat(self, turns, cap: int = 80) -> list:
+        """Append one or more chat turns, keeping the most recent ``cap``.
+
+        Args:
+            turns: dict | list[dict] — turn(s) to append (see load_council_chat shape).
+            cap: int — maximum turns retained.
+
+        Returns:
+            list[dict] — the full thread after appending (trimmed to ``cap``).
+        """
+        thread = self.load_council_chat()
+        thread.extend(turns if isinstance(turns, list) else [turns])
+        thread = thread[-cap:]
+        self._write_json(self.council_chat_path, thread)
+        return thread
 
     def add_concept_card(self, card: dict, cap: int = 200) -> dict:
         """Prepend a concept card, keeping the most recent `cap`.
