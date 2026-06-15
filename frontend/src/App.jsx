@@ -11,6 +11,7 @@ import AgentSettings from './components/AgentSettings/AgentSettings'
 import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
 import FunctionPatch, { TrailEditor } from './components/Whiteboard/FunctionPatch'
+import RaiseIssue from './components/Feedback/RaiseIssue'
 import { pickPrimaryFn } from './lib/flowResolve'
 import { watchActivityTargets } from './lib/watchTarget'
 import { useCanvasState } from './store/canvasState'
@@ -105,6 +106,7 @@ export default function App() {
   const archGraphRef = useRef(null)
   const [tasks, pmDispatch] = usePMState()
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [raiseOpen, setRaiseOpen] = useState(false)   // top-bar "Raise OpenFDE issue"
   const [panelMode, setPanelMode] = useState('Agent')
   const [selectedTaskId, setSelectedTaskId] = useState(null)
   const [designEvents, setDesignEvents] = useState([])
@@ -2019,8 +2021,27 @@ export default function App() {
           onCollapseAll={collapseAll}
           onOpenCommandPalette={() => setPaletteOpen(true)}
           onHome={goHome}
+          onRaiseIssue={() => setRaiseOpen(true)}
           repoName={session?.repoName || ''}
         />
+        {/* Global "Raise OpenFDE issue": product feedback from anywhere. Mounted
+            only while open so each open starts a fresh compose. The Architect drafts
+            from the user's words + light context (the backend scrubs repo data) and
+            nothing posts until the user clicks Raise. */}
+        {raiseOpen && (
+          <RaiseIssue
+            onClose={() => setRaiseOpen(false)}
+            context={() => ({
+              view: activeView,
+              episode: (() => {
+                const ep = episodes.find(e => e.status === 'reviewing'
+                  || e.status === 'needs_manual_land') || episodes[0]
+                return ep ? { title: ep.displayTitle || ep.title || '', status: ep.status || '' } : null
+              })(),
+              recentEvents: (designEvents || []).slice(-5).map(e => e?.type).filter(Boolean),
+            })}
+          />
+        )}
         {/* Restore-confidence banner: shows the counts recovered from .openfde the instant boot
             returns, so a slow hydration never reads as "my work vanished". Auto-hides once the
             architecture canvas has hydrated (archGraph loaded). Non-blocking. */}

@@ -1636,6 +1636,28 @@
   line-height: 1.5; resize: vertical; }
 .report-title:focus, .report-body:focus { outline: none; border-color: var(--accent-orange-border); }
 
+/* Global "Raise OpenFDE issue" card — docks top-right under the toolbar, view-
+   independent (overrides the repair-card's hatch-relative right offset). */
+.repair-card.raise-issue-card { top: 52px; right: 18px; z-index: 80; }
+/* Compose-phase kind chips (Bug / Feature / UX / Performance / Other). */
+.report-kinds { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0 2px; }
+.report-kind {
+  padding: 2px 9px; border-radius: 99px; font-size: 10px; font-weight: 600;
+  cursor: pointer; font-family: inherit; color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 14%, transparent);
+}
+.report-kind.on { color: var(--accent-orange); background: var(--accent-orange-soft);
+  border-color: var(--accent-orange-border); }
+/* Review-phase labels preview (the tags the issue will carry). */
+.report-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.report-label {
+  font-size: 9.5px; font-weight: 600; color: var(--text-muted);
+  padding: 1px 7px; border-radius: 99px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border: 0.5px solid color-mix(in srgb, var(--text) 13%, transparent);
+}
+
 /* Markdown inside artifact cards / Story drawer */
 .md p { margin: 0 0 7px; }
 .md p:last-child { margin-bottom: 0; }

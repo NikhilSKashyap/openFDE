@@ -1,4 +1,4 @@
-export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onExpandAll, onCollapseAll, onOpenCommandPalette, onHome, repoName = '' }) {
+export default function Toolbar({ activeTool, setActiveTool, activeView, setActiveView, theme, toggleTheme, hasDottedSelected, onLockSelected, onExpandAll, onCollapseAll, onOpenCommandPalette, onHome, onRaiseIssue, repoName = '' }) {
   const tools = [
     { id: 'select', label: 'Select', icon: <IconCursor /> },
     { id: 'dotted', label: 'Dotted box', icon: <IconDottedBox /> },
@@ -105,6 +105,13 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
 
       {/* Utilities */}
       <div className="toolbar-group">
+        {/* Global product feedback — a bug, idea, rough edge, or perf problem. The
+            Architect drafts an issue you review before it's raised on OpenFDE's tracker. */}
+        <button className="btn" title="Raise an OpenFDE issue (bug · feature · UX · performance)"
+          onClick={onRaiseIssue}>
+          <IconRaiseIssue />
+          <span>Raise issue</span>
+        </button>
         <button className="btn" title="Command palette (⌘K)" onClick={onOpenCommandPalette}>
           <IconPalette />
           <span>⌘K</span>
@@ -158,6 +165,18 @@ function IconSolidArrow() {
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
       <line x1="2" y1="11" x2="8" y2="5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
       <path d="M5,2.2 L10.8,2.2 L10.8,8 z" fill="currentColor"/>
+    </svg>
+  )
+}
+
+function IconRaiseIssue() {
+  // A speech bubble with an exclamation — "tell us something's off / an idea".
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <path d="M1.8 2.2h9.4v6.1H5.6L3 10.4V8.3H1.8z" stroke="currentColor"
+        strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M6.5 4v2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="6.5" cy="7" r="0.6" fill="currentColor" />
     </svg>
   )
 }

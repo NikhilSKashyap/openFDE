@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { composeFixPrompt, draftOpenfdeReport, getSourceSlice, hatchExplain, hatchFlow, hatchRun, hydrateHatch, patchSource, reportOpenfdeIssue } from '../../api/backend'
+import { composeFixPrompt, draftOpenfdeReport, getSourceSlice, hatchExplain, hatchFlow, hatchRun, hydrateHatch, patchSource } from '../../api/backend'
 import { tryCopy } from '../../lib/clipboard'
+import { useDragPos } from '../../lib/useDragPos'
+import ReportIssueCard from '../Feedback/ReportIssueCard'
 import Md from '../../lib/markdown'
 
 /**
@@ -106,27 +108,6 @@ function InlineDiff({ unifiedText }) {
 // (incl. message + code hashes) is computed server-side and rides artifacts.
 const hatchKey = (h) => `${h.file}:${h.line}:${h.test || 'check'}`
 
-// Drag-anywhere position: null until the first drag (CSS dock applies), then
-// {x,y} relative to the offsetParent. Window-bound listeners so the card
-// follows even when the cursor outruns the header.
-function useDragPos() {
-  const [pos, setPos] = useState(null)
-  function startDrag(e) {
-    if (e.target.closest('button, textarea, a')) return
-    const el = e.currentTarget.closest('[data-drag-root]')
-    const parent = el?.offsetParent?.getBoundingClientRect()
-    if (!parent) return
-    const r = el.getBoundingClientRect()
-    const d = { px: e.clientX, py: e.clientY, x: r.left - parent.left, y: r.top - parent.top }
-    const mv = (ev) => setPos({ x: d.x + ev.clientX - d.px, y: d.y + ev.clientY - d.py })
-    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up) }
-    window.addEventListener('pointermove', mv)
-    window.addEventListener('pointerup', up)
-    e.preventDefault()
-  }
-  return [pos, startDrag]
-}
-
 /** One movable artifact card (Explanation / Repair prompt) beside the hatch. */
 function RepairCard({ dock, title, card, onClose, onRegenerate, onMinimize, actions, lensActive }) {
   const [pos, startDrag] = useDragPos()
@@ -156,57 +137,6 @@ function RepairCard({ dock, title, card, onClose, onRegenerate, onMinimize, acti
           {!card.note && card.source && <span className="repair-card-src">{card.source}</span>}
         </div>
       )}
-    </div>
-  )
-}
-
-/** "This one's on us": a failed RUN is an OpenFDE fault — prefilled issue for
- *  OUR tracker, fully editable, posted only when the user clicks. */
-function ReportIssueCard({ report, setReport, onClose, lensActive }) {
-  const [pos, startDrag] = useDragPos()
-  const post = async () => {
-    setReport(r => ({ ...r, posting: true, error: '' }))
-    const res = await reportOpenfdeIssue(report.title, report.body)
-    setReport(r => ({ ...r, posting: false,
-                      url: res?.ok ? res.url : '',
-                      labels: res?.ok ? (res.labels || []) : [],
-                      error: res?.ok ? '' : (res?.error || 'could not post — is gh logged in?') }))
-  }
-  return (
-    <div className={`repair-card ${pos ? '' : `dock-a${lensActive ? ' lens' : ''}`}`} data-drag-root
-         style={pos ? { left: pos.x, top: pos.y, right: 'auto', transform: 'none' } : undefined}>
-      <div className="repair-card-head" onPointerDown={startDrag}>
-        <span className="repair-hatch-dot" />
-        <span className="repair-card-title">Report to OpenFDE</span>
-        <button className="repair-hatch-close" onClick={onClose} title="Close">×</button>
-      </div>
-      <div className="repair-card-body">
-        <div className="repair-card-busy" style={{ fontStyle: 'normal', marginBottom: 6 }}>
-          The repair run failed inside OpenFDE — this is our bug, not your repo's.
-          Review and post it to our tracker.
-        </div>
-        {report.busy ? (
-          <span className="repair-card-busy">{report.busyLabel || 'drafting…'}</span>
-        ) : (
-          <>
-            <input className="report-title" value={report.title}
-                   onChange={e => setReport(r => ({ ...r, title: e.target.value }))} />
-            <textarea className="report-body" rows={9} value={report.body}
-                      onChange={e => setReport(r => ({ ...r, body: e.target.value }))} />
-          </>
-        )}
-      </div>
-      <div className="repair-card-foot">
-        {!report.url && !report.busy && (
-          <button className="repair-card-btn run" onClick={post} disabled={report.posting}>
-            {report.posting ? 'Posting…' : 'Post issue to OpenFDE GitHub'}
-          </button>
-        )}
-        {!report.busy && report.source && <span className="repair-card-src">{report.source}</span>}
-        <span style={{ flex: 1 }} />
-        {report.url && <a className="repair-card-src" href={report.url} target="_blank" rel="noreferrer">filed ✓ {report.url.split('/').slice(-2).join('/')}{(report.labels || []).length ? ` · ${report.labels.join(', ')}` : ''} ↗</a>}
-        {report.error && <span className="repair-card-note">{report.error}</span>}
-      </div>
     </div>
   )
 }
@@ -621,6 +551,8 @@ export default function FunctionPatch({ hatch, slice, z, onClose, onShowFlow, on
       )}
       {report?.open && (
         <ReportIssueCard lensActive={lensActive} report={report} setReport={setReport}
+                         title="Report to OpenFDE" raiseLabel="Post issue to OpenFDE GitHub"
+                         blurb="The repair run failed inside OpenFDE — this is our bug, not your repo's. Review and post it to our tracker."
                          onClose={() => setReport(r => ({ ...r, open: false }))} />
       )}
       {promptCard?.open && !minimized.prompt && (

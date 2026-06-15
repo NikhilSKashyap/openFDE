@@ -230,9 +230,16 @@ export const reproduceIssue = (taskId, regenerate = false) =>
 export const draftOpenfdeReport = (run, hatch) =>
   apiFetch('/api/feedback/draft', { method: 'POST', body: JSON.stringify({ run, hatch }), _timeout: 120_000 })
 
-/** File an OpenFDE bug on OUR tracker — fires only on the user's click. */
-export const reportOpenfdeIssue = (title, body) =>
-  apiFetch('/api/feedback/github-issue', { method: 'POST', body: JSON.stringify({ title, body }), _timeout: 90_000 })
+/** Draft a GENERAL product-feedback issue (top-bar "Raise issue") — the Architect
+    writes it from the user's description + light app context; repo-scrubbed
+    server-side, template fallback. Nothing posts here. */
+export const draftGeneralReport = (description, kind, context) =>
+  apiFetch('/api/feedback/draft-general', { method: 'POST', body: JSON.stringify({ description, kind, context }), _timeout: 120_000 })
+
+/** File an OpenFDE issue on OUR tracker — fires only on the user's click. `opts`
+    may carry a {kind, labels} hint for the general path; absent for the repair path. */
+export const reportOpenfdeIssue = (title, body, opts = {}) =>
+  apiFetch('/api/feedback/github-issue', { method: 'POST', body: JSON.stringify({ title, body, ...opts }), _timeout: 90_000 })
 
 /** Hydrate: every saved artifact for this failure meaning (hatch reopen). */
 export const hydrateHatch = (payload) =>

@@ -84,6 +84,7 @@ from openfde.explain import explain_selection
 from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
 from openfde import failure_flow as failure_flow_mod
+from openfde import feedback as feedback_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
 from openfde.episode_summary import commit_display, is_bad_title, reconcile_task_status, repair_episode_tasks
@@ -2585,6 +2586,39 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response({"ok": True, "title": title, "body": text,
                                   "source": "OpenFDE · template"})
 
+    async def post_feedback_draft_general(request: web.Request) -> web.Response:
+        """Draft a GENERAL product-feedback issue (bug / feature / UX / performance)
+        for OpenFDE's OWN tracker. The ARCHITECT writes it from the user's
+        description plus LIGHT app context (view, OpenFDE version, maybe an episode
+        title) — never the watched repo's source/paths/tests/logs. The draft is
+        deterministically scrubbed and fully editable; NOTHING posts here (the user
+        clicks Raise issue). Falls back to a template when no Architect provider
+        answers, so the flow works offline.
+
+        Returns:
+            web.Response — {ok, title, body, source}.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        description = (body.get("description") or "").strip()[:4000]
+        if not description:
+            return web.json_response({"ok": False, "error": "description required"}, status=400)
+        kind = (body.get("kind") or "other").strip().lower()[:20]
+        raw_ctx = body.get("context") if isinstance(body.get("context"), dict) else {}
+        # Curated, product-level context ONLY — never repo files/paths. The version
+        # is OpenFDE's own commit (the install, not the watched repo).
+        ctx = {k: raw_ctx.get(k) for k in ("view", "episode", "recentEvents")}
+        ctx["openfdeVersion"] = _OPENFDE_COMMIT
+        repo_name = Path(str(path)).name           # a scrub needle, never displayed
+        caller, _cap = _hatch_text_role("architect")
+        loop = asyncio.get_event_loop()
+        out = await loop.run_in_executor(
+            None, lambda: feedback_mod.draft_general(description, kind, ctx,
+                                                     repo_name, caller=caller))
+        return web.json_response({"ok": True, **out})
+
     async def post_feedback_issue(request: web.Request) -> web.Response:
         """File an OpenFDE bug — on OUR tracker, never the watched repo's.
 
@@ -2603,6 +2637,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         text = (body.get("body") or "").strip()[:8000]
         if not title:
             return web.json_response({"ok": False, "error": "title required"}, status=400)
+        # General product feedback carries a kind / labels hint (or the general
+        # marker); the repair-hatch path carries neither and is handled exactly as
+        # before. THIS endpoint only fires on the user's explicit click either way.
+        kind = (body.get("kind") or "").strip().lower()[:20]
+        hint = [str(lb) for lb in (body.get("labels") or []) if isinstance(lb, str)][:4]
+        is_general = bool(kind or hint) or "kind=general-feedback" in text
         own_root = Path(__file__).resolve().parents[1]
         try:
             url = subprocess.run(["git", "-C", str(own_root), "remote", "get-url", "origin"],
@@ -2619,18 +2659,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
         loop = asyncio.get_event_loop()
 
-        # ── Labels — the future auto-pull triages by these. Exhaustive seeds
-        # exist idempotently; the user's sr_dev classifies among EXISTING labels
-        # and may mint ONE new kebab-case label only when nothing fits (GitHub
-        # allows label creation, so the taxonomy grows with the product). ──
-        seeds = [("bug", "Something in OpenFDE misbehaves"),
-                 ("feature", "New capability request"),
-                 ("auto-report", "Raised from inside OpenFDE by the report card"),
-                 ("repair-hatch", "The failure→repair loop surfaces"),
-                 ("runner", "Senior Dev / council runners"),
-                 ("verify-gate", "Checks, receipts, fingerprints"),
-                 ("canvas", "Architecture canvas and lenses"),
-                 ("openpm", "Board, intents, card lifecycle")]
+        # ── Labels — the future auto-pull triages by these. The exhaustive seed
+        # taxonomy (product surfaces + the repair-path labels) exists idempotently;
+        # the role classifies among EXISTING labels and may mint ONE new kebab-case
+        # label only when nothing fits (GitHub allows label creation, so the
+        # taxonomy grows with the product). ──
+        seeds = feedback_mod.SEED_LABELS
 
         def _gh(args, timeout=30):
             return subprocess.run(["gh", *args], capture_output=True, text=True,
@@ -2652,38 +2686,67 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             return have
 
         have = await loop.run_in_executor(None, _prepare_labels)
-        chosen = ["auto-report"]
-        caller, _cap = _hatch_text_role("senior_dev")
-        if caller:
-            listing = "\n".join(f"- {n}: {d}" for n, d in sorted(have.items()))
-            sys2 = ("Classify a GitHub issue for the OpenFDE repo. Prefer EXISTING "
-                    "labels (pick 1-3). Only when none fit, propose ONE new label "
-                    "(kebab-case, short description). Return ONLY JSON "
-                    '{"labels": ["..."], "new": {"name": "...", "description": "..."} '
-                    "or null}.")
-            user2 = f"title: {title}\n\nbody:\n{text[:3000]}\n\nexisting labels:\n{listing}"
-            try:
-                raw = await loop.run_in_executor(None, lambda: caller(sys2, user2))
-                m2 = re.search(r"\{.*\}", raw or "", re.S)
-                data = json.loads(m2.group(0)) if m2 else {}
-                picked = [l for l in (data.get("labels") or [])
-                          if isinstance(l, str) and l in have][:3]
-                new = data.get("new")
-                if not picked and isinstance(new, dict) and new.get("name"):
-                    nm = re.sub(r"[^a-z0-9-]+", "-", str(new["name"]).lower()).strip("-")[:40]
-                    if nm and nm not in have:
-                        await loop.run_in_executor(None, lambda: _gh(
-                            ["label", "create", nm, "-R", slug,
-                             "-d", str(new.get("description") or "")[:90]]))
-                    if nm:
-                        picked = [nm]
-                chosen += picked or ["bug"]
-            except Exception as exc:  # noqa: BLE001 — labels degrade, never block
-                logger.warning("label classification failed: %s", exc)
-                chosen += ["bug"]
+        _classify_sys = ("Classify a GitHub issue for the OpenFDE repo. Prefer "
+                         "EXISTING labels (pick 1-3). Only when none fit, propose ONE "
+                         "new label (kebab-case, short description). Return ONLY JSON "
+                         '{"labels": ["..."], "new": {"name": "...", '
+                         '"description": "..."} or null}.')
+        if is_general:
+            # General product feedback: the deterministic base prefers the seeded
+            # labels (the kind chip + any hint); the ARCHITECT may add more existing
+            # labels or mint one new when nothing fits. Robust without a provider.
+            chosen = feedback_mod.select_labels(kind, hint, have)
+            caller, _cap = _hatch_text_role("architect")
+            if caller:
+                listing = "\n".join(f"- {n}: {d}" for n, d in sorted(have.items()))
+                user2 = f"title: {title}\n\nbody:\n{text[:3000]}\n\nexisting labels:\n{listing}"
+                try:
+                    raw = await loop.run_in_executor(None, lambda: caller(_classify_sys, user2))
+                    m2 = re.search(r"\{.*\}", raw or "", re.S)
+                    data = json.loads(m2.group(0)) if m2 else {}
+                    picks = [lb for lb in (data.get("labels") or []) if isinstance(lb, str)]
+                    new = data.get("new")
+                    if isinstance(new, dict) and new.get("name") and not any(p in have for p in picks):
+                        nm = re.sub(r"[^a-z0-9-]+", "-", str(new["name"]).lower()).strip("-")[:40]
+                        if nm and nm not in have:
+                            await loop.run_in_executor(None, lambda: _gh(
+                                ["label", "create", nm, "-R", slug,
+                                 "-d", str(new.get("description") or "")[:90]]))
+                            have[nm] = ""
+                        if nm:
+                            picks.append(nm)
+                    chosen = feedback_mod.select_labels(kind, hint, have, picks=picks)
+                except Exception as exc:  # noqa: BLE001 — labels degrade, never block
+                    logger.warning("label classification failed: %s", exc)
         else:
-            chosen += ["bug", "repair-hatch"]
-        chosen = list(dict.fromkeys(chosen))
+            # Repair-hatch path — unchanged: the user's sr_dev classifies the receipt.
+            chosen = ["auto-report"]
+            caller, _cap = _hatch_text_role("senior_dev")
+            if caller:
+                listing = "\n".join(f"- {n}: {d}" for n, d in sorted(have.items()))
+                user2 = f"title: {title}\n\nbody:\n{text[:3000]}\n\nexisting labels:\n{listing}"
+                try:
+                    raw = await loop.run_in_executor(None, lambda: caller(_classify_sys, user2))
+                    m2 = re.search(r"\{.*\}", raw or "", re.S)
+                    data = json.loads(m2.group(0)) if m2 else {}
+                    picked = [l for l in (data.get("labels") or [])
+                              if isinstance(l, str) and l in have][:3]
+                    new = data.get("new")
+                    if not picked and isinstance(new, dict) and new.get("name"):
+                        nm = re.sub(r"[^a-z0-9-]+", "-", str(new["name"]).lower()).strip("-")[:40]
+                        if nm and nm not in have:
+                            await loop.run_in_executor(None, lambda: _gh(
+                                ["label", "create", nm, "-R", slug,
+                                 "-d", str(new.get("description") or "")[:90]]))
+                        if nm:
+                            picked = [nm]
+                    chosen += picked or ["bug"]
+                except Exception as exc:  # noqa: BLE001 — labels degrade, never block
+                    logger.warning("label classification failed: %s", exc)
+                    chosen += ["bug"]
+            else:
+                chosen += ["bug", "repair-hatch"]
+            chosen = list(dict.fromkeys(chosen))
 
         def _post():
             args = ["issue", "create", "-R", slug, "--title", title, "--body", text]
@@ -4231,6 +4294,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/hatch/artifacts",           post_hatch_artifacts)
     app.router.add_post("/api/feedback/github-issue",     post_feedback_issue)
     app.router.add_post("/api/feedback/draft",            post_feedback_draft)
+    app.router.add_post("/api/feedback/draft-general",    post_feedback_draft_general)
     app.router.add_get( "/api/concept-cards",             get_concept_cards)
     app.router.add_post("/api/concept-cards",             post_concept_card)
     app.router.add_post("/api/execution/compile-workflow", post_compile_workflow)
