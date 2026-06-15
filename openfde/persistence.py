@@ -228,6 +228,10 @@ class Persistence:
         self.concept_cards_path = openfde_dir / "concept_cards.json"
         self.episodes_path = openfde_dir / "episodes.json"
         self.council_chat_path = openfde_dir / "council_chat.json"
+        # Low-confidence backfilled transcript fragments live HERE, never in episodes.json — they
+        # are importable later but never consume a P<n> until accepted. P<n> means a real prompt.
+        self.backfill_candidates_path = openfde_dir / "backfill_candidates.json"
+        self.openfde_dir = openfde_dir          # for the warm-start boot cache (.openfde/cache/)
         # Latest worktree-level verification evidence (.openfde/verify.json stays
         # reserved for the user's check CONFIG — see openfde/verify.py).
         self.verify_latest_path = openfde_dir / "verify_latest.json"
@@ -638,6 +642,80 @@ class Persistence:
         thread = thread[-cap:]
         self._write_json(self.council_chat_path, thread)
         return thread
+
+    # ------------------------------------------------------------------ #
+    #  Backfill candidates (low-confidence transcript fragments)           #
+    # ------------------------------------------------------------------ #
+    #  Quarantine for backfilled prompts that lack real file/commit
+    #  evidence. They are NEVER episodes and NEVER get a P<n> — importable
+    #  later, but unnumbered until accepted. Keeps P<n> meaning a real prompt.
+
+    def load_backfill_candidates(self) -> list:
+        """Quarantined backfill candidates ({} raw prompt + captureKey + source, no sequence/tag)."""
+        raw = self._read_json(self.backfill_candidates_path, [])
+        return raw if isinstance(raw, list) else []
+
+    def backfill_candidate_count(self) -> int:
+        return len(self.load_backfill_candidates())
+
+    def add_backfill_candidate(self, candidate: dict, cap: int = 4000) -> None:
+        """Store a low-confidence backfilled prompt as a candidate (NOT an episode). Idempotent by
+        captureKey; strips any sequence/tag so it can never masquerade as a numbered prompt."""
+        if not isinstance(candidate, dict):
+            return
+        cands = self.load_backfill_candidates()
+        key = candidate.get("captureKey")
+        if key and any((c.get("captureKey") or "") == key for c in cands):
+            return
+        c = {k: v for k, v in candidate.items() if k not in ("sequence", "tag")}
+        cands.append(c)
+        self._write_json(self.backfill_candidates_path, cands[-cap:])
+
+    def quarantine_backfill_pollution(self) -> dict:
+        """Migration: move low-confidence backfill OUT of episodes.json into backfill_candidates.json,
+        then renumber the remaining REAL episodes cleanly (P1..PN, oldest first).
+
+        A polluted record is ``source == 'openfde-backfill'`` with ``backfillConfidence`` in
+        {discussion, needs_review} — a transcript fragment with no commit/real-file evidence that was
+        wrongly consuming a durable P<n>. Idempotent: once moved, a re-run is a no-op. Commit trailers
+        reference the episodeId (never the tag), so renumbering never breaks a landed-commit link; the
+        old tag is still kept under ``tagAliases`` for any display that referenced it.
+
+        Returns:
+            dict — {quarantined, real, candidates}.
+        """
+        eps = self.load_episodes()
+
+        def _polluted(e):
+            return (e.get("source") == "openfde-backfill"
+                    and e.get("backfillConfidence") in ("discussion", "needs_review"))
+
+        bad = [e for e in eps if _polluted(e)]
+        real = [e for e in eps if not _polluted(e)]
+        if not bad:
+            return {"quarantined": 0, "real": len(real),
+                    "candidates": self.backfill_candidate_count()}
+
+        cands = self.load_backfill_candidates()
+        seen = {(c.get("captureKey") or "") for c in cands}
+        for e in bad:
+            k = e.get("captureKey") or ""
+            if k and k in seen:
+                continue
+            cands.append({kk: vv for kk, vv in e.items() if kk not in ("sequence", "tag")})
+            seen.add(k)
+        self._write_json(self.backfill_candidates_path, cands[-4000:])
+
+        for i, e in enumerate(sorted(real, key=lambda x: x.get("createdAt") or ""), start=1):
+            old = e.get("tag")
+            if old and old != f"P{i}":
+                e["tagAliases"] = sorted(set((e.get("tagAliases") or []) + [old]))
+            e["sequence"] = i
+            e["tag"] = f"P{i}"
+        real.sort(key=lambda x: x.get("sequence") or 0, reverse=True)       # store newest-first
+        self._write_json(self.episodes_path, real)
+        return {"quarantined": len(bad), "real": len(real),
+                "candidates": self.backfill_candidate_count()}
 
     def add_concept_card(self, card: dict, cap: int = 200) -> dict:
         """Prepend a concept card, keeping the most recent `cap`.
