@@ -48,8 +48,6 @@ GET  /{path}                   — static assets or SPA fallback
 import asyncio
 import json
 import logging
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 import os
 import re
 import secrets
@@ -428,12 +426,6 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     _boot_t0    = time.perf_counter()        # for the "server bound in Xms" startup-timing log
     persistence = Persistence(openfde_dir)
     manager     = ConnectionManager()
-
-    # VSCode-style isolation, applied narrowly: ONE long-lived worker process for the CPU-heavy repo
-    # scan (analyze_repo, ~1s). Running it here instead of a thread keeps the main GIL — and so
-    # /api/boot, the WebSocket, and cache reads — free during the scan. Light executor work stays on
-    # threads. Lazy: the worker only spawns on the first scan; shut down gracefully on exit.
-    arch_pool = ProcessPoolExecutor(max_workers=1)
 
     # One-time migration BEFORE the server serves: move low-confidence backfill (discussion /
     # needs_review transcript fragments) out of episodes.json into backfill_candidates.json and
@@ -1001,9 +993,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     async def _archgraph_async(force: bool = False) -> dict:
         """ArchGraph for the watched repo, cached by worktree signature. A hit (memory or matching
-        disk snapshot) returns instantly. On a miss, the ~1s analyze_repo() runs on the process pool
-        — NOT a thread — so it never holds the main GIL and the event loop stays free for /api/boot,
-        the WebSocket, and cache reads during the scan. Falls back to a thread if the worker dies."""
+        disk snapshot) returns instantly. On a miss, the ~1s analyze_repo() runs off the event loop
+        in a thread, and — crucially — /api/boot never waits on it (it serves the warm snapshot), so
+        the scan happens in the background and the cockpit is interactive immediately."""
         loop = asyncio.get_event_loop()
         st = await loop.run_in_executor(None, lambda: git_status(path))     # git = I/O, thread is fine
         sig = boot_cache_mod.dirty_signature(st)
@@ -1017,14 +1009,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 logger.info("archgraph: served from disk snapshot (no scan)")
                 return warm["arch"]
         t0 = time.perf_counter()
-        try:
-            graph = await loop.run_in_executor(arch_pool, analyze_repo, path)   # CPU → worker process
-            where = "process pool"
-        except (BrokenProcessPool, OSError) as exc:        # worker crashed / unavailable → degrade
-            logger.warning("arch pool unavailable (%s); falling back to a thread", exc)
-            graph = await loop.run_in_executor(None, analyze_repo, path)
-            where = "thread fallback"
-        logger.info("archgraph: scanned in %dms (%s)", int((time.perf_counter() - t0) * 1000), where)
+        graph = await loop.run_in_executor(None, analyze_repo, path)        # CPU scan, off the loop
+        logger.info("archgraph: scanned in %dms", int((time.perf_counter() - t0) * 1000))
         _arch_mem.update(sig=sig, graph=graph)
         try:                                            # keep the warm cache fresh — best-effort
             boot_cache_mod.write_warm(
@@ -1056,7 +1042,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         loop = asyncio.get_event_loop()
         t0 = time.perf_counter()
         # build_boot_payload reads CACHE/cheap state only — it must never analyze/backfill. Run it in
-        # a thread (its work is git + small file reads = I/O), so even boot never touches the loop.
+        # a thread (its work is git + small file reads), so the handler itself never blocks the loop.
         payload = await loop.run_in_executor(
             None, build_boot_payload, path, persistence, server_started_at, _OPENFDE_VERSION)
         if want_canvas:                                  # one-shot first paint: inline the cached arch
@@ -4337,7 +4323,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     backfill_task = asyncio.create_task(_run_backfill())
 
     try:
-        await asyncio.Event().wait()       # run until cancelled / KeyboardInterrupt
+        await asyncio.Event().wait()       # run until cancelled / KeyboardInterrupt (Ctrl-C)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
@@ -4348,6 +4334,5 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 await t
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-        arch_pool.shutdown(wait=False, cancel_futures=True)   # graceful: drop the worker process
         await runner.cleanup()
         release_watch_lock(watch_lock)
