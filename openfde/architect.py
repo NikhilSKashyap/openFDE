@@ -477,6 +477,8 @@ def _extract_functions(root: Path, files: list) -> tuple:
             functions.extend(fns)
             warnings.extend(warns)
         elif f.language in ("JavaScript", "TypeScript"):
+            if is_js_noise_file(f.path):       # config / *.d.ts / stories → file only
+                continue
             fns = _extract_js_functions(abs_path, f.path, f.module_id)
             functions.extend(fns)
 
@@ -766,7 +768,46 @@ _JS_FIELD_ARROW_RE = re.compile(
 _JS_METHOD_SKIP: frozenset = frozenset({
     "if", "for", "while", "switch", "catch", "return", "function", "do", "else",
     "with", "typeof", "await", "yield", "new", "void", "delete", "in", "of", "case",
+    "constructor",
 })
+
+# A module-level object literal bound to a name: `const api = { … }`. Its method
+# properties (a service / handler / store object) are real app symbols — but only
+# the IMMEDIATE level, capped, so config/options objects and nested literals don't
+# flood the canvas. (L1-C — conservative; non-named/inline objects stay L1-D.)
+_JS_OBJ_DECL_RE = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*\{", re.M)
+# Inside an object: a shorthand method `foo() {` or a function/arrow property
+# `foo: () => …` / `foo: function`. Indentation is captured to keep only the
+# immediate (shallowest) level.
+_JS_OBJ_METHOD_RE = re.compile(
+    r"^([ \t]+)(?:async\s+|get\s+|set\s+|\*\s*)*(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^={;]+?)?\{", re.M)
+_JS_OBJ_PROP_FN_RE = re.compile(
+    r"^([ \t]+)(\w+)\s*:\s*(?:async\s+)?(?:function\*?\s*\(|(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=;{]+?)?=>)", re.M)
+_JS_OBJ_METHOD_CAP = 16
+
+# Files whose SYMBOLS are config / build / type-declaration / story noise, not app
+# code under test. Kept on the canvas as files, but not mined for functions — so the
+# flow lens never targets a config object or a `.d.ts` shim.
+_JS_NOISE_RE = re.compile(
+    r"(?:^|/)(?:[\w.-]+\.config\.(?:[cm]?[jt]s)|[\w.-]+\.d\.[cm]?ts|"
+    r"[\w.-]+\.stories\.(?:[cm]?[jt]sx?)|[\w.-]+\.stories\.mdx|"
+    r"\.eslintrc\.(?:[cm]?js)|babel\.config\.(?:[cm]?js)|"
+    r"(?:next|nuxt|svelte|astro|remix|tailwind|postcss|rollup|webpack|jest|vitest|"
+    r"playwright|cypress)\.config\.(?:[cm]?[jt]s))$", re.I)
+# A JS/TS test file (Vitest / Jest / Playwright conventions).
+_JS_TEST_RE = re.compile(
+    r"(?:^|/)(?:__tests__/.+|[\w.-]+\.(?:test|spec)\.(?:[cm]?[jt]sx?))$", re.I)
+
+
+def is_js_noise_file(rel_path: str) -> bool:
+    """True for JS/TS config / type-declaration / story files: real files, but their
+    symbols are not app code under test, so they are not mined for functions."""
+    return bool(_JS_NOISE_RE.search((rel_path or "").replace("\\", "/")))
+
+
+def is_js_test_file(rel_path: str) -> bool:
+    """True for JS/TS test files (``*.test.*``, ``*.spec.*``, ``__tests__/``)."""
+    return bool(_JS_TEST_RE.search((rel_path or "").replace("\\", "/")))
 
 
 def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list:
@@ -833,6 +874,33 @@ def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list
                     continue
                 m_seen.add(meth)
                 emit(f"{cls}.{meth}", _line_of(line_starts, body_open + 1 + mm.start()))
+
+    # Module-level named object literals → their immediate method properties as
+    # `obj.method` (service / handler / store objects). Conservative: only the
+    # shallowest indent level, capped, control-flow keywords excluded.
+    for om in _JS_OBJ_DECL_RE.finditer(scrubbed):
+        obj = om.group(1)
+        span = _brace_block(scrubbed, om.start())
+        if span is None:
+            continue
+        body_open, body_close = span
+        body = scrubbed[body_open + 1:body_close]
+        cand = []
+        for mre in (_JS_OBJ_METHOD_RE, _JS_OBJ_PROP_FN_RE):
+            for mm in mre.finditer(body):
+                cand.append((len(mm.group(1)), mm.group(2), body_open + 1 + mm.start(2)))
+        cand = [c for c in cand if c[1] not in _JS_METHOD_SKIP]
+        if not cand:
+            continue
+        min_indent = min(c[0] for c in cand)
+        o_seen: set = set()
+        for indent, meth, off in cand:
+            if indent != min_indent or meth in o_seen:
+                continue
+            o_seen.add(meth)
+            if len(o_seen) > _JS_OBJ_METHOD_CAP:
+                break
+            emit(f"{obj}.{meth}", _line_of(line_starts, off))
 
     return functions
 
@@ -1355,6 +1423,118 @@ def _parse_js_import_map(source, source_rel, js_files, default_export_by_file) -
         else:
             out[bind] = (target, None, "namespace")
     return out
+
+
+def _resolve_js_file_fs(specifier: str, source_rel: str, root: Path):
+    """Resolve a relative import to a repo file by probing the FILESYSTEM (no
+    precomputed file set) — for single-file callers like the failure lens."""
+    if not specifier.startswith("."):
+        return None
+    base = os.path.normpath(os.path.join(os.path.dirname(source_rel), specifier))
+    base = base.replace(os.sep, "/")
+    for cand in ([base] + [base + e for e in _JS_RESOLVE_EXTS]
+                 + [base + "/index" + e for e in _JS_RESOLVE_EXTS]):
+        if (root / cand).is_file():
+            return cand
+    return None
+
+
+def js_call_context(root, rel_file: str, line: int, cap: int = 4) -> dict:
+    """For a failing JS/TS site (``rel_file:line``), the enclosing function (if the
+    site sits inside an extracted one) and the resolved IMPLEMENTATION calls the
+    failure flows into — same-file callees (high) and callees reached through a
+    RESOLVABLE relative import (medium), NEAREST the failing line first. Reuses the
+    L1-B extraction; deterministic and conservative. Never raises.
+
+    This is the JS/TS analogue of the Python failure flow's AST callee resolution:
+    given the test/function that failed, find the product function it exercises so
+    the lens can light the connected implementation.
+
+    Returns:
+        dict — ``{"function": name|"", "line": int, "calls": [{name, file, line,
+        confidence, callLine}]}``.
+    """
+    root = Path(root)
+    line = int(line or 0)
+    try:
+        source = (root / rel_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"function": "", "line": line, "calls": []}
+    scrubbed = _scrub_js(source)
+    line_starts = _line_starts(scrubbed)
+
+    defs = sorted(_extract_js_functions(root / rel_file, rel_file, ""), key=lambda f: f.line)
+    # The enclosing def (innermost brace-matched span containing `line`). When the
+    # failing line sits in a bare test callback (not an extracted def), there is no
+    # enclosing function — we scan the whole file, nearest-line-first.
+    enc_name, scan_lo, scan_hi = "", 1, len(line_starts)
+    best = None
+    for i, d in enumerate(defs):
+        nxt = defs[i + 1].line if i + 1 < len(defs) else None
+        e = _js_body_end_line(scrubbed, line_starts, d.line, nxt)
+        if d.line <= line <= e and (best is None or d.line > best[0]):
+            best = (d.line, e, d)
+    if best is not None:
+        enc_name, scan_lo, scan_hi = best[2].name, best[0], best[1]
+
+    scan_start = line_starts[scan_lo - 1]
+    scan_end = line_starts[scan_hi] if scan_hi < len(line_starts) else len(scrubbed)
+    region = scrubbed[scan_start:scan_end]
+
+    local = {d.name: d for d in defs if "." not in d.name}
+    # Resolve this file's relative imports against the filesystem, then extract each
+    # target's functions so a resolved callee carries its real definition line.
+    js_files: set = set()
+    for rgx in (_RE_JS_IMPORT_STMT, _RE_JS_REQUIRE_STMT):
+        for m in rgx.finditer(source):
+            t = _resolve_js_file_fs(m.group("spec"), rel_file, root)
+            if t:
+                js_files.add(t)
+    default_exports, target_defs = {}, {}
+    for t in js_files:
+        try:
+            tsrc = (root / t).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        dm = _RE_JS_DEFAULT_EXPORT.search(_scrub_js(tsrc))
+        if dm:
+            default_exports[t] = dm.group(1) or dm.group(2)
+        target_defs[t] = {f.name: f.line for f in _extract_js_functions(root / t, t, "")}
+    import_map = _parse_js_import_map(source, rel_file, js_files, default_exports)
+
+    found = []   # (proximity_to_fail, name, file, line, confidence, callLine)
+
+    def consider(name, tfile, tline, conf, off):
+        cl = _line_of(line_starts, scan_start + off)
+        found.append((abs(cl - line), name, tfile, tline, conf, cl))
+
+    for nm, d in local.items():                          # same-file calls (high)
+        if nm == enc_name:
+            continue
+        for mm in re.finditer(r"(?<![\w.$])" + re.escape(nm) + r"\s*\(", region):
+            consider(nm, rel_file, d.line, "high", mm.start())
+    for loc, (trel, original, kind) in import_map.items():   # resolved imports (medium)
+        if kind == "namespace":
+            for mm in re.finditer(r"(?<![\w.$])" + re.escape(loc) + r"\.(\w+)\s*\(", region):
+                consider(mm.group(1), trel, target_defs.get(trel, {}).get(mm.group(1)),
+                         "medium", mm.start())
+        elif original:
+            for mm in re.finditer(r"(?<![\w.$])" + re.escape(loc) + r"\s*\(", region):
+                consider(original, trel, target_defs.get(trel, {}).get(original),
+                         "medium", mm.start())
+
+    found.sort(key=lambda c: c[0])
+    calls, seen = [], set()
+    for _prox, name, tfile, tline, conf, cl in found:
+        key = (tfile, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append({"name": name, "file": tfile, "line": tline,
+                      "confidence": conf, "callLine": cl})
+        if len(calls) >= cap:
+            break
+    return {"function": enc_name, "line": line, "calls": calls}
 
 
 def _js_flows(abs_path, rel, module_id, flows, func_dicts, fn_by_id,

@@ -53,7 +53,10 @@ _SKIP_DIRS = {".git", ".openfde", "node_modules", "dist", "build", ".next", "out
 
 # Scripts we prefer to run, most-specific first. "test:unit" is the surest unit
 # signal; "test" is the conventional entry; bare "vitest"/"jest" scripts are common.
-_SCRIPT_PRIORITY = ("test:unit", "test", "vitest", "jest")
+# The e2e/playwright scripts come LAST — unit tests are the default gate; a
+# playwright-only repo still discovers a check (but browsers may need install).
+_SCRIPT_PRIORITY = ("test:unit", "test", "vitest", "jest",
+                    "test:e2e", "e2e", "test:playwright", "playwright")
 
 _MAX_FAILURES = 5
 
@@ -72,6 +75,11 @@ _VITEST_LOC_RE = re.compile(
 # Node/Jest stack frame: "at fn (src/a.test.js:8:15)" or "at src/a.test.js:8:15"
 _NODE_FRAME_RE = re.compile(
     rf"\bat\s+(?:(.+?)\s+\()?{_FILE_RE}:(\d+)(?::\d+)?\)?", re.M)
+# Playwright per-failure header: "  1) [chromium] › e2e/a.spec.ts:6:3 › test name"
+# (the project tag and the leading number are both optional in trimmed output).
+_PW_FAIL_RE = re.compile(
+    rf"^\s*\d+\)\s+(?:\[[^\]]+\]\s+[›>]\s+)?{_FILE_RE}:(\d+):\d+\s+[›>]\s+"
+    r"(.+?)(?:\s+[=─-]{3,})?\s*$", re.M)
 
 
 # ── repo facts ───────────────────────────────────────────────────────────────
@@ -141,6 +149,10 @@ def _infer_framework(scripts, pkg, script_name) -> str:
         return "vitest"
     if script_name == "jest" or re.search(r"\bjest\b", cmd) or _has_dep("jest", pkg):
         return "jest"
+    if (script_name in ("playwright", "test:playwright", "test:e2e", "e2e")
+            or re.search(r"\bplaywright\b", cmd)
+            or _has_dep("@playwright/test", pkg) or _has_dep("playwright", pkg)):
+        return "playwright"
     if re.search(r"\bnode\s+--test\b", cmd) or "node:test" in cmd:
         return "node-test"
     return "node-test"          # honest neutral default (Node's built-in runner)
@@ -215,16 +227,25 @@ def _parse_js_failures(output, root) -> list:
     """
     text = output or ""
     root_s = str(Path(root).resolve())
-    anchors = [(m.start(), m.group(2)) for m in _VITEST_FAIL_RE.finditer(text)]
-    if not anchors:                              # vitest and jest never co-occur
-        anchors = [(m.start(), m.group(1)) for m in _JEST_BULLET_RE.finditer(text)]
+    # (start, test-chain, anchor_file|None, anchor_line|None). Only one runner's
+    # markers appear in a given output, tried most-structured first.
+    anchors = [(m.start(), m.group(2), None, None) for m in _VITEST_FAIL_RE.finditer(text)]
+    if not anchors:                              # jest "● chain" bullets
+        anchors = [(m.start(), m.group(1), None, None) for m in _JEST_BULLET_RE.finditer(text)]
+    if not anchors:                              # playwright "N) … › file:line › name"
+        anchors = [(m.start(), m.group(3), m.group(1), int(m.group(2)))
+                   for m in _PW_FAIL_RE.finditer(text)]
     anchors.sort(key=lambda a: a[0])
     if not anchors:
         return []
     bounds = [a[0] for a in anchors] + [len(text)]
     out, seen = [], set()
-    for i, (start, chain) in enumerate(anchors):
+    for i, (start, chain, afile, aline) in enumerate(anchors):
         loc = _first_in_repo_js_loc(text[start:bounds[i + 1]], root_s)
+        if loc is None and afile is not None:    # playwright anchor carries file:line
+            rel = _loc_in_repo(root_s, afile)
+            if rel is not None:
+                loc = {"func": "", "file": rel, "line": aline}
         if loc is None:
             continue
         key = f"{loc['file']}:{loc['line']}"

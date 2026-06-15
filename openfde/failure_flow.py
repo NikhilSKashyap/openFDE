@@ -201,14 +201,183 @@ def chain_files(root, output_tail: str, fallback_file: str = "", cap: int = 4) -
     """
     raw = [(m.start(), m.group(1)) for m in _FRAME_RE.finditer(output_tail or "")]
     raw += [(m.start(), m.group(1)) for m in _PYTEST_FRAME_RE.finditer(output_tail or "")]
+    raw += [(m.start(), m.group("file")) for m in _JS_AT_FRAME_RE.finditer(output_tail or "")]
+    raw += [(m.start(), m.group("file")) for m in _JS_PTR_FRAME_RE.finditer(output_tail or "")]
     out = []
     for _, fpath in sorted(raw):
-        rel = _frame_rel(root, fpath)
+        rel = _frame_rel(root, fpath) or _js_frame_rel(root, fpath)
         if rel and rel not in out:
             out.append(rel)
     if fallback_file and fallback_file not in out:
         out.append(fallback_file)
     return out[:cap]
+
+
+# ── JS/TS failure flow (regex — the Python AST path's analogue) ──────────────── #
+
+_JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+_JS_FILE = r"(?P<file>\S+?\.(?:[cm]?[jt]sx?))"
+# Node / Jest / Playwright stack frame: "at fn (file:line:col)" or "at file:line:col".
+_JS_AT_FRAME_RE = re.compile(
+    rf"\bat\s+(?:(?P<fn>[\w.$<>\[\]]+)\s+\()?{_JS_FILE}:(?P<line>\d+)(?::\d+)?\)?")
+# Vitest pointer frame: " ❯ fn file:line:col" / " ❯ file:line:col" (× also used).
+_JS_PTR_FRAME_RE = re.compile(
+    rf"^\s*[❯×]\s+(?:(?P<fn>\S[^\n(]*?)\s+)?{_JS_FILE}:(?P<line>\d+)(?::\d+)?", re.M)
+
+
+def _js_frame_rel(root, fpath: str):
+    """Repo-relative path for a JS/TS stack frame, or None (vendor / outside)."""
+    p = (fpath or "").replace("\\", "/")
+    root_s = str(root).replace("\\", "/")
+    if p.startswith("/"):
+        if not p.startswith(root_s + "/"):
+            return None
+        p = p[len(root_s) + 1:]
+    if "node_modules/" in p or p.startswith("node_modules"):
+        return None
+    try:
+        resolve_repo_path(root, p)
+    except (SourceEditError, ValueError, OSError):
+        return None
+    return p
+
+
+def _clean_js_fn(fn: str) -> str:
+    """A usable function name from a JS frame, or '' for anonymous/runtime frames."""
+    fn = (fn or "").strip()
+    if not fn or "<anonymous>" in fn:
+        return ""
+    fn = re.sub(r"^(?:Object|Module|async|new)\.", "", fn)   # drop runtime prefixes
+    return "" if fn in ("Object", "Module", "<anonymous>") else fn
+
+
+def _read_fail_line(root, file, line) -> str:
+    try:
+        src = resolve_repo_path(root, file).read_text(encoding="utf-8", errors="replace")
+        lines = src.split("\n")
+        if 1 <= line <= len(lines):
+            return lines[line - 1].strip()
+    except (SourceEditError, OSError, ValueError):
+        pass
+    return ""
+
+
+def _js_failure_flow(root, *, file, line, func="", test="", output_tail="") -> dict:
+    """The JS/TS failure flow: the same {nodes, edges, primaryPath, primaryEdges}
+    shape the canvas lens draws for Python, built from the JS stack frames (the
+    caller chain) plus the connected IMPLEMENTATION the failing site calls
+    (``architect.js_call_context`` resolves it through imports). For an assertion
+    failure the product fn isn't in the stack, so the resolved call is what lights
+    up; for a thrown error the chain already reaches it. Deterministic; never raises.
+    """
+    from openfde import architect      # lazy: avoid an import cycle at module load
+    line = int(line or 0)
+    fail_text = _read_fail_line(root, file, line)
+
+    # 1) Caller chain. JS stacks print innermost-first; reverse to outermost-first
+    #    so the path reads test → … → failing site (like a Python traceback).
+    frames = []
+    for rgx in (_JS_AT_FRAME_RE, _JS_PTR_FRAME_RE):
+        for m in rgx.finditer(output_tail or ""):
+            rel = _js_frame_rel(root, m.group("file"))
+            if rel:
+                frames.append((m.start(), rel, int(m.group("line")),
+                               _clean_js_fn(m.groupdict().get("fn") or "")))
+    frames.sort(key=lambda f: f[0])
+    chain = []
+    for _, rel, fl, fn in reversed(frames):
+        if chain and chain[-1]["file"] == rel and chain[-1]["func"] == fn:
+            continue
+        chain.append({"file": rel, "line": fl, "func": fn})
+    chain = [c for c in chain if c["func"] or c["file"] == file][-4:]
+
+    ctx = architect.js_call_context(root, file, line)
+    enc = ctx.get("function") or ""
+    tname = test or func or enc or "test"
+    if not chain:
+        chain = [{"file": file, "line": line, "func": tname}]
+    if chain[-1]["file"] == file and not chain[-1]["func"]:
+        chain[-1]["func"] = enc or tname
+    for c in chain:                                  # never leave a node label blank
+        c["func"] = c["func"] or tname
+
+    nodes, edges, seen = [], [], set()
+
+    def add_node(nid, label, nfile=None, nline=None, fail=False, detail=""):
+        if nid in seen or len(nodes) >= _MAX_NODES:
+            return
+        seen.add(nid)
+        n = {"id": nid, "label": label}
+        if nfile:
+            n["file"] = nfile
+        if nline:
+            n["line"] = nline
+        if fail:
+            n["fail"] = True
+        if detail:
+            n["detail"] = detail
+        nodes.append(n)
+
+    def add_edge(frm, to, label, confidence):
+        if len(edges) < _MAX_EDGES and frm in seen and to in seen:
+            edges.append({"from": frm, "to": to, "label": label, "confidence": confidence})
+
+    ids = []
+    for i, fr in enumerate(chain):
+        base = fr["func"]
+        ids.append(base if all(c["func"] != base for c in chain[:i]) else f"{base}@{fr['line']}")
+    impl = (ctx.get("calls") or [None])[0]
+    # A thrown error already reaches the implementation in the stack — don't add a
+    # duplicate node; mark the chain's terminus as the failure instead.
+    if impl and chain[-1]["func"] == impl["name"] and chain[-1]["file"] == impl["file"]:
+        impl = None
+    for i, fr in enumerate(chain):
+        last = i == len(chain) - 1
+        fail = last and impl is None
+        add_node(ids[i], fr["func"], fr["file"], fr["line"],
+                 fail=fail, detail=(fail_text if fail else ""))
+    for i in range(len(chain) - 1):
+        add_edge(ids[i], ids[i + 1],
+                 f"calls {chain[i + 1]['func']}() — line {chain[i]['line']}", "high")
+    fail_id = ids[-1]
+
+    # 2) The connected implementation = the failure terminus (the bug lives in the
+    #    product function under test), plus a little call context.
+    primary_extra = []
+    if impl:
+        iid = impl["name"]
+        add_node(iid, impl["name"], impl["file"], impl["line"], fail=True,
+                 detail=(fail_text or f"exercised by {tname}"))
+        label = (f"fails through {impl['name']}() — {fail_text[:64]}" if fail_text
+                 else f"calls {impl['name']}()")
+        add_edge(fail_id, iid, label, impl["confidence"])
+        primary_extra = [{"id": iid, "file": impl["file"], "function": impl["name"],
+                          "line": impl["line"]}]
+        for c in (ctx.get("calls") or [])[1:3]:
+            add_node(c["name"], c["name"], c["file"], c["line"])
+            add_edge(fail_id, c["name"], f"calls {c['name']}()", c["confidence"])
+
+    # primaryPath = the distinct functions, source → … → failure (the impl terminus).
+    order, pseen = [], set()
+    for i, fr in enumerate(chain):
+        key = (fr["file"], fr["func"])
+        if key in pseen:
+            continue
+        pseen.add(key)
+        order.append({"id": ids[i], "file": fr["file"], "function": fr["func"], "line": fr["line"]})
+    order += primary_extra
+    n = len(order)
+    for j, nd in enumerate(order):
+        nd["role"] = "failure" if j == n - 1 else ("source" if j == 0 else "step")
+    label_by_pair = {(e["from"], e["to"]): e.get("label", "") for e in edges}
+    pedges = [{"from": a["id"], "to": b["id"],
+               "label": _short_edge_label(label_by_pair.get((a["id"], b["id"]), ""), b["function"])}
+              for a, b in zip(order, order[1:])]
+    chain_names = " → ".join(o["function"] for o in order)
+    summary = (f"{chain_names} — fails at line {line}"
+               + (f": {fail_text[:90]}" if fail_text else "."))
+    return {"summary": summary, "nodes": nodes, "edges": edges,
+            "primaryPath": order, "primaryEdges": pedges}
 
 
 def build_failure_flow(root, *, file, line, func="", test="", output_tail="") -> dict:
@@ -231,6 +400,9 @@ def build_failure_flow(root, *, file, line, func="", test="", output_tail="") ->
         dict — {summary, nodes:[{id,label,file,line,fail?,detail?}],
                 edges:[{from,to,label,confidence}]}; never raises.
     """
+    if str(file or "").endswith(_JS_EXTS):       # JS/TS → the regex/import-resolved path
+        return _js_failure_flow(root, file=file, line=line, func=func,
+                                test=test, output_tail=output_tail)
     line = int(line or 0)
     fail_text = ""
     nodes, edges, seen = [], [], set()
