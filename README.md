@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="frontend/public/banner.svg" alt="OpenFDE, the orange box for agentic development" width="100%" />
+  <img src="frontend/public/banner.svg" alt="OpenFDE, the orange box for coding with agents" width="100%" />
 </p>
 
 # OpenFDE
 
-**The orange box for agentic development.**
+**The orange box for coding with agents.**
 
 Flight recorders are painted orange so they can be found later. OpenFDE brings
-that idea to software work. It records how your codebase got built: prompts,
-file changes, tasks, commits, checks, PRs, decisions, and the story they add up
-to.
+that idea to software work. It records how a codebase got built: prompts, file
+changes, tasks, commits, checks, PRs, decisions, and the story they add up to
+later.
 
 **FDE means Forward-Deployed Engineer.** A good FDE embeds with a team, works
 inside its boundaries, tests what they ship, files the PR with context, and
@@ -17,16 +17,15 @@ leaves behind a record of what was tried, dropped, and delivered. OpenFDE is the
 open layer that helps any coding agent behave more like that.
 
 It is not an editor, and it does not replace yours. Keep using Claude Code,
-Codex, Cursor, VS Code, or a plain terminal. OpenFDE sits above them as the
-system of record for agent-built software. It shows the code as a living canvas,
-lets you scope the part you want changed, runs an Agent Council, reviews the
-actual diff, commits the work, and records what happened.
+Codex, Cursor, VS Code, or a plain terminal. OpenFDE sits above that workflow. It
+shows the repo as a living canvas, lets you scope what can change, runs an Agent
+Council, reviews the real diff, commits the work, and keeps the record.
 
 It also remembers. Prompts from the council, OpenFDE wrappers, and passive
 Claude Code/Codex capture become episodes. Each episode gets attributed scope,
-commits, receipts, and a place in the replayable **Story** of how the codebase
-came to be. Codex can handle the thinking roles, Claude Code can handle the
-coding role, and OpenFDE keeps the work visible, scoped, reviewed, and narrated.
+commits, receipts, and a place in the replayable **Story**. Codex can handle
+thinking roles, Claude Code can handle coding, and OpenFDE keeps the work
+visible, scoped, reviewed, and understandable.
 
 ## The orange box theory
 
@@ -36,22 +35,22 @@ The code remains; the reasoning does not. Six months later, or six minutes
 later when several agents are building in parallel, nobody can say what was
 tried, what was dropped, or why the surviving path won.
 
-The theory is simple: **when agents do the building, the scarce artifact is no
-longer only the code. It is the record of how the code came to be.** Whoever
-holds the record holds the understanding. So the record needs a recorder, built
-with the same instincts as a flight recorder:
+The theory is simple: when agents do more of the building, the missing artifact
+is no longer just the code. It is the record of how the code came to be. Whoever
+has that record has the best chance of understanding the system later. So the
+record needs a recorder, built with the same instincts as a flight recorder:
 
 1. **Always on.** It watches passively: any agent, any editor, no wrapper, no
-   ceremony. A record you must remember to keep is a record you won't have.
+   ceremony. A record you have to remember to keep is a record you will not have.
 2. **Evidence-grade.** Receipts, not vibes: every episode carries its prompt,
    files, commits, check results, and pull request. A failed test is recorded
    as honestly as a passing one.
 3. **Immutable.** The story is derived testimony. Nobody can drag history into
    a nicer shape. A team reads one record, and the dropped paths stay visible
    as dropped paths.
-4. **Readable in ten seconds.** A log is not a record anyone consults. The
-   telemetry renders as a story: beats on a spine, explorations branching,
-   decisions orbiting the work that made them.
+4. **Readable in ten seconds.** A log is not enough. The telemetry renders as a
+   story: beats on a spine, explorations branching out, decisions sitting next
+   to the work that created them.
 
 In the UI the theory is a color: **violet is intent flowing in; orange is the
 record flowing out.** In the fleet era, where one architect might direct many
@@ -80,10 +79,10 @@ http://127.0.0.1:7420
 
 ## What It Does
 
-- Turns modules, files, functions, and dataflow into an interactive canvas — for
-  **Python and JS/TS** out of the box (architecture + a failure lens for each), and maps
-  **HTML entrypoints to the JS modules they load** so web/WebXR repos read as apps. All
-  regex/AST-based — no language servers to install.
+- Turns modules, files, functions, and dataflow into an interactive canvas for
+  **Python and JS/TS** out of the box. It also maps **HTML entrypoints to the JS
+  modules they load**, so web and WebXR repos read like apps instead of loose
+  files. All of this is regex/AST-based today, with no language servers to install.
 - Lets you select architecture and describe intent in one progressive Work panel.
 - Runs an **Architect → Senior Dev → Verifier** council:
   - **Architect** writes a scoped implementation brief.
@@ -92,11 +91,11 @@ http://127.0.0.1:7420
     Senior Dev is reprompted once; if it still fails, nothing lands.
 - Shows the real change **inline in Review** (colored diff) the moment it commits.
 - **Streams the agent live**: each node glows as the council reads and writes it
-  (active → next → queued → done / failed), so you watch the work move through the
-  canvas instead of staring at a spinner. Stop a run mid-flight at any time.
-- **Watches any edit as it happens**: yours, the council's, or another agent's. It glows
-  the touched nodes, then surfaces **what changed** (files, affected concepts, diff)
-  once the work settles.
+  (active, next, queued, done, failed), so you watch work move through the canvas
+  instead of staring at a spinner. Stop a run mid-flight at any time.
+- **Watches any edit as it happens**: yours, the council's, or another agent's.
+  It glows the touched nodes, then surfaces **what changed** once the work
+  settles: files, affected concepts, and diff.
 - **Remembers the path**: council prompts, OpenFDE wrapper prompts, and passive
   Claude Code/Codex prompts become episodes, auto-committed with attributed scope and
   replayable as a **Story** and an **OpenPM** board (below).
@@ -104,42 +103,41 @@ http://127.0.0.1:7420
   force an approval gate before anything touches them). The toolbar draws both box
   styles plus arrows. The **Arrow** tool inherits the source box's style; the
   **Solid arrow** tool always draws solid.
-- **Raise an OpenFDE issue** from the top bar — describe a bug, rough edge, or idea, and
-  the Architect drafts it from your words + light app context (deterministically scrubbed
-  of your repo's paths, tests, and code). You review the editable draft and file it with
-  one click on OpenFDE's own tracker; nothing posts until you do.
+- **Raise an OpenFDE issue** from the top bar. Describe a bug, rough edge, or
+  idea, and the Architect drafts it from your words plus light app context. Repo
+  paths, tests, and code are scrubbed. You review the draft before anything posts.
 
 ## Fix a real issue, end to end
 
-OpenFDE 0.5 closes the forward-deployed loop on **any repo it watches** — import a
-GitHub issue and take it all the way to a reviewable PR, with proof at every step:
+OpenFDE 0.5 closes the forward-deployed loop on repos it watches. Import a
+GitHub issue and take it to a reviewable PR, with proof at every step:
 
 1. **Import the issue** (OpenPM → paste an issue number). It becomes a To-Do card with
    the issue as its durable intent.
 2. **Reproduce.** OpenFDE triages the issue, locates the code it names, **drafts a
-   failing test that proves the bug, and runs it** — keeping the test only if it
-   actually reproduces (a stale or already-fixed issue reverts the test and says so).
+   failing test that proves the bug, and runs it**. It keeps the test only if it
+   actually reproduces. If the issue is stale or already fixed, it reverts the test
+   and says so.
    On a repo with no test setup it pins a pytest check (`.openfde/verify.json`) and
    creates the test, so a test-less repo is no longer a dead end.
-3. **Show the failure flow.** The canvas dims to a single causal path — *test → the
-   function that failed* — ringing the failing function red. Left-click a node to focus
-   its arrows; **right-click → open it in an editor** (the failing function and the test
+3. **Show the failure flow.** The canvas dims to a single causal path: *test -> the
+   function that failed*. The failing function gets a red ring. Left-click a node to focus
+   its arrows; **right-click -> open it in an editor** (the failing function and the test
    side by side, the relevant line highlighted).
-4. **Fix it in place.** Edit in the hatch and ⌘S, or run the Senior Dev. The change
-   renders **inline in the editor for the file it touched** — review it, then re-run
+4. **Fix it in place.** Edit in the hatch and Save, or run the Senior Dev. The change
+   renders **inline in the editor for the file it touched**. Review it, then re-run
    checks.
-5. **Verify → Land / PR.** Checks go green, the OpenPM card flips to passed, and the
-   episode becomes landable. Land commits **only the fix + its test** — OpenFDE keeps
-   its own metadata out of your tree (excluded via `.git/info/exclude`, never your
-   `.gitignore`). Readiness is honest: no green check, no "ready for PR."
+5. **Verify, land, PR.** Checks go green, the OpenPM card flips to passed, and the
+   episode becomes landable. Land commits **only the fix and its test**. OpenFDE
+   keeps its own metadata out of your tree through `.git/info/exclude`, never your
+   `.gitignore`. Readiness is honest: no green check, no "ready for PR."
 
-Proven live on foreign Python repos. **Repro-and-fix is Python/pytest today**, but the
-architecture canvas, the Watch glow, Review, and the **failure lens** now also work on
-**JS/TS** repos: regex-based assimilation (functions, classes, methods, object methods,
-React forms, cross-file flows) and Vitest/Jest/Playwright failure parsing that lights the
-*test → connected implementation*, plus **HTML/web-app entrypoint mapping** (HTML page →
-the JS module it loads, so web/WebXR repos read as apps). Tree-sitter precision, JS/TS
-repro drafting, Go/Rust, and big-repo scale are the next milestones — see `ROADMAP.md`.
+Proven live on foreign Python repos. **Repro-and-fix is Python/pytest today.** The
+architecture canvas, Watch glow, Review, and **failure lens** also work on **JS/TS**
+repos: regex-based assimilation, Vitest/Jest/Playwright failure parsing, and
+HTML/web-app entrypoint mapping. That means web and WebXR repos can show the path
+from an HTML page to the JS module it loads. Tree-sitter precision, JS/TS repro
+drafting, Go/Rust, and big-repo scale are next. See `ROADMAP.md`.
 
 ## Running the Council
 
@@ -164,8 +162,8 @@ Set any role to provider **Claude Code (local CLI)**. OpenFDE drives your local
 is the preferred **Senior Dev** backend for code edits: scope is enforced before
 and after the run, pre-existing dirty files are never reverted, and read/write
 progress streams onto the canvas as file glow. Auth comes from your existing
-`claude` login, so on a Pro/Max plan the coding role runs against your
-subscription with **zero keys** anywhere in the project.
+`claude` login. On a Pro/Max plan the coding role runs against your subscription,
+with no OpenFDE API key in the project.
 
 ### Real models (API)
 
@@ -253,23 +251,24 @@ OpenFDE doesn't just run changes. It remembers how the codebase got here.
 ## Status
 
 OpenFDE is early and moving fast. As of **0.5.6**, the architecture canvas, Watch,
-Review, and the **failure lens** span **Python and JS/TS** (regex/AST assimilation,
-Vitest/Jest/Playwright failure parsing, and HTML/web-app entrypoint mapping for
-web/WebXR repos — proven live on `immersive-web/webxr-samples`), while repro-and-fix
-stays Python/pytest. The local-first council can run with **Codex local CLI for
-Architect/Verifier** and **Claude Code local CLI for Senior Dev**, with coding activity
-**streamed live on the canvas** and a **stop control** to halt any run. The architecture-to-execution loop runs
-end-to-end: select scope, describe intent, and the council implements, verifies
-against the real diff, and commits within the boundaries you draw. Beyond
-execution, OpenFDE keeps a **development memory**: prompts are captured as
-episodes from the council, OpenFDE wrappers, or passive Claude Code/Codex
-capture, auto-committed with attributed scope, and replayable as a visual
-**Story**: episode movement on the spine, explorations as branches, decisions as
-halos, and verification/commit/PR receipts in the drawer. The delivery chain now
-closes the loop end-to-end: *issue → prompt
-episode → verification receipts → clustered commits → ready-to-ship verdict →
-pull request whose description is the story*. That path is already dogfooded on
-this repository (its first PRs were created by OpenFDE, from episodes, through
-that exact chain). Hardened by use: atomic single-writer persistence, a per-repo
-instance lock, session-aware capture that doesn't split long agent turns, and
-cross-process episode dedup.
+Review, and **failure lens** span **Python and JS/TS**. JS/TS support uses regex/AST
+assimilation, Vitest/Jest/Playwright failure parsing, and HTML/web-app entrypoint
+mapping for web and WebXR repos. Repro-and-fix is still Python/pytest.
+
+The local-first council can run with **Codex local CLI for Architect/Verifier**
+and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
+canvas, and a stop control can halt a run. The main loop works now: select scope,
+describe intent, let the council implement, verify the real diff, then commit
+inside the boundaries you drew.
+
+OpenFDE also keeps a development memory. Prompts become episodes through the
+council, OpenFDE wrappers, or passive Claude Code/Codex capture. Episodes are
+auto-committed with attributed scope and replayable as a visual **Story**:
+movement on the spine, explorations as branches, decisions as halos, and
+verification/commit/PR receipts in the drawer.
+
+The delivery chain is now tested on this repo: issue, prompt episode,
+verification receipts, clustered commits, ready-to-ship verdict, and a PR whose
+description is the story. The boring reliability work is also in place: atomic
+single-writer persistence, a per-repo instance lock, session-aware capture that
+does not split long agent turns, and cross-process episode dedup.
