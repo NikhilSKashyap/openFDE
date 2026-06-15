@@ -378,6 +378,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     persistence = Persistence(openfde_dir)
     manager     = ConnectionManager()
 
+    # One-time migration BEFORE the server serves: move low-confidence backfill (discussion /
+    # needs_review transcript fragments) out of episodes.json into backfill_candidates.json and
+    # renumber the real episodes P1..PN. Idempotent + cheap, so the first paint shows clean prompt
+    # numbers (P<n> = a real prompt) instead of inflated P1138-style tags from quarantined noise.
+    try:
+        _q = persistence.quarantine_backfill_pollution()
+        if _q.get("quarantined"):
+            logger.info("quarantined %d backfill candidate(s); %d real episode(s) renumbered P1..P%d",
+                        _q["quarantined"], _q["real"], _q["real"])
+    except Exception:  # noqa: BLE001 — never let migration block the watcher
+        logger.warning("backfill quarantine migration failed", exc_info=True)
+
     logger.info("Watching: %s", path)
 
     # ---- locate frontend/dist -------------------------------------------
@@ -994,6 +1006,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             tree = warm.get("fileTree") or build_file_tree(path)     # 3ms scan if no cache yet
             ident = session_mod.session_payload(path, server_started_at, _OPENFDE_VERSION)
             restored = meta.get("episodeTag") or _latest_terminal_tag()
+            # Restored counts so the UI can say "Restored 200 episodes · 70 tasks · refreshing…"
+            # immediately, and never render Story/OpenPM as empty while data exists in .openfde.
+            episodes = persistence.load_episodes()
             return {
                 "ok": True,
                 "repoName": ident.get("repoName"), "branch": ident.get("branch"),
@@ -1006,6 +1021,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 "restoredFrom": restored,
                 "stale": boot_cache_mod.is_stale(meta, head=st.get("head", ""), dirty_sig=sig),
                 "generatedAt": meta.get("generatedAt") or "",
+                # Restore-confidence counts (clean, post-quarantine):
+                "episodeCount": len(episodes),
+                "taskCount": len(persistence.load_tasks() or []),
+                "candidateCount": persistence.backfill_candidate_count(),
             }
         loop = asyncio.get_event_loop()
         return web.json_response(await loop.run_in_executor(None, _payload))

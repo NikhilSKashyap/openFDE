@@ -41,6 +41,7 @@ import {
   rejectApproval,
   getAgentSettings,
   getSession,
+  getBoot,
   postAgentRun,
   postCouncilRun,
   cancelCouncilRun,
@@ -175,6 +176,7 @@ export default function App() {
   const [approvals, setApprovals] = useState([])
   // ── Watched-repo identity (authoritative, from /api/session) ──────────────
   const [session, setSession] = useState(null)
+  const [boot, setBoot] = useState(null)        // restore-confidence: counts from .openfde on boot
   // ── Agent role settings (Step 21) ────────────────────────────────────────
   const [agentSettings, setAgentSettings] = useState(null)
   const [agentOptions, setAgentOptions]   = useState(null)
@@ -562,6 +564,10 @@ export default function App() {
       } catch { /* localStorage unavailable — the identity label still works */ }
       setSession(s)
     })
+    // Restore-confidence: the tiny boot payload carries restored counts from .openfde, so the UI
+    // can say "Restored 200 episodes · 70 tasks · refreshing…" immediately instead of looking blank
+    // (which reads as "my work vanished") while heavy hydration runs.
+    getBoot().then(b => { if (!cancelled && b?.ok) setBoot(b) })
     return () => { cancelled = true }
   }, [])
 
@@ -1921,6 +1927,28 @@ export default function App() {
           onHome={goHome}
           repoName={session?.repoName || ''}
         />
+        {/* Restore-confidence banner: shows the counts recovered from .openfde the instant boot
+            returns, so a slow hydration never reads as "my work vanished". Auto-hides once the
+            architecture canvas has hydrated (archGraph loaded). Non-blocking. */}
+        {boot && !archGraph && (boot.episodeCount > 0 || boot.taskCount > 0 || boot.candidateCount > 0) && (
+          <div role="status" style={{
+            position: 'fixed', top: 46, left: '50%', transform: 'translateX(-50%)', zIndex: 50,
+            fontSize: 11.5, fontWeight: 500, color: 'var(--text)', padding: '5px 12px',
+            borderRadius: 99, background: 'var(--surface-2)', border: '1px solid var(--border)',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.18)', pointerEvents: 'none', whiteSpace: 'nowrap',
+          }}>
+            {(boot.episodeCount > 0 || boot.taskCount > 0)
+              ? `Restored ${boot.episodeCount} episode${boot.episodeCount === 1 ? '' : 's'} · `
+                + `${boot.taskCount} task${boot.taskCount === 1 ? '' : 's'}`
+                + `${boot.restoredFrom ? ` · from ${boot.restoredFrom}` : ''} · refreshing…`
+              : 'Restoring…'}
+            {boot.candidateCount > 0 && (
+              <span style={{ color: 'var(--text-muted)' }}>
+                {'  ·  '}{boot.candidateCount} transcript candidate{boot.candidateCount === 1 ? '' : 's'} found
+              </span>
+            )}
+          </div>
+        )}
         <div className="panels">
           <div className="edge-zone left" onMouseEnter={() => setLeftOpen(true)} />
           <div className="edge-zone right" onMouseEnter={() => setRightOpen(true)} />
