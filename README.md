@@ -80,7 +80,10 @@ http://127.0.0.1:7420
 
 ## What It Does
 
-- Turns modules, files, functions, and dataflow into an interactive canvas.
+- Turns modules, files, functions, and dataflow into an interactive canvas — for
+  **Python and JS/TS** out of the box (architecture + a failure lens for each), and maps
+  **HTML entrypoints to the JS modules they load** so web/WebXR repos read as apps. All
+  regex/AST-based — no language servers to install.
 - Lets you select architecture and describe intent in one progressive Work panel.
 - Runs an **Architect → Senior Dev → Verifier** council:
   - **Architect** writes a scoped implementation brief.
@@ -101,6 +104,10 @@ http://127.0.0.1:7420
   force an approval gate before anything touches them). The toolbar draws both box
   styles plus arrows. The **Arrow** tool inherits the source box's style; the
   **Solid arrow** tool always draws solid.
+- **Raise an OpenFDE issue** from the top bar — describe a bug, rough edge, or idea, and
+  the Architect drafts it from your words + light app context (deterministically scrubbed
+  of your repo's paths, tests, and code). You review the editable draft and file it with
+  one click on OpenFDE's own tracker; nothing posts until you do.
 
 ## Fix a real issue, end to end
 
@@ -126,8 +133,13 @@ GitHub issue and take it all the way to a reviewable PR, with proof at every ste
    its own metadata out of your tree (excluded via `.git/info/exclude`, never your
    `.gitignore`). Readiness is honest: no green check, no "ready for PR."
 
-Proven live on foreign Python repos. The loop is Python/pytest today; multi-language
-(JS/TS, Go, Rust) and big-repo support are the next milestone — see `ROADMAP.md`.
+Proven live on foreign Python repos. **Repro-and-fix is Python/pytest today**, but the
+architecture canvas, the Watch glow, Review, and the **failure lens** now also work on
+**JS/TS** repos: regex-based assimilation (functions, classes, methods, object methods,
+React forms, cross-file flows) and Vitest/Jest/Playwright failure parsing that lights the
+*test → connected implementation*, plus **HTML/web-app entrypoint mapping** (HTML page →
+the JS module it loads, so web/WebXR repos read as apps). Tree-sitter precision, JS/TS
+repro drafting, Go/Rust, and big-repo scale are the next milestones — see `ROADMAP.md`.
 
 ## Running the Council
 
@@ -240,10 +252,13 @@ OpenFDE doesn't just run changes. It remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.4.5**, the local-first council can
-run with **Codex local CLI for Architect/Verifier** and **Claude Code local CLI
-for Senior Dev**, with coding activity **streamed live on the canvas** and a
-**stop control** to halt any run. The architecture-to-execution loop runs
+OpenFDE is early and moving fast. As of **0.5.6**, the architecture canvas, Watch,
+Review, and the **failure lens** span **Python and JS/TS** (regex/AST assimilation,
+Vitest/Jest/Playwright failure parsing, and HTML/web-app entrypoint mapping for
+web/WebXR repos — proven live on `immersive-web/webxr-samples`), while repro-and-fix
+stays Python/pytest. The local-first council can run with **Codex local CLI for
+Architect/Verifier** and **Claude Code local CLI for Senior Dev**, with coding activity
+**streamed live on the canvas** and a **stop control** to halt any run. The architecture-to-execution loop runs
 end-to-end: select scope, describe intent, and the council implements, verifies
 against the real diff, and commits within the boundaries you draw. Beyond
 execution, OpenFDE keeps a **development memory**: prompts are captured as
