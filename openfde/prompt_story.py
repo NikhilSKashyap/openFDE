@@ -77,9 +77,15 @@ _MAX_PARKED = 8                 # Story-map: cap the side "parked" lane
 
 
 def is_operational_episode(ep: dict) -> bool:
-    """True when an episode is shell/file-list/meta chatter — never a story beat."""
+    """True when an episode is not a product story beat: shell/file-list/meta chatter
+    (``signal``/``storyFacts.operational`` — meta *by content*), OR meta *by effect*
+    (``nonImplementation`` — it landed no commits and every file it touched is gitignored,
+    e.g. a demo-script or ROADMAP/FLOW edit). Either way it stays in the Events layer but
+    off the Story spine. The ``nonImplementation`` verdict is stamped by
+    :meth:`persistence.Persistence.flag_nonimplementation_episodes` (it needs git)."""
     sf = ep.get("storyFacts") or {}
-    return ep.get("signal") == "operational" or bool(sf.get("operational"))
+    return (ep.get("signal") == "operational" or bool(sf.get("operational"))
+            or bool(ep.get("nonImplementation")))
 
 
 def _slug(s: str) -> str:

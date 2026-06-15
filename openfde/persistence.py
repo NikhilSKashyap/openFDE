@@ -796,6 +796,57 @@ class Persistence:
         self._write_json(self.episodes_path, eps)
         return eps
 
+    def flag_nonimplementation_episodes(self, root, episodes: list = None) -> list:
+        """Stamp ``nonImplementation`` on episodes that are meta *by effect* — they landed
+        no commits AND every file they touched is gitignored (demo scripts, ROADMAP/FLOW,
+        ``.openfde/**``). These are real prompts that changed nothing in the codebase, so
+        :func:`prompt_story.is_operational_episode` keeps them off the Story spine while the
+        Events layer still has them. The verdict is persisted, so it is stable and the pure
+        Story builders just read the flag (no git in derivation).
+
+        Cheap + idempotent: only **uncommitted** episodes with files need a ``git
+        check-ignore`` (committed work is implementation by definition; an episode with no
+        files yet is undecided), so the git call covers a small in-flight set and runs once
+        per batch. Content-operational episodes are left untouched (already hidden).
+
+        Args:
+            root: Path — repository root (``.openfde`` lives directly under it).
+            episodes: list[dict] | None — operate on this in-memory list (and persist any
+                change); when None, load from disk.
+
+        Returns:
+            list[dict] — the episodes, with ``nonImplementation`` set where decidable.
+        """
+        from openfde.git_timeline import ignored_paths
+        eps = episodes if episodes is not None else self.load_episodes()
+        if not eps:
+            return eps
+
+        def _committed(e: dict) -> bool:
+            return bool(e.get("commitShas") or e.get("commits"))
+
+        # Uncommitted episodes that touched files are the only ones whose meta-ness depends
+        # on git; everything else is decided without a subprocess.
+        probe = [e for e in eps if e.get("signal") != "operational"
+                 and e.get("files") and not _committed(e)]
+        ignored = ignored_paths(root, sorted({f for e in probe for f in (e.get("files") or [])}))
+
+        changed = False
+        for e in eps:
+            if e.get("signal") == "operational":
+                continue                                   # meta by content — already hidden
+            files = e.get("files") or []
+            if _committed(e) or not files:
+                verdict = False                            # committed code, or nothing touched
+            else:
+                verdict = all(f in ignored for f in files)  # all gitignored → meta by effect
+            if bool(e.get("nonImplementation")) != verdict:
+                e["nonImplementation"] = verdict
+                changed = True
+        if changed:
+            self._write_json(self.episodes_path, eps)
+        return eps
+
     def get_episode(self, episode_id: str) -> dict:
         """Return a single episode by id, or None.
 

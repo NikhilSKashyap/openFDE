@@ -480,6 +480,24 @@ def _strip_path(p: str) -> str:
     return s[2:] if s.startswith("./") else s
 
 
+def ignored_paths(root: Path, paths) -> set:
+    """The subset of repo-relative ``paths`` that git ignores (``.gitignore`` / ``.openfde``).
+
+    ``git check-ignore`` lists the ignored ones on stdout (returncode 1 just means "none
+    ignored"). Returns an EMPTY set when ``paths`` is empty or git is unavailable — callers
+    treat "unknown" as "not ignored" (fail open, so a git hiccup never hides real work).
+    Paths come back normalized through :func:`_strip_path`, matching the input form.
+    """
+    paths = [str(p).strip() for p in (paths or []) if p and str(p).strip()]
+    if not paths:
+        return set()
+    try:
+        chk = _run(["git", "check-ignore", "--", *paths], root)
+    except Exception:  # noqa: BLE001 — never let a git failure reshape the Story / a commit
+        return set()
+    return {_strip_path(ln.strip()) for ln in chk.stdout.splitlines() if ln.strip()}
+
+
 def worktree_impact(root: Path, max_patch: int = _MAX_PATCH_CHARS, max_files: int = 200) -> dict:
     """The uncommitted working tree as a reviewable architecture delta — **non-mutating**.
 
@@ -685,10 +703,8 @@ def git_commit_paths(root: Path, summary: str, paths, detail: str = "", trailers
     if not paths:
         return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": [], "reason": "no paths to commit"}
 
-    # Respect ignores: drop any path git would ignore (.gitignore / .openfde). check-ignore
-    # lists the ignored ones on stdout (returncode 1 simply means "none ignored").
-    chk = _run(["git", "check-ignore", "--", *paths], root)
-    ignored = {_strip_path(ln.strip()) for ln in chk.stdout.splitlines() if ln.strip()}
+    # Respect ignores: drop any path git would ignore (.gitignore / .openfde).
+    ignored = ignored_paths(root, paths)
     kept = [p for p in paths if p not in ignored]
     if not kept:
         return {"committed": False, "sha": None, "shortSha": None, "summary": summary, "files": [], "reason": "all paths ignored"}

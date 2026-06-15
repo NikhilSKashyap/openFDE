@@ -2028,6 +2028,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """
         persistence.backfill_episode_meta()
         episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
+        # Meta-by-effect: an episode that only edited gitignored docs (demo scripts,
+        # ROADMAP/FLOW) and committed nothing is kept off the spine, not in the Events layer.
+        episodes = persistence.flag_nonimplementation_episodes(path, episodes)
         # Recent raw events feed the storyTimeline bridges + Events layer (capped).
         return web.json_response(build_prompt_graph(episodes,
                                                     events=persistence.load_events()[-200:]))
