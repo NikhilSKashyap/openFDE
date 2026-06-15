@@ -348,7 +348,12 @@ class JsTargetStaysHonestTest(unittest.TestCase):
                 labels=["bug"], caller=caller, check_cmd=["npm", "run", "test"])
 
             self.assertEqual(v["verdict"], "unsupported_runner")
-            self.assertIn("Python only", v["summary"])
+            # honest message: JS/TS canvas + verify ARE supported; only automatic
+            # repro-test drafting is still pending (Python-only today).
+            self.assertIn("drafting", v["summary"])
+            self.assertIn("pending", v["summary"])
+            self.assertIn("Python-only", v["summary"])
+            self.assertIn("assimilation", v["summary"])    # claims canvas support
             # the JS check WAS pinned (verify gate works for this repo now) ...
             cfg = root / ".openfde" / "verify.json"
             self.assertTrue(cfg.exists())

@@ -11,7 +11,9 @@ This is read-only.  No code generation, no agent execution.
 """
 
 import ast
+import bisect
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,8 +53,12 @@ _LANG_MAP: dict = {
     ".py":   "Python",
     ".js":   "JavaScript",
     ".jsx":  "JavaScript",
+    ".mjs":  "JavaScript",
+    ".cjs":  "JavaScript",
     ".ts":   "TypeScript",
     ".tsx":  "TypeScript",
+    ".mts":  "TypeScript",
+    ".cts":  "TypeScript",
     ".css":  "CSS",
     ".scss": "CSS",
     ".html": "HTML",
@@ -631,29 +637,142 @@ def _py_class_to_node(node, rel_path: str, module_id: str) -> _FunctionNode:
     )
 
 
-# ── JS / TS extraction ────────────────────────────────────────────────────── #
+# ── JS / TS extraction (regex, no tree-sitter — see ROADMAP "L1-C") ─────────── #
+#
+# Dependency-free structural extraction. Comments and string/template literals are
+# SCRUBBED first (blanked to same-length spaces, newlines kept) so no pattern ever
+# matches inside them; then anchored regexes catch the common declaration forms and
+# class bodies are brace-matched for their methods. This is honest L1-B quality — it
+# covers the forms real JS/TS/React repos use; the flows it feeds carry confidence
+# that reflects the heuristic (high same-file, medium resolved import). The boundary
+# (regex literals, computed/dynamic calls, deep TS) is what tree-sitter (L1-C) fixes.
 
-# Patterns ordered from most specific to least.  Applied in sequence;
-# a name seen by an earlier pattern is not emitted again.
-_JS_FUNC_PATTERNS: list = [
-    # export default function name(
-    re.compile(r"^export\s+default\s+(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE),
-    # export function name(
-    re.compile(r"^export\s+(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE),
-    # function name(
-    re.compile(r"^(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE),
-    # export const name = (...) =>   or   export const name = async (...) =>
-    re.compile(r"^export\s+const\s+(\w+)\s*=\s*(?:async\s*)?\(", re.MULTILINE),
-    # const name = (...) =>
-    re.compile(r"^const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]{0,200}\)\s*=>", re.MULTILINE),
+
+def _scrub_js(source: str) -> str:
+    """Blank JS/TS comments and string/template literals (same length, newlines
+    preserved) so structural scans never match inside them. Offsets and line numbers
+    are unchanged — callers compute lines from match offsets. Regex literals are not
+    special-cased (rare in the structural positions we scan); that is the L1-C edge."""
+    out = list(source)
+    i, n, state = 0, len(source), None      # state: 'line' 'block' or a quote char
+    while i < n:
+        c = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if state is None:
+            if c == "/" and nxt == "/":
+                out[i] = out[i + 1] = " "
+                state, i = "line", i + 2
+            elif c == "/" and nxt == "*":
+                out[i] = out[i + 1] = " "
+                state, i = "block", i + 2
+            elif c in ("'", '"', "`"):
+                out[i] = " "
+                state, i = c, i + 1
+            else:
+                i += 1
+        elif state == "line":
+            if c == "\n":
+                state = None
+            else:
+                out[i] = " "
+            i += 1
+        elif state == "block":
+            if c == "*" and nxt == "/":
+                out[i] = out[i + 1] = " "
+                state, i = None, i + 2
+            else:
+                if c != "\n":
+                    out[i] = " "
+                i += 1
+        else:                               # inside a string / template literal
+            if c == "\\":                   # blank the escape and its escaped char
+                out[i] = " "
+                if i + 1 < n and source[i + 1] != "\n":
+                    out[i + 1] = " "
+                i += 2
+            elif c == state:                # closing quote
+                out[i] = " "
+                state, i = None, i + 1
+            else:
+                if c != "\n":
+                    out[i] = " "
+                i += 1
+    return "".join(out)
+
+
+def _line_starts(text: str) -> list:
+    """Offsets at which each line begins (index 0 → line 1)."""
+    starts = [0]
+    for i, c in enumerate(text):
+        if c == "\n":
+            starts.append(i + 1)
+    return starts
+
+
+def _line_of(line_starts: list, offset: int) -> int:
+    """1-based line number for a character offset."""
+    return bisect.bisect_right(line_starts, offset)
+
+
+def _brace_block(scrubbed: str, start: int):
+    """``(open_index, close_index)`` of the next balanced ``{ … }`` at/after
+    ``start`` on scrubbed source (braces in strings/comments already blanked), or
+    None. Used to bound a class body for method extraction."""
+    i = scrubbed.find("{", start)
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(scrubbed)):
+        ch = scrubbed[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return (i, j)
+    return None
+
+
+# Top-level declaration forms (column 0). Ordered specific→general; a name claimed
+# by an earlier pattern is not re-emitted. The arrow patterns allow a TS return-type
+# annotation (`): T =>`) and a leading generic (`<T>(…) =>`) — the gaps in v1.
+_JS_DECL_PATTERNS: list = [
+    re.compile(r"^export\s+default\s+(?:async\s+)?function\*?\s+(\w+)\s*[(<]", re.M),
+    re.compile(r"^export\s+(?:async\s+)?function\*?\s+(\w+)\s*[(<]", re.M),
+    re.compile(r"^(?:async\s+)?function\*?\s+(\w+)\s*[(<]", re.M),
+    re.compile(r"^export\s+(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\*?\s*\(", re.M),
+    re.compile(r"^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\*?\s*\(", re.M),
+    re.compile(r"^export\s+(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=;{]+?)?=>", re.M),
+    re.compile(r"^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=;{]+?)?=>", re.M),
 ]
+
+# Class declaration (optionally exported / default / abstract).
+_JS_CLASS_RE = re.compile(r"^(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+(\w+)", re.M)
+
+# Inside a class body: a method (indented, optional modifiers, name, (params),
+# optional return type, then `{`), or a class-field arrow (`handler = () => …`).
+# Control-flow keywords are excluded so `if (…) {` is never read as a method.
+_JS_METHOD_RE = re.compile(
+    r"^[ \t]+(?:(?:public|private|protected|static|readonly|abstract|override|async|get|set)\s+)*"
+    r"\*?\s*(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^={;]+?)?\{", re.M)
+_JS_FIELD_ARROW_RE = re.compile(
+    r"^[ \t]+(?:(?:public|private|protected|static|readonly)\s+)*"
+    r"(\w+)\s*=\s*(?:async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=;{]+?)?=>", re.M)
+_JS_METHOD_SKIP: frozenset = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "function", "do", "else",
+    "with", "typeof", "await", "yield", "new", "void", "delete", "in", "of", "case",
+})
 
 
 def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list:
-    """Extract function declarations from a JS / TS / JSX / TSX file via regex.
+    """Extract function, arrow, class, and method definitions from a JS/TS/JSX/TSX
+    file (regex; comments/strings scrubbed first).
 
-    Only detects top-level and exported function forms.  Nested arrow
-    functions inside other functions are not captured (v1 limitation).
+    Covers: function declarations (incl. export / default / async / generator),
+    ``const|let|var`` arrow and function expressions (with TS return types and
+    generics), class declarations, class methods, and class-field arrows. React
+    components are these same forms, so they are covered. Nested arrows inside a
+    function body are not captured (L1-B boundary; tree-sitter is L1-C).
 
     Args:
         abs_path:  Path — absolute path to the source file.
@@ -661,7 +780,7 @@ def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list
         module_id: str  — parent module ID.
 
     Returns:
-        list[_FunctionNode]
+        list[_FunctionNode] — methods are named ``Class.method`` (like Python).
     """
     functions: list = []
     try:
@@ -669,25 +788,46 @@ def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list
     except OSError:
         return functions
 
-    seen: set = set()
-    for pattern in _JS_FUNC_PATTERNS:
-        for m in pattern.finditer(source):
+    scrubbed = _scrub_js(source)
+    line_starts = _line_starts(scrubbed)
+    seen: set = set()                       # top-level names already emitted
+
+    def emit(qualified, line):
+        functions.append(_FunctionNode(
+            id=f"function:{rel_path}:{qualified}", name=qualified, path=rel_path,
+            module_id=module_id, line=line, args=[], returns=None,
+            purpose="", warnings=[]))
+
+    # Top-level functions / arrows / function expressions.
+    for pattern in _JS_DECL_PATTERNS:
+        for m in pattern.finditer(scrubbed):
             name = m.group(1)
             if name in seen:
                 continue
             seen.add(name)
-            line_no = source[: m.start()].count("\n") + 1
-            functions.append(_FunctionNode(
-                id=f"function:{rel_path}:{name}",
-                name=name,
-                path=rel_path,
-                module_id=module_id,
-                line=line_no,
-                args=[],
-                returns=None,
-                purpose="",
-                warnings=[],
-            ))
+            emit(name, _line_of(line_starts, m.start()))
+
+    # Classes and their methods. The class is a node (like a Python class); methods
+    # are `Class.method` so they nest under the class on the canvas and land in the
+    # flow resolver's method index.
+    for cm in _JS_CLASS_RE.finditer(scrubbed):
+        cls = cm.group(1)
+        if cls not in seen:
+            seen.add(cls)
+            emit(cls, _line_of(line_starts, cm.start()))
+        span = _brace_block(scrubbed, cm.end())
+        if span is None:
+            continue
+        body_open, body_close = span
+        body = scrubbed[body_open + 1:body_close]
+        m_seen: set = set()
+        for mre in (_JS_METHOD_RE, _JS_FIELD_ARROW_RE):
+            for mm in mre.finditer(body):
+                meth = mm.group(1)
+                if meth in _JS_METHOD_SKIP or meth in m_seen:
+                    continue
+                m_seen.add(meth)
+                emit(f"{cls}.{meth}", _line_of(line_starts, body_open + 1 + mm.start()))
 
     return functions
 
@@ -927,6 +1067,12 @@ def _extract_flows(root: Path, file_dicts: list, func_dicts: list) -> tuple:
     warnings: list = []
     js_seen = False
 
+    # JS/TS cross-file resolution inputs: the set of known JS/TS files (for import
+    # path resolution) and each file's named default export (for `import X from`).
+    js_files = {fl["path"] for fl in file_dicts
+                if fl["language"] in ("JavaScript", "TypeScript")}
+    default_export_by_file = _js_default_exports(root, file_dicts) if js_files else {}
+
     for fl in file_dicts:
         abs_path = root / fl["path"]
         if fl["language"] == "Python":
@@ -935,10 +1081,15 @@ def _extract_flows(root: Path, file_dicts: list, func_dicts: list) -> tuple:
                       module_by_file, dotted_to_path)
         elif fl["language"] in ("JavaScript", "TypeScript"):
             js_seen = True
-            _js_flows(abs_path, fl["path"], fl["moduleId"], flows, func_dicts, fn_by_id)
+            _js_flows(abs_path, fl["path"], fl["moduleId"], flows, func_dicts,
+                      fn_by_id, callable_by_file_name, module_by_file,
+                      default_export_by_file, js_files)
 
     if js_seen:
-        warnings.append("JS/TS function-level flows are heuristic and low-confidence (same-file only).")
+        warnings.append(
+            "JS/TS flows are regex-derived (no tree-sitter): same-file calls are "
+            "high-confidence, resolved relative-import calls medium; dynamic, "
+            "computed, and non-relative-import calls are not traced.")
 
     return list(flows.values()), warnings
 
@@ -1042,52 +1193,256 @@ def _py_flows(abs_path, rel, module_id, flows,
                     scan(f"function:{rel}:{node.name}.{item.name}", item, node.name)
 
 
-def _js_flows(abs_path, rel, module_id, flows, func_dicts, fn_by_id) -> None:
-    """Heuristic same-file JS/TS call flows (low confidence) into `flows`."""
+def _record_flow(flows, fn_by_id, module_by_file, default_module_id,
+                 owner_id, callee_id, conf, lineno) -> None:
+    """Insert (or upgrade) a function-flow edge; higher confidence wins on a dup
+    pair. Same shape as the Python resolver so rollups/canvas are language-blind."""
+    if owner_id == callee_id:
+        return                                      # ignore self-recursion
+    caller, callee = fn_by_id.get(owner_id), fn_by_id.get(callee_id)
+    if not caller or not callee:
+        return
+    key = (owner_id, callee_id)
+    existing = flows.get(key)
+    if existing and _CONF_RANK.get(conf, 0) <= _CONF_RANK.get(existing["confidence"], 0):
+        return
+    flows[key] = {
+        "id":             f"flow:{owner_id}->{callee_id}",
+        "fromFunctionId": owner_id,
+        "toFunctionId":   callee_id,
+        "fromFile":       caller["path"],
+        "toFile":         callee["path"],
+        "fromModuleId":   module_by_file.get(caller["path"], default_module_id),
+        "toModuleId":     module_by_file.get(callee["path"], callee["moduleId"]),
+        "type":           "call",
+        "label":          f"{_short_name(caller['name'])}() → {_short_name(callee['name'])}()",
+        "confidence":     conf,
+        "evidence":       f"line {lineno}: {_short_name(callee['name'])}()",
+    }
+
+
+def _js_body_end_line(scrubbed, line_starts, start_line, next_line) -> int:
+    """End line of the def starting at ``start_line``: its body block's closing
+    brace — the first ``{`` at paren-depth 0 within ``[start_line, next_line)``,
+    brace-matched. Paren-depth tolerates object-typed params (``(a = {}) =>``).
+    Returns ``start_line`` for an expression-bodied arrow (no block)."""
+    start = line_starts[start_line - 1]
+    bound = (line_starts[next_line - 1]
+             if next_line and next_line - 1 < len(line_starts) else len(scrubbed))
+    paren, body_open, i = 0, -1, start
+    while i < bound:
+        c = scrubbed[i]
+        if c == "(":
+            paren += 1
+        elif c == ")":
+            paren = paren - 1 if paren > 0 else 0
+        elif paren == 0:
+            if c == "{":
+                body_open = i
+                break
+            if c == ";":                            # statement ends before any block
+                break
+        i += 1
+    if body_open < 0:
+        return start_line
+    depth = 0
+    for j in range(body_open, len(scrubbed)):
+        c = scrubbed[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return _line_of(line_starts, j)
+    return start_line
+
+
+# `export default function Foo` / `export default class Foo` / `export default Foo`.
+_RE_JS_DEFAULT_EXPORT = re.compile(
+    r"^export\s+default\s+(?:async\s+)?(?:function\*?|class)\s+(\w+)"
+    r"|^export\s+default\s+(\w+)\s*;?\s*$", re.M)
+# ESM import with a RELATIVE specifier; CommonJS require with a relative specifier.
+_RE_JS_IMPORT_STMT = re.compile(
+    r"""import\s+(?!type[\s{])(?P<clause>[\w*\s,{}$]+?)\s+from\s+['"](?P<spec>\.[^'"]+)['"]""")
+_RE_JS_REQUIRE_STMT = re.compile(
+    r"""(?:const|let|var)\s+(?P<bind>\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"](?P<spec>\.[^'"]+)['"]\s*\)""")
+_JS_RESOLVE_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _js_default_exports(root: Path, file_dicts: list) -> dict:
+    """rel_path → the file's default-export NAME when it is a named function / class
+    / const (`export default function Foo`, `export default class Foo`, `export
+    default Foo`). Anonymous default exports are omitted (never guessed)."""
+    out: dict = {}
+    for fl in file_dicts:
+        if fl["language"] not in ("JavaScript", "TypeScript"):
+            continue
+        try:
+            src = _scrub_js((root / fl["path"]).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        m = _RE_JS_DEFAULT_EXPORT.search(src)
+        if m:
+            out[fl["path"]] = m.group(1) or m.group(2)
+    return out
+
+
+def _resolve_js_file(specifier: str, source_rel: str, js_files: set):
+    """Resolve a RELATIVE import specifier (`./x`, `../a/b`) to a repo file path,
+    trying extensionless, then JS/TS extensions, then `/index.*`. Bare/package
+    specifiers never resolve here (we don't invent cross-package edges)."""
+    if not specifier.startswith("."):
+        return None
+    base = os.path.normpath(os.path.join(os.path.dirname(source_rel), specifier))
+    base = base.replace(os.sep, "/")
+    if base in js_files:
+        return base
+    for ext in _JS_RESOLVE_EXTS:
+        if base + ext in js_files:
+            return base + ext
+    for ext in _JS_RESOLVE_EXTS:
+        cand = base + "/index" + ext
+        if cand in js_files:
+            return cand
+    return None
+
+
+def _parse_js_import_map(source, source_rel, js_files, default_export_by_file) -> dict:
+    """``local_name → (target_rel, original_name|None, kind)`` for RESOLVABLE
+    relative imports. ``kind`` ∈ {named, default, namespace}. Default imports resolve
+    to the target's named default export (else dropped). require() destructure /
+    namespace forms are included. Parsed on raw source (specifiers are strings)."""
+    out: dict = {}
+    for m in _RE_JS_IMPORT_STMT.finditer(source):
+        target = _resolve_js_file(m.group("spec"), source_rel, js_files)
+        if not target:
+            continue
+        clause = m.group("clause")
+        ns = re.search(r"\*\s+as\s+([\w$]+)", clause)              # * as ns
+        if ns:
+            out[ns.group(1)] = (target, None, "namespace")
+        named = re.search(r"\{([^}]*)\}", clause)                  # { a, b as c }
+        if named:
+            for part in named.group(1).split(","):
+                part = part.strip()
+                if not part or part.startswith("type "):
+                    continue
+                mm = re.match(r"([\w$]+)(?:\s+as\s+([\w$]+))?$", part)
+                if mm:
+                    out[mm.group(2) or mm.group(1)] = (target, mm.group(1), "named")
+        head = clause.split("{")[0].split("*")[0].strip().rstrip(",").strip()
+        dm = re.match(r"^([\w$]+)$", head)                         # default import
+        if dm:
+            orig = default_export_by_file.get(target)
+            if orig:
+                out[dm.group(1)] = (target, orig, "default")
+    for m in _RE_JS_REQUIRE_STMT.finditer(source):
+        target = _resolve_js_file(m.group("spec"), source_rel, js_files)
+        if not target:
+            continue
+        bind = m.group("bind").strip()
+        if bind.startswith("{"):
+            for part in bind.strip("{}").split(","):
+                part = part.strip()
+                mm = re.match(r"([\w$]+)(?:\s*:\s*([\w$]+))?$", part) if part else None
+                if mm:
+                    out[mm.group(2) or mm.group(1)] = (target, mm.group(1), "named")
+        else:
+            out[bind] = (target, None, "namespace")
+    return out
+
+
+def _js_flows(abs_path, rel, module_id, flows, func_dicts, fn_by_id,
+              callable_by_file_name, module_by_file, default_export_by_file,
+              js_files) -> None:
+    """JS/TS call flows for one file into ``flows``:
+
+      • same-file bare ``name()`` to a callable defined here, and ``this.method()``
+        to a sibling method of the caller's class → **high**;
+      • calls through resolvable RELATIVE imports — named, default, and ``* as ns``
+        member calls, plus require() destructure / namespace → **medium**.
+
+    Comments/strings are scrubbed first; each call is attributed to the innermost
+    enclosing def by brace-matched span, so module-scope calls are not mis-blamed
+    on the nearest function (the old low-confidence heuristic's main noise source).
+    """
     try:
         source = abs_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return
-
     defs = sorted([f for f in func_dicts if f["path"] == rel], key=lambda f: f["line"])
     if not defs:
         return
 
-    def owner_at(line):
-        owner = None
-        for f in defs:
-            if f["line"] <= line:
-                owner = f
-            else:
-                break
-        return owner
+    scrubbed = _scrub_js(source)
+    line_starts = _line_starts(scrubbed)
 
-    for f in defs:
-        # Bare call `name(` not preceded by a word char or '.' (excludes obj.name()).
-        pat = re.compile(r"(?<![\w.])" + re.escape(f["name"]) + r"\s*\(")
-        for m in pat.finditer(source):
-            line = source[: m.start()].count("\n") + 1
-            if line == f["line"]:
-                continue                            # the definition itself
-            owner = owner_at(line)
-            if not owner or owner["id"] == f["id"]:
+    # Def spans [startLine, endLine] (brace-matched body, bounded by the next
+    # sibling). owner_of(line) = the innermost def whose span contains the line.
+    spans = []
+    for idx, d in enumerate(defs):
+        nxt = defs[idx + 1]["line"] if idx + 1 < len(defs) else None
+        spans.append((d["line"], _js_body_end_line(scrubbed, line_starts, d["line"], nxt), d))
+
+    def owner_of(line):
+        best = None
+        for s, e, d in spans:
+            if s <= line <= e and (best is None or s > best[0]):
+                best = (s, e, d)
+        return best[2] if best else None
+
+    def add(owner, callee_id, conf, line):
+        if owner and owner["id"] != callee_id:
+            _record_flow(flows, fn_by_id, module_by_file, module_id,
+                         owner["id"], callee_id, conf, line)
+
+    local_by_name, methods_here = {}, {}
+    for d in defs:
+        if "." in d["name"]:
+            methods_here[tuple(d["name"].split(".", 1))] = d
+        else:
+            local_by_name[d["name"]] = d
+    # Lines that ARE a def's signature — a bare `name(` there is the definition,
+    # not a call (kills the "method named like a function" false flow).
+    def_short_lines = {(_short_name(d["name"]), d["line"]) for d in defs}
+
+    # (1) same-file: bare `name(` → a top-level callable defined here (high).
+    for nm, d in local_by_name.items():
+        for m in re.finditer(r"(?<![\w.$])" + re.escape(nm) + r"\s*\(", scrubbed):
+            line = _line_of(line_starts, m.start())
+            if (nm, line) in def_short_lines:
                 continue
-            key = (owner["id"], f["id"])
-            if key in flows:
+            add(owner_of(line), d["id"], "high", line)
+
+    # (2) same-file: `this.method(` → a sibling method of the caller's class (high).
+    if methods_here:
+        for m in re.finditer(r"(?<![\w.$])this\.(\w+)\s*\(", scrubbed):
+            line = _line_of(line_starts, m.start())
+            owner = owner_of(line)
+            if not owner or "." not in owner["name"]:
                 continue
-            flows[key] = {
-                "id":             f"flow:{owner['id']}->{f['id']}",
-                "fromFunctionId": owner["id"],
-                "toFunctionId":   f["id"],
-                "fromFile":       rel,
-                "toFile":         rel,
-                "fromModuleId":   module_id,
-                "toModuleId":     module_id,
-                "type":           "call",
-                "label":          f"{_short_name(owner['name'])}() → {_short_name(f['name'])}()",
-                "confidence":     "low",
-                "evidence":       f"line {line}: {_short_name(f['name'])}()",
-            }
+            target = methods_here.get((owner["name"].split(".", 1)[0], m.group(1)))
+            if target:
+                add(owner, target["id"], "high", line)
+
+    # (3) cross-file: resolvable relative imports (medium).
+    for local, (target_rel, original, kind) in _parse_js_import_map(
+            source, rel, js_files, default_export_by_file).items():
+        if kind == "namespace":
+            for m in re.finditer(r"(?<![\w.$])" + re.escape(local) + r"\.(\w+)\s*\(", scrubbed):
+                callee_id = callable_by_file_name.get((target_rel, m.group(1)))
+                if callee_id:
+                    add(owner_of(_line_of(line_starts, m.start())), callee_id,
+                        "medium", _line_of(line_starts, m.start()))
+        else:                                       # named / default
+            callee_id = callable_by_file_name.get((target_rel, original)) if original else None
+            if not callee_id:
+                continue
+            for m in re.finditer(r"(?<![\w.$])" + re.escape(local) + r"\s*\(", scrubbed):
+                line = _line_of(line_starts, m.start())
+                if (local, line) in def_short_lines:
+                    continue
+                add(owner_of(line), callee_id, "medium", line)
 
 
 def _rollup_flows(flows: list) -> tuple:

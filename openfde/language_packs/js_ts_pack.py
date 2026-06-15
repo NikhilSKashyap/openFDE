@@ -1,10 +1,15 @@
 """
-openfde/language_packs/js_ts_pack.py — Pack #2: JavaScript / TypeScript (L1-A).
+openfde/language_packs/js_ts_pack.py — Pack #2: JavaScript / TypeScript (L1-B).
 
-The verify + repro SEAMS for Node repos, nothing more. This pack can:
+The assimilation + verify + repro SEAMS for Node repos. This pack can:
 
-  • detect a Node/JS/TS repo (a ``package.json``, or ``*.js/*.jsx/*.ts/*.tsx``
-    files outside vendor/build dirs),
+  • detect a Node/JS/TS repo (a ``package.json``, or ``*.js/*.jsx/*.ts/*.tsx`` and
+    the ``.mjs/.cjs/.mts/.cts`` variants outside vendor/build dirs),
+  • build a real ArchGraph (``build_arch_graph`` routes to ``architect.analyze_repo``
+    — the canvas's source of truth): modules, files, functions (declarations,
+    exported/arrow forms with TS annotations, classes, methods, React components),
+    import edges, and function-level flows (same-file **high**, resolved
+    relative-import **medium**),
   • discover a conservative, deterministic test command from ``package.json``'s
     scripts + the lockfile's package manager,
   • hand back a repro context (language, framework, test command, file
@@ -14,14 +19,15 @@ The verify + repro SEAMS for Node repos, nothing more. This pack can:
     the output gives no in-repo file+line, it returns NO locations rather than
     guessing.
 
-Explicitly NOT here (L1-B and later): tree-sitter assimilation (``build_arch_graph``
-returns an honest EMPTY graph), Node test-impact analysis, and drafting a JS/TS
-repro test (issue_repro's drafter stays pytest-only in v1 — a non-Python target
-stops cleanly instead of getting a fabricated Python test). No new dependencies,
-no ``npm install``, no pretending OpenFDE understands JS/TS architecture yet.
+Honest boundary (recorded in ROADMAP as L1-C / Next): the parser is REGEX-based, not
+tree-sitter — it covers the forms common real repos use, and the flows it emits carry
+confidence that reflects the heuristic (the ArchGraph warnings name it). Still NOT
+here: tree-sitter assimilation, Node test-impact analysis, and AUTOMATIC JS/TS repro
+drafting (issue_repro's drafter stays pytest-only — a non-Python target stops cleanly
+instead of getting a fabricated Python test). No new dependencies, no ``npm install``.
 
 Imports of the wrapped modules are LAZY (inside methods) so the language_packs
-package has no import cycle with verify/issue_repro/server.
+package has no import cycle with verify/issue_repro/server/architect.
 """
 from __future__ import annotations
 
@@ -236,8 +242,10 @@ def _parse_js_failures(output, root) -> list:
 # ── the pack ─────────────────────────────────────────────────────────────────
 
 class JsTsPack:
-    """LanguagePack for JavaScript/TypeScript (see base.LanguagePack). L1-A:
-    verify discovery + failure parsing + repro context. No assimilation yet."""
+    """LanguagePack for JavaScript/TypeScript (see base.LanguagePack). L1-B:
+    regex architecture assimilation (modules/files/functions/flows) + verify
+    discovery + Vitest/Jest failure parsing + repro context. Tree-sitter and
+    automatic JS/TS repro drafting remain L1-C / Next (see the module docstring)."""
     name = "js_ts"
     file_globs = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.mts", "*.cts")
 
@@ -245,9 +253,16 @@ class JsTsPack:
         return (Path(root) / "package.json").is_file() or _has_ext(root, _JS_EXTS)
 
     def build_arch_graph(self, root) -> dict:
-        # L1-A boundary: no tree-sitter yet. Return the empty-graph shape rather
-        # than pretend to understand JS/TS structure (assimilation is L1-B).
-        return {"nodes": [], "edges": [], "tethers": [], "risks": [], "providerRuns": []}
+        # L1-B: route to OpenFDE's repo assimilation (``architect.analyze_repo``) —
+        # the SAME ArchGraph the canvas renders — so a JS/TS repo gets real modules,
+        # files, functions (incl. classes + methods), import edges, and
+        # function-level flows (same-file high, resolved relative-import medium).
+        # This returns the architect ArchGraph shape (modules/files/functions/edges/
+        # flows/fileEdges/warnings), the canvas's source of truth — distinct from the
+        # semantic_graph provider shape. Extraction is regex-based; tree-sitter is
+        # L1-C (the warnings name that boundary honestly). Lazy import avoids cycles.
+        from openfde import architect
+        return architect.analyze_repo(Path(root))
 
     def discover_checks(self, root) -> list:
         root = Path(root)

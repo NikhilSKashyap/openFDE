@@ -328,12 +328,176 @@ class JsTsFailureParsingTest(unittest.TestCase):
         self.assertEqual(self._parse(""), [])
 
 
+# ── JS/TS architecture assimilation (L1-B) — a real fixture repo ──────────────
+
+# Exercises every required form: function declaration, exported function, an arrow
+# with a TS return-type annotation, a class, a class method, a class-field arrow, and
+# a default-exported function. `Calculator.add` calls the module-level `add` (a
+# same-file flow that must stay distinct from the method of the same name).
+_MATH_TS = """export function add(a: number, b: number): number {
+  return a + b
+}
+
+export const multiply = (a: number, b: number): number => {
+  return a * b
+}
+
+export class Calculator {
+  private total: number = 0
+  add(n: number): number {
+    this.total = add(this.total, n)
+    return this.total
+  }
+  reset = (): void => {
+    this.total = 0
+  }
+}
+
+export default function makeCalculator(): Calculator {
+  return new Calculator()
+}
+"""
+
+# Imports from ./math three ways (named, default) and calls them across the file
+# boundary — the cross-file flows L1-B must resolve.
+_SERVICE_TS = """import { add, multiply } from './math'
+import makeCalc from './math'
+
+export function compute(x: number): number {
+  const c = makeCalc()
+  return add(multiply(x, 2), 10)
+}
+
+export const summarize = (items: number[]): string => {
+  const total = items.reduce((acc, n) => add(acc, n), 0)
+  return `total=${total}`
+}
+"""
+
+# A React component (default-exported function returning JSX) in a .tsx file.
+_BUTTON_TSX = """export default function Button(props: { label: string }) {
+  return <button>{props.label}</button>
+}
+"""
+
+
+def _ts_fixture_repo():
+    d = tempfile.TemporaryDirectory()
+    root = Path(d.name)
+    (root / "src").mkdir()
+    (root / "package.json").write_text(json.dumps(
+        {"name": "demo", "version": "1.0.0", "scripts": {"test": "vitest"}}))
+    (root / "src" / "math.ts").write_text(_MATH_TS)
+    (root / "src" / "service.ts").write_text(_SERVICE_TS)
+    (root / "src" / "Button.tsx").write_text(_BUTTON_TSX)
+    return d, root
+
+
 class JsTsArchGraphTest(unittest.TestCase):
-    def test_build_arch_graph_is_honest_empty(self):
-        # L1-A: no tree-sitter yet — an empty graph, not a fabricated one.
-        g = JsTsPack().build_arch_graph(".")
-        self.assertEqual(g, {"nodes": [], "edges": [], "tethers": [],
-                             "risks": [], "providerRuns": []})
+    """L1-B: build_arch_graph routes to the repo's JS/TS assimilation and returns a
+    real, non-empty ArchGraph (the canvas's source of truth)."""
+
+    def _graph(self, root):
+        return JsTsPack().build_arch_graph(root)
+
+    def test_pack_detects_repo(self):
+        d, root = _ts_fixture_repo()
+        with d:
+            self.assertTrue(JsTsPack().detects(root))
+            self.assertEqual([p.name for p in get_language_packs(root)], ["js_ts"])
+
+    def test_graph_is_real_archgraph_shape_not_empty(self):
+        d, root = _ts_fixture_repo()
+        with d:
+            g = self._graph(root)
+            # the architect ArchGraph shape (canvas source of truth), not the
+            # L1-A empty stub
+            self.assertGreaterEqual(
+                set(g), {"modules", "files", "functions", "edges", "flows", "warnings"})
+            self.assertTrue(g["files"], "expected JS/TS files")
+            self.assertTrue(g["functions"], "expected extracted functions")
+            self.assertTrue(g["flows"], "expected function-level flows")
+            # NOT the honest-empty L1-A shape anymore
+            self.assertNotEqual(g.get("nodes", "absent"), [])
+
+    def test_functions_cover_required_forms(self):
+        d, root = _ts_fixture_repo()
+        with d:
+            names = {f["name"] for f in self._graph(root)["functions"]}
+            self.assertIn("add", names)              # function declaration (exported)
+            self.assertIn("multiply", names)         # arrow with TS return annotation
+            self.assertIn("compute", names)          # exported function
+            self.assertIn("summarize", names)        # exported arrow
+            self.assertIn("makeCalculator", names)   # export default function
+            self.assertIn("Button", names)           # React component (default fn, .tsx)
+            self.assertIn("Calculator", names)       # class declaration
+            self.assertIn("Calculator.add", names)   # class method
+            self.assertIn("Calculator.reset", names)  # class-field arrow
+
+    def test_mjs_cts_extensions_are_assimilated(self):
+        # .mjs / .cts were previously dropped (not in the language map) — they must
+        # now be collected and parsed like any other JS/TS file.
+        d, root = _ts_fixture_repo()
+        with d:
+            (root / "src" / "esm.mjs").write_text("export function helper() { return 1 }\n")
+            (root / "src" / "node.cts").write_text("export const ping = (): number => 2\n")
+            g = self._graph(root)
+            langs = {f["language"] for f in g["files"]}
+            self.assertIn("JavaScript", langs)
+            self.assertIn("TypeScript", langs)
+            names = {f["name"] for f in g["functions"]}
+            self.assertIn("helper", names)
+            self.assertIn("ping", names)
+
+    def test_same_file_flow_is_high_confidence(self):
+        d, root = _ts_fixture_repo()
+        with d:
+            flows = self._graph(root)["flows"]
+            same = [fl for fl in flows if fl["fromFile"] == fl["toFile"]]
+            self.assertTrue(same, "expected at least one same-file flow")
+            self.assertTrue(all(fl["confidence"] == "high" for fl in same),
+                            "same-file flows must be high-confidence")
+            # Calculator.add() → the module-level add() (distinct nodes, same file)
+            self.assertTrue(any(
+                fl["fromFunctionId"].endswith("math.ts:Calculator.add")
+                and fl["toFunctionId"].endswith("math.ts:add") for fl in same),
+                "expected Calculator.add() → add() same-file flow")
+
+    def test_cross_file_flow_present_and_medium(self):
+        d, root = _ts_fixture_repo()
+        with d:
+            flows = self._graph(root)["flows"]
+            cross = [fl for fl in flows if fl["fromFile"] != fl["toFile"]]
+            self.assertTrue(cross, "expected cross-file flows when imports resolve")
+            self.assertTrue(all(fl["confidence"] == "medium" for fl in cross),
+                            "resolved-import flows must be medium (never high)")
+            # service.ts compute() → math.ts add() through `import { add }`
+            self.assertTrue(any(
+                fl["fromFunctionId"].endswith("service.ts:compute")
+                and fl["toFunctionId"].endswith("math.ts:add") for fl in cross),
+                "expected compute() → add() across the import boundary")
+            # default import `makeCalc` resolves to math's default export
+            self.assertTrue(any(
+                fl["toFunctionId"].endswith("math.ts:makeCalculator") for fl in cross),
+                "expected the default import to resolve to makeCalculator()")
+
+    def test_warnings_name_the_heuristic_boundary(self):
+        d, root = _ts_fixture_repo()
+        with d:
+            warns = self._graph(root)["warnings"]
+            self.assertTrue(any("tree-sitter" in w for w in warns),
+                            "warnings must honestly name the regex/tree-sitter boundary")
+
+    def test_unrelated_imports_make_no_cross_module_noise(self):
+        # A bare-package import must NOT produce a cross-file flow (no fake edges).
+        d, root = _ts_fixture_repo()
+        with d:
+            (root / "src" / "lonely.ts").write_text(
+                "import { readFile } from 'fs'\n"
+                "export function load(): void { readFile('x', () => {}) }\n")
+            flows = self._graph(root)["flows"]
+            # `readFile` is from a bare package → never resolves to an in-repo node
+            self.assertFalse(any(fl["toFunctionId"].endswith(":readFile") for fl in flows))
 
 
 if __name__ == "__main__":

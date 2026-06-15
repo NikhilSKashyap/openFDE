@@ -497,20 +497,24 @@ def reproduce_issue(root, *, title: str, body: str, labels: list,
                     "links": [t["file"] for t in targets],
                     "summary": "no language pack for this file type yet (v1: Python)"}
         pack.ensure_check_config(root)
-        ctx = pack.repro_context()
+        ctx = pack.repro_context(root)
         if ctx.get("framework") != "pytest":
-            # The pack can DISCOVER and RUN this repo's tests (the verify gate works
-            # and its check is now pinned), but auto-DRAFTING a repro test is
-            # pytest-only in v1 — we won't write a Python test for a non-Python bug.
-            # Honest stop, naming the command we'd run, instead of pretending.
+            # The pack DOES support this repo for canvas assimilation (architecture +
+            # failure lens) and can discover + RUN its tests (the verify gate works
+            # and its check is now pinned); for JS/TS, Vitest/Jest failures are parsed
+            # into the lens. What is NOT here yet is auto-DRAFTING the repro test —
+            # that stays pytest-only (we won't write a Python test for a non-Python
+            # bug). Honest stop, naming the command we'd run, instead of pretending.
             cmd = " ".join(ctx.get("test_command") or []) or "no test script found"
             lang = ctx.get("language") or "this language"
             return {"verdict": "unsupported_runner", "targets": targets,
                     "links": [t["file"] for t in targets],
-                    "summary": f"OpenFDE can discover and run this repo's {lang} tests "
-                               f"({cmd}), but auto-drafting a "
-                               f"{ctx.get('framework') or 'non-pytest'} repro test "
-                               f"isn't in v1 yet (Python only)."}
+                    "summary": f"OpenFDE supports this {lang} repo on the canvas "
+                               f"(architecture + failure-lens assimilation) and can "
+                               f"discover and run its tests ({cmd}); Vitest/Jest "
+                               f"failures are parsed into the lens. Automatic repro-"
+                               f"test drafting is still pending for JS/TS (Python-only "
+                               f"today) — reproduce by hand for now."}
         check_cmd = list(ctx["test_command"])
 
     home = find_test_home(root, target["file"])

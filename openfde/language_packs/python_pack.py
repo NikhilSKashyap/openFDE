@@ -126,7 +126,9 @@ class PythonPack:
         return [FailureLocation.from_dict(f)
                 for f in verify.parse_failure_locations(output, root)]
 
-    def repro_context(self) -> dict:
+    def repro_context(self, root=None) -> dict:
+        # root is accepted for signature parity with JsTsPack (Python's context is
+        # environment-, not repo-, derived) so callers can pass it uniformly.
         return {"framework": "pytest", "language": "python",
                 "test_command": resolve_pytest_cmd()}
 
