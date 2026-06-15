@@ -48,6 +48,8 @@ GET  /{path}                   — static assets or SPA fallback
 import asyncio
 import json
 import logging
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 import os
 import re
 import secrets
@@ -316,6 +318,54 @@ async def _summarizer_loop(persistence, manager) -> None:
             logger.debug("summarizer tick failed", exc_info=True)
 
 
+# Episode states that are a stable restore point (a warm cache stamped here is what the next boot
+# restores from). Module-level so build_boot_payload is importable + unit-testable.
+_TERMINAL_STATES = frozenset({"landed", "verified", "needs_manual_land", "blocked"})
+
+
+def latest_terminal_tag(persistence) -> str:
+    """Tag of the most recent terminal-state episode (or PR-created), for the 'Restored from P14'
+    label. Cheap: a single load_episodes() read, never a scan."""
+    for e in persistence.load_episodes():                # newest-first
+        if e.get("status") in _TERMINAL_STATES or (e.get("pr") or {}).get("url"):
+            return e.get("tag") or e.get("episodeId") or ""
+    return ""
+
+
+def build_boot_payload(path, persistence, started_at: str, version: str, *,
+                       want_canvas: bool = False) -> dict:
+    """The tiny first-paint payload — repo identity + the last warm snapshot + restored counts.
+
+    CONTRACT: reads CACHED/cheap state ONLY (warm cache on disk, a 3 ms file-tree scan, git status,
+    episode/task counts). It must NEVER run analyze_repo / backfill / the semantic graph / the
+    memory-kit bootstrap — those are background jobs. Top-level + dependency-light so a test can
+    prove the contract by patching those heavy functions to blow up and asserting boot still works.
+    """
+    st = git_status(path)
+    sig = boot_cache_mod.dirty_signature(st)
+    warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
+    meta = warm.get("meta") or {}
+    cached_tree = warm.get("fileTree")
+    tree = cached_tree if cached_tree is not None else build_file_tree(path)   # ~3 ms scan if no cache
+    ident = session_mod.session_payload(path, started_at, version)
+    episodes = persistence.load_episodes()
+    return {
+        "ok": True,
+        "repoName": ident.get("repoName"), "branch": ident.get("branch"),
+        "gitRoot": ident.get("gitRoot"), "openfdeVersion": version,
+        "fileTree": tree,
+        "canvasSnapshot": warm.get("arch") if want_canvas else None,
+        "hasSnapshot": bool(warm.get("arch")),
+        "restoredFrom": meta.get("episodeTag") or latest_terminal_tag(persistence),
+        "stale": boot_cache_mod.is_stale(meta, head=st.get("head", ""), dirty_sig=sig),
+        "generatedAt": meta.get("generatedAt") or "",
+        "episodeCount": len(episodes),
+        "taskCount": len(persistence.load_tasks() or []),
+        "candidateCount": persistence.backfill_candidate_count(),
+        "restorePath": "warm-cache" if cached_tree is not None else "cheap-scan",   # for the timing log
+    }
+
+
 async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> None:
     """Start the OpenFDE server for the given repository path.
 
@@ -375,8 +425,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         logging.getLogger("openfde").error("%s", exc)
         return
 
+    _boot_t0    = time.perf_counter()        # for the "server bound in Xms" startup-timing log
     persistence = Persistence(openfde_dir)
     manager     = ConnectionManager()
+
+    # VSCode-style isolation, applied narrowly: ONE long-lived worker process for the CPU-heavy repo
+    # scan (analyze_repo, ~1s). Running it here instead of a thread keeps the main GIL — and so
+    # /api/boot, the WebSocket, and cache reads — free during the scan. Light executor work stays on
+    # threads. Lazy: the worker only spawns on the first scan; shut down gracefully on exit.
+    arch_pool = ProcessPoolExecutor(max_workers=1)
 
     # One-time migration BEFORE the server serves: move low-confidence backfill (discussion /
     # needs_review transcript fragments) out of episodes.json into backfill_candidates.json and
@@ -918,15 +975,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     #  REST — /api/archgraph                                              #
     # ================================================================== #
 
-    # Episode states that are a stable restore point — a warm cache stamped here is what the next
-    # boot restores from ("Restored from P14"). PR-created counts too (episode carries a pr.url).
-    _TERMINAL_STATES = {"landed", "verified", "needs_manual_land", "blocked"}
-
     def _latest_terminal_tag() -> str:
-        for e in persistence.load_episodes():                # newest-first
-            if e.get("status") in _TERMINAL_STATES or (e.get("pr") or {}).get("url"):
-                return e.get("tag") or e.get("episodeId") or ""
-        return ""
+        return latest_terminal_tag(persistence)              # module-level helper (also used by boot)
 
     # In-process ArchGraph cache. analyze_repo() is ~1s on a mid-size repo and the canvas awaits it,
     # so recomputing per request blocked first paint. Key by the worktree signature (HEAD + dirty
@@ -949,8 +999,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         except (OSError, KeyError, AttributeError):
             logger.warning("could not write warm cache after episode terminal state")
 
-    def _archgraph(force: bool = False) -> dict:
-        st = git_status(path)
+    async def _archgraph_async(force: bool = False) -> dict:
+        """ArchGraph for the watched repo, cached by worktree signature. A hit (memory or matching
+        disk snapshot) returns instantly. On a miss, the ~1s analyze_repo() runs on the process pool
+        — NOT a thread — so it never holds the main GIL and the event loop stays free for /api/boot,
+        the WebSocket, and cache reads during the scan. Falls back to a thread if the worker dies."""
+        loop = asyncio.get_event_loop()
+        st = await loop.run_in_executor(None, lambda: git_status(path))     # git = I/O, thread is fine
         sig = boot_cache_mod.dirty_signature(st)
         if not force and _arch_mem["sig"] == sig and _arch_mem["graph"] is not None:
             return _arch_mem["graph"]
@@ -959,8 +1014,17 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             if warm and warm.get("arch") and not boot_cache_mod.is_stale(
                     warm["meta"], head=st.get("head", ""), dirty_sig=sig):
                 _arch_mem.update(sig=sig, graph=warm["arch"])
+                logger.info("archgraph: served from disk snapshot (no scan)")
                 return warm["arch"]
-        graph = analyze_repo(path)
+        t0 = time.perf_counter()
+        try:
+            graph = await loop.run_in_executor(arch_pool, analyze_repo, path)   # CPU → worker process
+            where = "process pool"
+        except (BrokenProcessPool, OSError) as exc:        # worker crashed / unavailable → degrade
+            logger.warning("arch pool unavailable (%s); falling back to a thread", exc)
+            graph = await loop.run_in_executor(None, analyze_repo, path)
+            where = "thread fallback"
+        logger.info("archgraph: scanned in %dms (%s)", int((time.perf_counter() - t0) * 1000), where)
         _arch_mem.update(sig=sig, graph=graph)
         try:                                            # keep the warm cache fresh — best-effort
             boot_cache_mod.write_warm(
@@ -974,19 +1038,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_archgraph(request: web.Request) -> web.Response:
         """Return the ArchGraph for the watched repository (cached by worktree signature).
 
-        Runs the OpenArchitect read-only analyzer on the watched repo path. Results include
-        modules, files, functions, edges, and warnings. ``?refresh=1`` forces a recompute.
-
-        Args:
-            request: web.Request
-
-        Returns:
-            web.Response — JSON ArchGraph dict.
+        Cached; on a miss the read-only analyzer runs on the process pool (off the event loop).
+        ``?refresh=1`` forces a recompute.
         """
         force = request.query.get("refresh") in ("1", "true")
-        loop = asyncio.get_event_loop()
-        graph = await loop.run_in_executor(None, lambda: _archgraph(force=force))
-        return web.json_response(graph)
+        return web.json_response(await _archgraph_async(force=force))
 
     async def get_boot(request: web.Request) -> web.Response:
         """The tiny first-paint payload — repo identity + the last warm snapshot (file tree + canvas),
@@ -997,37 +1053,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         stamped at (or the latest terminal episode), for the "Restored from P14 · refreshing…" label.
         """
         want_canvas = request.query.get("canvas") in ("1", "true")
-
-        def _payload():
-            st = git_status(path)
-            sig = boot_cache_mod.dirty_signature(st)
-            warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
-            meta = warm.get("meta") or {}
-            tree = warm.get("fileTree") or build_file_tree(path)     # 3ms scan if no cache yet
-            ident = session_mod.session_payload(path, server_started_at, _OPENFDE_VERSION)
-            restored = meta.get("episodeTag") or _latest_terminal_tag()
-            # Restored counts so the UI can say "Restored 200 episodes · 70 tasks · refreshing…"
-            # immediately, and never render Story/OpenPM as empty while data exists in .openfde.
-            episodes = persistence.load_episodes()
-            return {
-                "ok": True,
-                "repoName": ident.get("repoName"), "branch": ident.get("branch"),
-                "gitRoot": ident.get("gitRoot"), "openfdeVersion": _OPENFDE_VERSION,
-                "fileTree": tree,                                   # ~4 KB — cheap
-                # The full ArchGraph is ~400 KB, so by default boot stays tiny and the canvas hydrates
-                # from the (now cached, fast) /api/archgraph. ?canvas=1 inlines it for a one-shot paint.
-                "canvasSnapshot": warm.get("arch") if want_canvas else None,
-                "hasSnapshot": bool(warm.get("arch")),
-                "restoredFrom": restored,
-                "stale": boot_cache_mod.is_stale(meta, head=st.get("head", ""), dirty_sig=sig),
-                "generatedAt": meta.get("generatedAt") or "",
-                # Restore-confidence counts (clean, post-quarantine):
-                "episodeCount": len(episodes),
-                "taskCount": len(persistence.load_tasks() or []),
-                "candidateCount": persistence.backfill_candidate_count(),
-            }
         loop = asyncio.get_event_loop()
-        return web.json_response(await loop.run_in_executor(None, _payload))
+        t0 = time.perf_counter()
+        # build_boot_payload reads CACHE/cheap state only — it must never analyze/backfill. Run it in
+        # a thread (its work is git + small file reads = I/O), so even boot never touches the loop.
+        payload = await loop.run_in_executor(
+            None, build_boot_payload, path, persistence, server_started_at, _OPENFDE_VERSION)
+        if want_canvas:                                  # one-shot first paint: inline the cached arch
+            warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
+            payload["canvasSnapshot"] = warm.get("arch")
+        logger.info("/api/boot served in %dms (restore: %s)",
+                    int((time.perf_counter() - t0) * 1000), payload.get("restorePath"))
+        return web.json_response(payload)
 
     async def post_explain(request: web.Request) -> web.Response:
         """Explain a canvas selection deterministically (Step 26).
@@ -4235,15 +4272,35 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         await runner.cleanup()
         return
 
-    logger.info("Server started on port %d", port)
+    logger.info("Server started on port %d — bound in %dms", port,
+                int((time.perf_counter() - _boot_t0) * 1000))
 
-    # ── Memory kit: bootstrap the calm `.openfde/` markdown room (FLOW/TASTE/DECISIONS
-    # once; COUNCIL/BRIEF generated). Synchronous, never dirties the tracked repo.
-    try:
-        from openfde import memory_kit
-        memory_kit.bootstrap_memory_kit(persistence, path)
-    except Exception:  # noqa: BLE001 — memory is a convenience, never blocks the watcher
-        logger.debug("memory_kit bootstrap failed", exc_info=True)
+    # Everything below runs in the BACKGROUND, after the server is already serving — nothing here
+    # may block /api/boot, the WebSocket, or first paint (VSCode-style: activate AFTER startup).
+
+    # ── Memory kit (deferred): bootstrap the calm `.openfde/` markdown room. Markdown templating +
+    # light I/O, but it used to run SYNCHRONOUSLY here and stall the first requests — now off-loop.
+    async def _bootstrap_memory():
+        try:
+            from openfde import memory_kit
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: memory_kit.bootstrap_memory_kit(persistence, path))
+        except Exception:  # noqa: BLE001 — memory is a convenience, never blocks the watcher
+            logger.debug("memory_kit bootstrap failed", exc_info=True)
+    memory_task = asyncio.create_task(_bootstrap_memory())
+
+    # ── Warm the ArchGraph in the background via the process pool, then nudge the canvas with
+    # state_updated. /api/boot already serves the last warm snapshot, so the user never waits on
+    # this — it just refreshes once the fresh scan lands.
+    async def _warm_arch():
+        try:
+            t0 = time.perf_counter()
+            await _archgraph_async()
+            logger.info("background arch warm done in %dms", int((time.perf_counter() - t0) * 1000))
+            await manager.broadcast({"type": "state_updated", "payload": {"reason": "arch_warm"}})
+        except Exception:  # noqa: BLE001 — best-effort warm-up, never fatal
+            logger.debug("background arch warm failed", exc_info=True)
+    warm_task = asyncio.create_task(_warm_arch())
 
     # ── Watch Any Agent: glow the canvas live on ANY external edit (Cursor,
     # Claude Code, terminal, human) — suppressed while our own council run glows.
@@ -4285,11 +4342,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         pass
     finally:
         logger.info("Server stopping")
-        for t in (watch_task, capture_task, summarizer_task, backfill_task):
+        for t in (watch_task, capture_task, summarizer_task, backfill_task, memory_task, warm_task):
             t.cancel()
             try:
                 await t
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+        arch_pool.shutdown(wait=False, cancel_futures=True)   # graceful: drop the worker process
         await runner.cleanup()
         release_watch_lock(watch_lock)
