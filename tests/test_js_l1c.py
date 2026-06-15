@@ -1,8 +1,13 @@
 """
-JS/TS L1-C tests — symbol detection (object methods + config/test noise control),
-cross-file connected-implementation resolution, Playwright test detection + failure
-parsing, and the JS/TS failure FLOW (the lens's connected-implementation path). The
-Python failure-flow path must stay byte-for-byte unchanged.
+JS/TS L1-C (shipped, regex / dependency-free) + L1-D-A tests.
+
+L1-C: symbol detection (object methods + config/test noise control), cross-file
+connected-implementation resolution, Playwright test detection + failure parsing, and
+the JS/TS failure FLOW (the lens's connected-implementation path). The Python
+failure-flow path must stay byte-for-byte unchanged.
+
+L1-D-A: HTML / web-app entrypoint mapping — edges from HTML pages to the JS/TS
+modules they load/import (architecture only; conservative — only real repo files).
 """
 import json
 import tempfile
@@ -205,6 +210,71 @@ class FailureFlowTest(unittest.TestCase):
                 root, file="tests/test_calc.py", line=3, func="test_add", output_tail=out)
             self.assertTrue(flow["nodes"])
             self.assertTrue(any(n["label"] == "test_add" for n in flow["nodes"]))
+
+
+# ── 5. HTML / web-app entrypoint mapping (L1-D-A) ─────────────────────────────
+
+class HtmlEntryTest(unittest.TestCase):
+    def _entry_edges(self, g):
+        return [e for e in g["fileEdges"] if e.get("type") == "entry"]
+
+    def test_external_module_and_classic_src_link_to_js(self):
+        d, root = _repo({
+            "js/app.js": "export function start() { return 1 }\n",
+            "index.html": ('<!doctype html><html><head>\n'
+                           '<script type="module" src="./js/app.js"></script>\n'
+                           '</head><body></body></html>\n'),
+        })
+        with d:
+            g = architect.analyze_repo(root)
+            edges = self._entry_edges(g)
+            self.assertTrue(any(e["fromFile"] == "index.html" and e["toFile"] == "js/app.js"
+                                and e["label"] == "loads" and e["confidence"] == "high"
+                                for e in edges))
+            # the page is a module box, with a module-level entry arrow to js
+            self.assertIn("index.html", {m["name"] for m in g["modules"]})
+            self.assertTrue(any(e.get("type") == "entry"
+                                and e["from"] == "module:index.html" for e in g["edges"]))
+
+    def test_inline_module_import_links_to_js(self):
+        d, root = _repo({
+            "js/render/scene.js": "export function draw() { return 2 }\n",
+            "samples/immersive-ar.html": (
+                '<!doctype html><html><body>\n'
+                '<script type="module">\n'
+                "  import { draw } from '../js/render/scene.js'\n"
+                "  draw()\n"
+                '</script>\n</body></html>\n'),
+        })
+        with d:
+            edges = self._entry_edges(architect.analyze_repo(root))
+            self.assertTrue(any(e["fromFile"] == "samples/immersive-ar.html"
+                                and e["toFile"] == "js/render/scene.js"
+                                and e["label"] == "imports" for e in edges))
+
+    def test_external_vendor_and_bare_refs_are_ignored(self):
+        # An edge is drawn ONLY to a real repo file — never a CDN URL, a bare npm
+        # specifier, or a path that doesn't exist (missing is okay; wrong is not).
+        d, root = _repo({
+            "js/app.js": "export function start() { return 1 }\n",
+            "index.html": (
+                '<!doctype html><html><head>\n'
+                '<script type="module" src="./js/app.js"></script>\n'
+                '<script src="https://cdn.example.com/three.min.js"></script>\n'
+                '<script src="js/missing.js"></script>\n'
+                '<script type="module">import * as THREE from "three"</script>\n'
+                '</head></html>\n'),
+        })
+        with d:
+            edges = self._entry_edges(architect.analyze_repo(root))
+            tos = {e["toFile"] for e in edges}
+            self.assertEqual(tos, {"js/app.js"})         # only the real file
+            self.assertFalse(any("three" in t or "cdn" in t or "missing" in t for t in tos))
+
+    def test_no_html_means_no_entry_edges(self):
+        d, root = _repo({"src/a.ts": "export function f() { return 1 }\n"})
+        with d:
+            self.assertEqual(self._entry_edges(architect.analyze_repo(root)), [])
 
 
 if __name__ == "__main__":

@@ -3,9 +3,10 @@ openfde/language_packs/registry.py — the front door.
 
 ``get_language_packs(root)`` returns every pack that applies to a repo;
 ``get_pack_for_file(path)`` returns the pack that owns a single file. Python is
-Pack #1 and JS/TS is Pack #2 (L1-B: architecture assimilation + verify/failure
-seams; tree-sitter and automatic repro drafting remain L1-C / later); others are
-added here as they land. Boring on purpose.
+Pack #1 and JS/TS is Pack #2 (L1-A/B/C shipped: architecture assimilation + the
+failure-flow lens + verify/failure seams, all regex / dependency-free; tree-sitter
+and automatic repro drafting remain L1-D / Next); others are added here as they
+land. Boring on purpose.
 """
 from __future__ import annotations
 

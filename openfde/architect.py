@@ -16,6 +16,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +63,7 @@ _LANG_MAP: dict = {
     ".css":  "CSS",
     ".scss": "CSS",
     ".html": "HTML",
+    ".htm":  "HTML",
     ".md":   "Markdown",
     ".json": "JSON",
     ".toml": "TOML",
@@ -230,6 +232,15 @@ def analyze_repo(root: Path) -> dict:
     merged_edges              = _merge_module_edges(import_edges, module_rollups)
     file_edges                = _build_file_edges(file_rollups, file_dicts)
 
+    # HTML/web-app entrypoints → referenced JS/TS modules (L1-D-A). Prepended so the
+    # "page → module" hop reads first; module edges merge (existing pairs win).
+    html_file_edges, html_mod_edges = _html_entry_edges(root, file_dicts)
+    if html_file_edges:
+        file_edges = html_file_edges + file_edges
+        have = {(e["from"], e["to"]) for e in merged_edges}
+        merged_edges = merged_edges + [e for e in html_mod_edges
+                                       if (e["from"], e["to"]) not in have]
+
     all_warnings = file_warns + fn_warns + edge_warns + flow_warns
 
     logger.info(
@@ -319,12 +330,13 @@ def _detect_modules(root: Path) -> list:
             ))
 
         elif entry.is_file():
-            # Only surface top-level Python / JS / TS source files, skipping
-            # well-known config / lock files.
+            # Only surface top-level Python / JS / TS / HTML source files, skipping
+            # well-known config / lock files. HTML entrypoints (index.html and other
+            # top-level pages) become boxes so the web-app story reads HTML → JS.
             if name in _ROOT_SKIP_NAMES:
                 continue
             suffix = entry.suffix.lower()
-            if suffix not in (".py", ".js", ".ts"):
+            if suffix not in (".py", ".js", ".ts", ".html", ".htm"):
                 continue
             files.append(_Module(
                 id=f"module:{name}",
@@ -639,22 +651,24 @@ def _py_class_to_node(node, rel_path: str, module_id: str) -> _FunctionNode:
     )
 
 
-# ── JS / TS extraction (regex, no tree-sitter — see ROADMAP "L1-C") ─────────── #
+# ── JS / TS extraction (regex, dependency-free — L1-B/C shipped) ────────────── #
 #
 # Dependency-free structural extraction. Comments and string/template literals are
 # SCRUBBED first (blanked to same-length spaces, newlines kept) so no pattern ever
 # matches inside them; then anchored regexes catch the common declaration forms and
-# class bodies are brace-matched for their methods. This is honest L1-B quality — it
-# covers the forms real JS/TS/React repos use; the flows it feeds carry confidence
-# that reflects the heuristic (high same-file, medium resolved import). The boundary
-# (regex literals, computed/dynamic calls, deep TS) is what tree-sitter (L1-C) fixes.
+# class bodies are brace-matched for their methods. This is the shipped regex
+# assimilation (L1-B) + the L1-C additions (object methods, failure-flow call
+# resolution, noise filtering); it covers the forms real JS/TS/React repos use, and
+# the flows it feeds carry confidence reflecting the heuristic (high same-file,
+# medium resolved import). The boundary (regex literals, computed/dynamic calls,
+# deep TS) is what tree-sitter (L1-D / Next) fixes.
 
 
 def _scrub_js(source: str) -> str:
     """Blank JS/TS comments and string/template literals (same length, newlines
     preserved) so structural scans never match inside them. Offsets and line numbers
     are unchanged — callers compute lines from match offsets. Regex literals are not
-    special-cased (rare in the structural positions we scan); that is the L1-C edge."""
+    special-cased (rare in the structural positions we scan); that is the L1-D edge."""
     out = list(source)
     i, n, state = 0, len(source), None      # state: 'line' 'block' or a quote char
     while i < n:
@@ -818,7 +832,7 @@ def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list
     ``const|let|var`` arrow and function expressions (with TS return types and
     generics), class declarations, class methods, and class-field arrows. React
     components are these same forms, so they are covered. Nested arrows inside a
-    function body are not captured (L1-B boundary; tree-sitter is L1-C).
+    function body are not captured (regex boundary; tree-sitter is L1-D / Next).
 
     Args:
         abs_path:  Path — absolute path to the source file.
@@ -1758,6 +1772,152 @@ def _build_file_edges(file_rollups: dict, file_dicts: list) -> list:
             "flowCount":    entry["count"],
         })
     return out
+
+
+# ─── HTML / web-app entrypoint edges (L1-D-A) ─────────────────────────────────
+#
+# A web/WebXR app's story starts in HTML: a page loads a JS module, which calls the
+# app's functions. We make that first hop explicit — HTML entrypoint → referenced
+# JS/TS module — deterministically and CONSERVATIVELY (an edge is drawn only when the
+# reference resolves to a file that actually exists in the repo). External URLs, CDN
+# scripts, and bare npm specifiers never produce an edge. No tests/runtime claims:
+# this is architecture only. Regex + stdlib HTMLParser; no dependency.
+
+# import './x'  |  import … from './x'  |  import('./x')  — captures the specifier.
+_RE_HTML_INLINE_IMPORT = re.compile(
+    r"""\bimport\b(?:[^'";]*\bfrom\b\s*|\s*\(\s*|\s+)['"]([^'"]+)['"]""")
+
+
+class _ScriptRefCollector(HTMLParser):
+    """Collect a page's script references: external ``src`` (module or classic) and
+    the bodies of INLINE ``<script type="module">`` blocks (for their imports)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.srcs: list = []            # external script src strings
+        self.inline_modules: list = []  # inline module-script bodies
+        self._in_module = False
+        self._buf: list = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "script":
+            return
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if a.get("src"):
+            self.srcs.append(a["src"])
+        elif a.get("type", "").lower() == "module":
+            self._in_module = True
+            self._buf = []
+
+    def handle_data(self, data):
+        if self._in_module:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._in_module:
+            self.inline_modules.append("".join(self._buf))
+            self._in_module = False
+            self._buf = []
+
+
+def _html_script_refs(source: str) -> list:
+    """``[(specifier, kind)]`` for one HTML page — external ``src`` (kind ``"src"``)
+    and inline ``<script type="module">`` import specifiers (kind ``"import"``)."""
+    p = _ScriptRefCollector()
+    try:
+        p.feed(source or "")
+        p.close()
+    except Exception:  # noqa: BLE001 — malformed HTML must never break assimilation
+        pass
+    refs = [(s, "src") for s in p.srcs]
+    for body in p.inline_modules:
+        refs += [(m.group(1), "import") for m in _RE_HTML_INLINE_IMPORT.finditer(body)]
+    return refs
+
+
+def _resolve_html_ref(ref: str, html_rel: str, known: set):
+    """Resolve an HTML script reference to a repo JS/TS file in ``known``, or None.
+    Relative (``./x``, ``js/x.js``) → from the page's dir; root-relative (``/js/x``)
+    → from the repo root. External URLs / data: / blob: are never resolved, and only
+    files that EXIST resolve — so a wrong edge is impossible (missing is acceptable)."""
+    ref = (ref or "").strip()
+    if not ref or ref.startswith(("http://", "https://", "//", "data:", "blob:")):
+        return None
+    ref = ref.split("?")[0].split("#")[0]
+    if not ref:
+        return None
+    if ref.startswith("/"):
+        base = ref.lstrip("/")
+    else:
+        base = os.path.normpath(os.path.join(os.path.dirname(html_rel), ref))
+    base = base.replace(os.sep, "/")
+    if base in known:
+        return base
+    for ext in _JS_RESOLVE_EXTS:
+        if base + ext in known:
+            return base + ext
+    for ext in _JS_RESOLVE_EXTS:
+        if base + "/index" + ext in known:
+            return base + "/index" + ext
+    return None
+
+
+def _html_entry_edges(root: Path, file_dicts: list) -> tuple:
+    """HTML entrypoint → JS/TS module edges (file-level and module-level).
+
+    For each HTML page, resolve its external ``src`` scripts and inline-module
+    imports to real repo JS/TS files; emit one file edge per (page, module) pair and
+    a deduped module edge per (page-module, js-module) pair. Bare ESM specifiers
+    (npm packages) and unresolved refs are dropped.
+
+    Returns:
+        tuple — (file_edges: list[dict], module_edges: list[dict]).
+    """
+    known = {f["path"] for f in file_dicts if f["language"] in ("JavaScript", "TypeScript")}
+    if not known:
+        return [], []
+    fid_by_path = {f["path"]: f["id"] for f in file_dicts}
+    mod_by_path = {f["path"]: f["moduleId"] for f in file_dicts}
+    file_edges, mod_pairs, seen = [], {}, set()
+    for f in file_dicts:
+        if f["language"] != "HTML":
+            continue
+        html_rel = f["path"]
+        try:
+            source = (root / html_rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for spec, kind in _html_script_refs(source):
+            # inline ESM bare specifiers (`import 'three'`) are npm packages, not
+            # repo modules — only relative / root-relative imports can resolve.
+            if kind == "import" and not spec.startswith((".", "/")):
+                continue
+            target = _resolve_html_ref(spec, html_rel, known)
+            if target is None or (html_rel, target) in seen:
+                continue
+            seen.add((html_rel, target))
+            label = "loads" if kind == "src" else "imports"
+            file_edges.append({
+                "id":           f"htmledge:{html_rel}->{target}",
+                "from":         fid_by_path.get(html_rel, f"file:{html_rel}"),
+                "to":           fid_by_path.get(target, f"file:{target}"),
+                "fromFile":     html_rel,
+                "toFile":       target,
+                "fromModuleId": mod_by_path.get(html_rel, ""),
+                "toModuleId":   mod_by_path.get(target, ""),
+                "type":         "entry",
+                "label":        label,
+                "confidence":   "high",
+                "flows":        [],
+                "flowCount":    0,
+            })
+            fm, tm = mod_by_path.get(html_rel, ""), mod_by_path.get(target, "")
+            if fm and tm and fm != tm:
+                mod_pairs.setdefault((fm, tm), label)
+    mod_edges = [{"id": f"edge:{fm}->{tm}:entry", "from": fm, "to": tm,
+                  "type": "entry", "label": lbl, "confidence": "high"}
+                 for (fm, tm), lbl in mod_pairs.items()]
+    return file_edges, mod_edges
 
 
 # ─── Canvas layout ────────────────────────────────────────────────────────── #

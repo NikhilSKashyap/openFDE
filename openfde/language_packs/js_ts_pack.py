@@ -1,5 +1,6 @@
 """
-openfde/language_packs/js_ts_pack.py — Pack #2: JavaScript / TypeScript (L1-B).
+openfde/language_packs/js_ts_pack.py — Pack #2: JavaScript / TypeScript
+(L1-A/B/C shipped, all regex / dependency-free).
 
 The assimilation + verify + repro SEAMS for Node repos. This pack can:
 
@@ -7,19 +8,21 @@ The assimilation + verify + repro SEAMS for Node repos. This pack can:
     the ``.mjs/.cjs/.mts/.cts`` variants outside vendor/build dirs),
   • build a real ArchGraph (``build_arch_graph`` routes to ``architect.analyze_repo``
     — the canvas's source of truth): modules, files, functions (declarations,
-    exported/arrow forms with TS annotations, classes, methods, React components),
-    import edges, and function-level flows (same-file **high**, resolved
-    relative-import **medium**),
+    exported/arrow forms with TS annotations, classes, methods, **object methods**,
+    React components), import edges, and function-level flows (same-file **high**,
+    resolved relative-import **medium**), with config / ``.d.ts`` / story files
+    filtered out of symbol mining (L1-C noise control),
   • discover a conservative, deterministic test command from ``package.json``'s
-    scripts + the lockfile's package manager,
+    scripts + the lockfile's package manager (Vitest / Jest / **Playwright**),
   • hand back a repro context (language, framework, test command, file
     conventions) for the drafter seam,
-  • parse common **Vitest** / **Jest** failure output into the SAME
+  • parse common **Vitest** / **Jest** / **Playwright** failure output into the SAME
     ``{file, line, func, test}`` shape the Python pack produces — honestly: when
     the output gives no in-repo file+line, it returns NO locations rather than
-    guessing.
+    guessing — and feed the **failure-flow lens** (L1-C): a failing JS/TS test maps
+    to its connected implementation (``architect.js_call_context``).
 
-Honest boundary (recorded in ROADMAP as L1-C / Next): the parser is REGEX-based, not
+Honest boundary (recorded in ROADMAP as L1-D / Next): the parser is REGEX-based, not
 tree-sitter — it covers the forms common real repos use, and the flows it emits carry
 confidence that reflects the heuristic (the ArchGraph warnings name it). Still NOT
 here: tree-sitter assimilation, Node test-impact analysis, and AUTOMATIC JS/TS repro
@@ -263,10 +266,11 @@ def _parse_js_failures(output, root) -> list:
 # ── the pack ─────────────────────────────────────────────────────────────────
 
 class JsTsPack:
-    """LanguagePack for JavaScript/TypeScript (see base.LanguagePack). L1-B:
-    regex architecture assimilation (modules/files/functions/flows) + verify
-    discovery + Vitest/Jest failure parsing + repro context. Tree-sitter and
-    automatic JS/TS repro drafting remain L1-C / Next (see the module docstring)."""
+    """LanguagePack for JavaScript/TypeScript (see base.LanguagePack). L1-A/B/C
+    shipped (regex, dependency-free): architecture assimilation (modules/files/
+    functions/object-methods/flows) + verify discovery + Vitest/Jest/Playwright
+    failure parsing + the failure-flow lens + repro context. Tree-sitter and
+    automatic JS/TS repro drafting remain L1-D / Next (see the module docstring)."""
     name = "js_ts"
     file_globs = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.mts", "*.cts")
 
@@ -274,14 +278,15 @@ class JsTsPack:
         return (Path(root) / "package.json").is_file() or _has_ext(root, _JS_EXTS)
 
     def build_arch_graph(self, root) -> dict:
-        # L1-B: route to OpenFDE's repo assimilation (``architect.analyze_repo``) —
-        # the SAME ArchGraph the canvas renders — so a JS/TS repo gets real modules,
-        # files, functions (incl. classes + methods), import edges, and
-        # function-level flows (same-file high, resolved relative-import medium).
-        # This returns the architect ArchGraph shape (modules/files/functions/edges/
-        # flows/fileEdges/warnings), the canvas's source of truth — distinct from the
-        # semantic_graph provider shape. Extraction is regex-based; tree-sitter is
-        # L1-C (the warnings name that boundary honestly). Lazy import avoids cycles.
+        # Route to OpenFDE's repo assimilation (``architect.analyze_repo``) — the
+        # SAME ArchGraph the canvas renders — so a JS/TS repo gets real modules,
+        # files, functions (incl. classes, methods, object methods), import edges,
+        # function-level flows (same-file high, resolved relative-import medium), and
+        # HTML/web-app entrypoint edges (L1-D-A). This returns the architect ArchGraph
+        # shape (modules/files/functions/edges/flows/fileEdges/warnings), the canvas's
+        # source of truth — distinct from the semantic_graph provider shape.
+        # Extraction is regex-based; tree-sitter is L1-D (the warnings name that
+        # boundary honestly). Lazy import avoids cycles.
         from openfde import architect
         return architect.analyze_repo(Path(root))
 
