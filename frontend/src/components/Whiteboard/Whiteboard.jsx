@@ -33,6 +33,7 @@ export default function Whiteboard({
   runNodeStates,
   runEdgeStates,
   watchBoxIds = null,
+  watchConnected = false,
   liveFollow = true,
   onToggleLiveFollow,
   spotlight = null,
@@ -155,6 +156,7 @@ export default function Whiteboard({
           runNodeStates={runNodeStates}
           runEdgeStates={runEdgeStates}
           watchBoxIds={watchBoxIds}
+          watchConnected={watchConnected}
           liveFollow={liveFollow}
           onToggleLiveFollow={onToggleLiveFollow}
           spotlight={spotlight}

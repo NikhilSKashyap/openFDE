@@ -65,6 +65,7 @@ from aiohttp import web
 from openfde import agent_settings as agent_settings_mod
 from openfde import fs_watch
 from openfde import semantic_graph as semantic_graph_mod
+from openfde import watch_function
 from openfde.agent_runner import build_system_prompt, run_agent
 from openfde.anthropic_transport import make_transport
 from openfde.claude_code_runner import cli_available as claude_cli_available, run_claude_code, run_claude_code_text
@@ -4290,8 +4291,31 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     # ── Watch Any Agent: glow the canvas live on ANY external edit (Cursor,
     # Claude Code, terminal, human) — suppressed while our own council run glows.
+    async def _resolve_watch_function(rel: str):
+        """Best-effort: which function did this external edit touch? A read-only ``git diff``
+        (never stages — safe to run on every save) against the cached ArchGraph. Returns
+        ``{"function": "<name>"}`` when a single function is implicated, else None so the glow
+        falls back to the file box. Generic: derives everything from the diff + arch graph."""
+        graph = _arch_mem.get("graph")
+        if not graph:
+            return None
+        fns = [f for f in graph.get("functions", []) if f.get("path") == rel]
+        if not fns:
+            return None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--no-color", "HEAD", "--", rel, cwd=str(path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (OSError, asyncio.TimeoutError):
+            return None
+        name = watch_function.infer_changed_function(
+            watch_function.changed_line_numbers(out.decode("utf-8", "replace")), fns)
+        return {"function": name} if name else None
+
     watch_task = asyncio.create_task(fs_watch.watch_loop(
-        path, manager, is_run_active=lambda: bool(_RUN_CONTROLS)))
+        path, manager, is_run_active=lambda: bool(_RUN_CONTROLS),
+        resolve_function=_resolve_watch_function))
 
     # ── Passive Prompt Capture: tail this repo's Claude Code transcripts and turn
     # new human prompts into prompt-story episodes (no `openfde cc` wrapper needed).

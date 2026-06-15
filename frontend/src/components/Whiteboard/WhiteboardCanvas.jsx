@@ -85,6 +85,7 @@ export default function WhiteboardCanvas({
   // Live run states (Step 17)
   runNodeStates = null, runEdgeStates = null,
   watchBoxIds = null,
+  watchConnected = false,          // backend/WS reachable → show the Live pill, even before activity
   // Live follow (Step 40): center the camera on the file an agent is editing.
   liveFollow = true, onToggleLiveFollow = null,
   // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
@@ -1210,9 +1211,9 @@ export default function WhiteboardCanvas({
       </div>
 
       {/* Live: always-on Watch indicator (pulses when activity lands) that doubles
-          as the follow-camera toggle. Click to start/stop the canvas following the
-          file an agent is editing — the glow stays on either way. */}
-      {watching && (
+          as the follow-camera toggle. Shown whenever Watch is connected — not only after an
+          edit — so the user trusts OpenFDE is watching. Click to start/stop follow-camera. */}
+      {(watchConnected || watching) && (
         <button
           className={`wb-watching wb-live${watchRings.length ? ' active' : ''}${liveFollow ? ' following' : ''}`}
           onClick={() => onToggleLiveFollow?.()}
@@ -1622,9 +1623,16 @@ function computeRunRings(nodeStates, nodes, layout) {
     if (id.startsWith('box:file:')) return id.slice('box:file:'.length)
     return null
   }
+  // Roll a file path up to its module box. Match the module's linkedPath (dir prefix) OR its
+  // linkedFiles (exact, then basename) — the same way Watch resolves a file to its box — so a
+  // file glow ALWAYS lands on the box that was expanded, never resolving to nothing.
   const moduleForPath = (p) => nodes.find(m => {
-    const lp = m.box?.linkedPath
-    return lp && (p === lp || p.startsWith(`${lp}/`))
+    const b = m.box || {}
+    if (b.linkedPath && (p === b.linkedPath || p.startsWith(`${b.linkedPath}/`))) return true
+    const lf = b.linkedFiles || []
+    if (lf.includes(p)) return true
+    const base = p.split('/').pop()
+    return lf.some(f => f.split('/').pop() === base)
   }) || null
 
   // Resolve a run-state id to the lowest VISIBLE node, rolling up only (Step 33):

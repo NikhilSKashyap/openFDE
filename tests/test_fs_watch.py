@@ -109,5 +109,75 @@ class FsWatchLoopTest(unittest.IsolatedAsyncioTestCase):
                     pass
 
 
+class FsWatchResolveFunctionTest(unittest.IsolatedAsyncioTestCase):
+    async def _run_one_tick_edit(self, resolve_function, *, n_files=1):
+        """Baseline, then edit ``n_files`` source files in one tick; return the manager's events
+        and the resolver's call count."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for i in range(n_files):
+                (root / f"f{i}.py").write_text("x = 1\n")
+            mgr = _FakeManager()
+            calls = {"n": 0}
+
+            async def wrapped(rel):
+                calls["n"] += 1
+                return await resolve_function(rel)
+
+            task = asyncio.create_task(fs_watch.watch_loop(
+                root, mgr, interval=0.05, resolve_function=wrapped))
+            try:
+                await asyncio.sleep(0.15)
+                self.assertEqual(mgr.sent, [], "baseline must emit nothing")
+                import os
+                future = time.time() + 5
+                for i in range(n_files):
+                    (root / f"f{i}.py").write_text("x = 2\n")
+                    os.utime(root / f"f{i}.py", (future, future))
+                await asyncio.sleep(0.25)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            events = [m for m in mgr.sent if m["type"] == "file_activity"]
+            return events, calls["n"]
+
+    async def test_enrichment_merges_into_payload(self):
+        async def resolve(rel):
+            return {"function": "handleEdit"}
+        events, calls = await self._run_one_tick_edit(resolve)
+        self.assertTrue(events)
+        self.assertEqual(events[0]["payload"]["function"], "handleEdit")
+        self.assertEqual(events[0]["payload"]["file"], "f0.py")
+        self.assertGreaterEqual(calls, 1)
+
+    async def test_none_enrichment_leaves_file_only_payload(self):
+        async def resolve(rel):
+            return None
+        events, _ = await self._run_one_tick_edit(resolve)
+        self.assertTrue(events)
+        self.assertNotIn("function", events[0]["payload"])
+
+    async def test_resolver_exception_never_breaks_the_loop(self):
+        async def resolve(rel):
+            raise RuntimeError("boom")
+        events, _ = await self._run_one_tick_edit(resolve)
+        self.assertTrue(events, "edit still broadcasts even when enrichment raises")
+        self.assertNotIn("function", events[0]["payload"])
+
+    async def test_bulk_tick_skips_function_resolution(self):
+        # A tick touching more than _RESOLVE_MAX_TICK files is treated as a bulk op
+        # (checkout/format) — file-level glow only, no per-function git diffs.
+        async def resolve(rel):
+            return {"function": "x"}
+        events, calls = await self._run_one_tick_edit(
+            resolve, n_files=fs_watch._RESOLVE_MAX_TICK + 1)
+        self.assertTrue(events)
+        self.assertEqual(calls, 0, "resolver must not run on a bulk tick")
+        self.assertTrue(all("function" not in e["payload"] for e in events))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ _IGNORE_EXACT = {"4913"}              # vim's writability probe file
 
 _DEFAULT_INTERVAL = 1.2
 _MAX_FANOUT = 40                       # cap events per tick (bulk checkout/format)
+_RESOLVE_MAX_TICK = 5                  # only infer the function for small (real-edit) ticks
 
 
 def _ignored_name(name: str) -> bool:
@@ -61,7 +62,8 @@ def _snapshot(root: Path) -> dict:
 
 
 async def watch_loop(root, manager, *, is_run_active=None,
-                     interval: float = _DEFAULT_INTERVAL, on_event=None) -> None:
+                     interval: float = _DEFAULT_INTERVAL, on_event=None,
+                     resolve_function=None) -> None:
     """Poll ``root`` for external source edits and broadcast ``file_activity``.
 
     Args:
@@ -71,6 +73,10 @@ async def watch_loop(root, manager, *, is_run_active=None,
             (a council run is glowing those files already).
         interval: float — seconds between polls.
         on_event: callable(rel) | None — test/observability hook per emitted file.
+        resolve_function: async callable(rel) -> dict | None — optional per-file enrichment
+            (e.g. ``{"function": "<name>"}``) merged into the payload so the glow can pulse the
+            edited function, not just the file. Called only for small ticks (real edits, not
+            bulk checkouts) and never allowed to break the loop.
     """
     root = Path(root)
     prev = _snapshot(root)             # baseline — emit nothing for what already exists
@@ -86,13 +92,21 @@ async def watch_loop(root, manager, *, is_run_active=None,
                 continue
             changed = [p for p, m in cur.items() if prev.get(p) != m]
             prev = cur
+            # Infer the touched function only on a small tick — a single coding edit, not a
+            # bulk checkout/format (which we'd never want N function rings from anyway).
+            do_resolve = resolve_function is not None and 0 < len(changed) <= _RESOLVE_MAX_TICK
             for p in changed[:_MAX_FANOUT]:
                 rel = os.path.relpath(p, str(root))
+                payload = {"file": rel, "action": "write", "ts": time.time()}
+                if do_resolve:
+                    try:
+                        enrich = await resolve_function(rel)
+                        if enrich:
+                            payload.update(enrich)
+                    except Exception:  # noqa: BLE001 — enrichment is best-effort
+                        logger.debug("resolve_function failed for %s", rel, exc_info=True)
                 try:
-                    await manager.broadcast({
-                        "type": "file_activity",
-                        "payload": {"file": rel, "action": "write", "ts": time.time()},
-                    })
+                    await manager.broadcast({"type": "file_activity", "payload": payload})
                 except Exception:  # noqa: BLE001 — activity must never break the loop
                     logger.debug("file_activity broadcast failed for %s", rel, exc_info=True)
                 if on_event:

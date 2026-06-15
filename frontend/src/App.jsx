@@ -12,6 +12,7 @@ import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
 import FunctionPatch, { TrailEditor } from './components/Whiteboard/FunctionPatch'
 import { pickPrimaryFn } from './lib/flowResolve'
+import { watchTargetId } from './lib/watchTarget'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
@@ -672,7 +673,7 @@ export default function App() {
     }
     return b || null
   }
-  function handleFileActivity({ file }) {
+  function handleFileActivity({ file, functionId, function: fnName }) {
     if (!file) return
     // Re-assimilation collects EVERY changed path — including brand-new files that
     // aren't on the canvas yet — so the understanding catches up. Done before the
@@ -681,15 +682,21 @@ export default function App() {
     scheduleReassimilation()
     const box = resolveWatchBox(file)
     if (!box) return  // not on the canvas — glow presupposes Land (re-assim still runs)
-    // Auto-expand the module so the glow lands on the FILE, not the whole module.
-    // Track that WE expanded it so we can auto-collapse on settle — but if the
-    // user already had it open, it's not in our set and we leave it expanded.
+    // Expand the module AND the file box. Track what WE expanded so settle can auto-collapse;
+    // anything the user already had open isn't in our set and stays expanded. The file box must
+    // be expanded for the function ring to have geometry when the backend infers the function.
+    const fileId = fileNodeId(file)
     setExpandedIds(prev => {
-      if (prev.has(box.id)) return prev
-      watchAutoExpandedRef.current.add(box.id)
-      return new Set(prev).add(box.id)
+      const next = new Set(prev)
+      let changed = false
+      for (const id of [box.id, fileId]) {
+        if (!next.has(id)) { next.add(id); watchAutoExpandedRef.current.add(id); changed = true }
+      }
+      return changed ? next : prev
     })
-    const key = fileNodeId(file)   // box:file:<path> — resolves to the file box
+    // Pulse the MOST SPECIFIC known target: the inferred function (box:function:<path>:<name>),
+    // else the file (box:file:<path>). computeRunRings rolls it up to whatever is visible.
+    const key = functionId || watchTargetId(file, fnName)
     setWatchActivity(prev => ({ ...prev, [key]: Date.now() }))
     setWatchTiers(prev => (prev[key] === 'active' ? prev : { ...prev, [key]: 'active' }))
   }
@@ -2003,6 +2010,7 @@ export default function App() {
               runNodeStates={run?.nodeStates}
               runEdgeStates={run?.edgeStates}
               watchBoxIds={watchTiers}
+              watchConnected={backendAvailable}
               liveFollow={liveFollow}
               onToggleLiveFollow={() => setLiveFollow(v => !v)}
               spotlight={canvasSpotlight}
