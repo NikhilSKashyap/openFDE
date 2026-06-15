@@ -189,7 +189,8 @@ def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_
     root = Path(root)
     commits = _git_commits(root)
     linked = {s for e in persistence.load_episodes() for s in (e.get("commitShas") or [])}
-    counts = {"imported": 0, "landed": 0, "needsReview": 0, "discussion": 0, "scanned": 0}
+    counts = {"imported": 0, "candidates": 0, "landed": 0, "needsReview": 0,
+              "discussion": 0, "scanned": 0}
 
     def _ingest(turns, kind):
         for prompt, edited, evidence in turns:
@@ -207,12 +208,19 @@ def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_
                 return
             commit = _link_commit(_epoch(prompt.get("timestamp")), set(edited), commits, linked)
             ep = _historical_episode(root, prompt, edited, commit, kind)
-            if commit:
-                linked.add(commit["sha"])
-            persistence.upsert_episode(ep)
-            counts["imported"] += 1
-            counts[{"landed": "landed", "needs_manual_land": "needsReview",
-                    "open": "discussion"}[ep["status"]]] += 1
+            # Only HIGH-confidence backfill (real commit + file evidence) becomes a NUMBERED episode.
+            # discussion / needs_review transcript fragments are quarantined as candidates — never a
+            # P<n>, never shown in the rail/Story/OpenPM — so P<n> keeps meaning "a real prompt".
+            if ep.get("backfillConfidence") == "high":
+                if commit:
+                    linked.add(commit["sha"])
+                persistence.upsert_episode(ep)
+                counts["imported"] += 1
+                counts["landed"] += 1
+            else:
+                persistence.add_backfill_candidate(ep)
+                counts["candidates"] += 1
+                counts["needsReview" if ep["status"] == "needs_manual_land" else "discussion"] += 1
 
     try:
         # Scan EVERY Claude transcript (the repo's own cwd dir is among them); _ingest
@@ -225,14 +233,15 @@ def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_
         logger.debug("backfill scan failed", exc_info=True)
 
     event = None
-    if counts["imported"]:
+    if counts["imported"] or counts["candidates"]:
         try:
             event = persistence.append_event({
                 "type": "backfill_imported",
-                "payload": {"detail": f"Imported {counts['imported']} historical prompt"
-                            f"{'' if counts['imported'] == 1 else 's'} for this repo "
-                            f"({counts['landed']} landed, {counts['needsReview']} need review, "
-                            f"{counts['discussion']} discussion).", **counts}})
+                "payload": {"detail": f"Imported {counts['imported']} historical prompt episode"
+                            f"{'' if counts['imported'] == 1 else 's'}; quarantined "
+                            f"{counts['candidates']} transcript candidate"
+                            f"{'' if counts['candidates'] == 1 else 's'} (review to import).",
+                            **counts}})
         except Exception:  # noqa: BLE001
             logger.debug("backfill event append failed", exc_info=True)
     logger.info("backfill: imported %d historical prompt(s) for %s (scanned %d)",

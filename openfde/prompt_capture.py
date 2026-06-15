@@ -311,12 +311,19 @@ def read_new_prompts(path: Path, start_offset: int):
 
 
 def capture_key_exists(persistence, key: str) -> bool:
-    """True when ANY persisted episode already carries this captureKey — the
-    cross-process dedup check (in-memory `known` sets are per-process; the store is
-    the shared truth). Cheap at capture frequency (human prompts, not ticks)."""
+    """True when this captureKey is already known — as a real episode OR a quarantined backfill
+    candidate. The cross-process dedup check (in-memory `known` sets are per-process; the store is
+    the shared truth). Checking candidates too stops a re-scan from re-importing a quarantined
+    transcript fragment back into episodes.json. Cheap at capture frequency (human prompts)."""
     if not key:
         return False
-    return any((e.get("captureKey") or "") == key for e in persistence.load_episodes())
+    if any((e.get("captureKey") or "") == key for e in persistence.load_episodes()):
+        return True
+    try:
+        return any((c.get("captureKey") or "") == key
+                   for c in persistence.load_backfill_candidates())
+    except AttributeError:        # older persistence without the candidate store
+        return False
 
 
 def make_capture_episode(repo_root, prompt: dict, files=None, status="open",
