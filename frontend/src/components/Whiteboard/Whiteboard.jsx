@@ -7,6 +7,7 @@ import CommitChipRail from './CommitChipRail'
 export default function Whiteboard({
   activeTool, setActiveTool,
   activeView, setActiveView,
+  storyNonce = 0,
   canvasState, canvasDispatch,
   onLoadSelfMap,
   onGenerateFromRepo,
@@ -102,6 +103,7 @@ export default function Whiteboard({
     return (
       <Story
         episodes={episodes}
+        storyNonce={storyNonce}
         onSpotlightEpisode={onSpotlightEpisode}
         onSpotlightCommit={onSpotlightCommit}
         onSelectConcept={onSelectConcept}

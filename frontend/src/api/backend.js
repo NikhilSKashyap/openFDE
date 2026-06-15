@@ -611,12 +611,22 @@ export const createEpisode = (payload = {}) =>
   apiFetch('/api/review/episodes', { method: 'POST', body: JSON.stringify(payload) })
 
 /**
- * Prompt Story Graph — the conceptual narrative derived from prompt episodes:
+ * Prompt Story Graph — the FULL conceptual narrative derived from prompt episodes:
  * active / deferred / abandoned concepts, each linked to its episodes, commits,
- * and files. Deterministic backend (no LLM). Distinct from the Timeline.
- * @returns {Promise<{ok, concepts:Array, episodes:Array, edges:Array, counts:Object}|null>}
+ * and files. Deterministic backend (no LLM). The authoritative source — carries
+ * `confirmed:true`, so the UI may show "No concepts yet" only on this result.
+ * @returns {Promise<{ok, confirmed, concepts:Array, episodes:Array, edges:Array, counts:Object}|null>}
  */
-export const getPromptGraph = () => apiFetch('/api/story/prompt-graph')
+export const getPromptGraph = () => apiFetch('/api/story/prompt-graph', { _timeout: 60_000 })
+
+/**
+ * Story BOOT — cache-only, instant: the last-known-good recent Story (latest ~10
+ * product episodes + counts + the capped graph) so first paint never waits on the
+ * full rebuild. `cached:false, building:true` means "no cache yet" (UI shows
+ * "Restoring Story…"), NEVER "No concepts yet". `confirmed` is always false here.
+ * @returns {Promise<{ok, cached, confirmed, building, recentEpisodes:Array, concepts:Array}|null>}
+ */
+export const getStoryBoot = () => apiFetch('/api/story/boot', { _timeout: 9000 })
 
 /**
  * On-demand LLM story summary — upgrade up to `limit` episodes' titles/summaries via the

@@ -162,6 +162,9 @@ export default function App() {
   // OpenFDE" bucket of commits not linked to a prompt.
   const [episodes, setEpisodes] = useState([])
   const [outsideBucket, setOutsideBucket] = useState(null)
+  // Bumped on a story_updated broadcast (a Land / background rebuild) so Story re-hydrates the
+  // full graph even when episodes.length is unchanged (a land adds commits, not episodes).
+  const [storyNonce, setStoryNonce] = useState(0)
   const [landing, setLanding] = useState(false)
   // Why the last Land was a no-op ("no dirty files attributed…") — shown on the card.
   const [landNote, setLandNote] = useState(null)
@@ -864,6 +867,9 @@ export default function App() {
       // verify/landed state is the source of truth for OpenPM, so refetch tasks
       // too — GET /api/tasks reconciles each card to its episode (no split-brain).
       else if (msg?.type === 'episode_updated') { refreshEpisodes(); refetchTasks() }
+      // The server rebuilt the Story (a Land, a background warm) — nudge Story to re-hydrate the
+      // full graph; the boot cache it just refreshed makes the refetch instant.
+      else if (msg?.type === 'story_updated') { setStoryNonce(n => n + 1) }
       // The SERVER moved/relabelled a card (verify result, lifecycle, land) — pull
       // the reconciled list so OpenPM never shows a stale FAILED beside a passed
       // episode. (This used to be a no-op; the server is now a task writer too.)
@@ -2083,6 +2089,7 @@ export default function App() {
               setActiveTool={setActiveTool}
               activeView={activeView}
               setActiveView={setActiveView}
+              storyNonce={storyNonce}
               canvasState={canvasState}
               canvasDispatch={canvasDispatch}
               onLoadSelfMap={() => canvasDispatch({ type: 'LOAD_SELF_MAP' })}

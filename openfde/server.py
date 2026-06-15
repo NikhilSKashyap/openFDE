@@ -78,6 +78,7 @@ from openfde import council_context as council_context_mod
 from openfde import council_router as council_router_mod
 from openfde import session as session_mod
 from openfde import boot_cache as boot_cache_mod
+from openfde import story_cache as story_cache_mod
 from openfde import __version__ as _OPENFDE_VERSION
 from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
@@ -2015,29 +2016,88 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         loop = asyncio.get_event_loop()
         return web.json_response(await loop.run_in_executor(None, _review_episodes_payload))
 
-    async def get_prompt_story_graph(request: web.Request) -> web.Response:
-        """Prompt Story Graph — the conceptual narrative built from prompt episodes.
+    _story_lock = asyncio.Lock()              # serialize Story rebuilds (endpoint + warm + land hook)
 
-        Deterministic (no LLM, no git mutation): active concepts from episode titles,
-        deferred/abandoned concepts from strong signals in episode text, each linked
-        to its episodes/commits/files. Distinct from the Timeline (events) and the
-        architecture story (code flow).
-
-        Returns:
-            web.Response — {ok, concepts[], episodes[], edges[], counts}.
-        """
+    def _story_graph_full() -> dict:
+        """The FULL Story-graph pipeline — backfill → deterministic facts → meta/junk reclassify →
+        demo-plan clean → build_prompt_graph. Synchronous and touches git once (a check-ignore in
+        the reclassify); callers run it OFF the event loop. Reused by /api/story/prompt-graph, the
+        boot warm, and the land hook so the laws stay in one place."""
         persistence.backfill_episode_meta()
         episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
-        # Meta-by-effect: an episode that only edited gitignored docs (demo scripts,
-        # ROADMAP/FLOW) and committed nothing — or only OS junk like .DS_Store — is
-        # reclassified operational, off the spine (Events layer still has it).
+        # Meta-by-effect: an episode that only edited gitignored docs (demo scripts, ROADMAP/FLOW)
+        # and committed nothing — or only OS junk like .DS_Store — is reclassified operational, off
+        # the spine (Events layer still has it).
         episodes = persistence.flag_nonimplementation_episodes(path, episodes)
-        # Demo-PLANNING concepts (NanoGPT/Tailwind, live demo, …) leave product Story
-        # concepts; a demo-prompt episode that made a real change is titled by the change.
+        # Demo-PLANNING concepts (NanoGPT/Tailwind, live demo, …) leave product Story concepts; a
+        # demo-prompt episode that made a real change is titled by the change.
         episodes = persistence.clean_story_facts(episodes)
-        # Recent raw events feed the storyTimeline bridges + Events layer (capped).
-        return web.json_response(build_prompt_graph(episodes,
-                                                    events=persistence.load_events()[-200:]))
+        return build_prompt_graph(episodes, events=persistence.load_events()[-200:])
+
+    def _cache_story(graph: dict) -> None:
+        """Persist the Story boot cache from a freshly built graph (best-effort)."""
+        try:
+            story_cache_mod.write_story_cache(
+                persistence.openfde_dir, graph,
+                generated_at=datetime.now(timezone.utc).isoformat())
+        except OSError:
+            logger.warning("could not write story cache")
+
+    _story_refresh = {"running": False, "again": False}   # coalesce a burst of lands → ≤1 extra rebuild
+
+    async def _refresh_story_cache_and_broadcast() -> None:
+        """Rebuild the Story graph off-loop, refresh the boot cache, and nudge open clients to
+        re-hydrate (``story_updated``). Best-effort, serialized, and COALESCED — a burst of lands
+        collapses to at most one trailing rebuild (the rebuild reads the latest persisted state), so
+        the ~seconds-long GIL-heavy build never piles up. A failure never blocks the triggering
+        action (a land, server start)."""
+        if _story_refresh["running"]:
+            _story_refresh["again"] = True        # a rebuild is in flight; ask it to run once more
+            return
+        _story_refresh["running"] = True
+        try:
+            while True:
+                _story_refresh["again"] = False
+                async with _story_lock:
+                    loop = asyncio.get_event_loop()
+                    graph = await loop.run_in_executor(None, _story_graph_full)
+                    _cache_story(graph)
+                await manager.broadcast({"type": "story_updated"})
+                if not _story_refresh["again"]:
+                    break
+        except Exception:  # noqa: BLE001 — cache refresh must never break a land / startup
+            logger.debug("story cache refresh failed", exc_info=True)
+        finally:
+            _story_refresh["running"] = False
+
+    async def get_story_boot(request: web.Request) -> web.Response:
+        """CACHE-ONLY Story boot — the last-known-good recent Story (latest ~10 product episodes +
+        counts + the capped graph), served instantly so first paint never waits on the full rebuild.
+        No cache yet → a NON-authoritative empty (``building:true``) so the UI shows "Restoring
+        Story…", never "No concepts yet". The full graph + the authoritative empty come from
+        /api/story/prompt-graph."""
+        loop = asyncio.get_event_loop()
+        cached = await loop.run_in_executor(
+            _boot_pool, lambda: story_cache_mod.read_story_cache(persistence.openfde_dir))
+        return web.json_response(cached or story_cache_mod.empty_boot())
+
+    async def get_prompt_story_graph(request: web.Request) -> web.Response:
+        """Prompt Story Graph — the FULL conceptual narrative built from prompt episodes, and the
+        **authoritative** Story source (/api/story/boot serves the cached recent slice for first
+        paint). Active concepts from episode titles, deferred/abandoned from strong signals, each
+        linked to its episodes/commits/files. Builds OFF the event loop, refreshes the boot cache,
+        and returns ``confirmed:true`` so the UI may show "No concepts yet" only on a truly empty
+        result.
+
+        Returns:
+            web.Response — {ok, confirmed, concepts[], episodes[], edges[], counts, storyMap,
+            storyTimeline, storyNarrative}.
+        """
+        async with _story_lock:
+            loop = asyncio.get_event_loop()
+            graph = await loop.run_in_executor(None, _story_graph_full)
+            _cache_story(graph)
+        return web.json_response({**graph, "confirmed": True})
 
 
     async def post_summarize_episodes(request: web.Request) -> web.Response:
@@ -2188,6 +2248,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         await manager.broadcast({"type": "event_appended", "event": ce})
         await manager.broadcast({"type": "episode_updated", "episode": ep})
         _write_warm_after_episode(ep)        # land = a trusted restore point → warm-cache it now
+        # A land changes the Story (new commits, lifecycle) — refresh the Story boot cache off-loop
+        # and broadcast story_updated so open clients re-hydrate without a manual refetch.
+        asyncio.create_task(_refresh_story_cache_and_broadcast())
         # Explicit commit_created so any client can mirror the prompt→commit story
         # into OpenPM (a Done task under this prompt) without waiting on a poll.
         _dt, _ds = commit_display(ep.get("title"), ep.get("summary"), commit["summary"])
@@ -4343,6 +4406,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/review/episodes", get_review_episodes)
     app.router.add_get( "/api/review/episodes/full", get_review_episodes_full)
     app.router.add_get( "/api/story/prompt-graph", get_prompt_story_graph)
+    app.router.add_get( "/api/story/boot",         get_story_boot)
     app.router.add_post("/api/review/episodes/summarize", post_summarize_episodes)
     app.router.add_post("/api/review/episodes", post_review_episode_create)
     app.router.add_post("/api/review/episodes/{episodeId}/land", post_review_episode_land)
@@ -4495,6 +4559,24 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             logger.debug("background arch warm failed", exc_info=True)
     warm_task = asyncio.create_task(_warm_arch())
 
+    # ── Warm the Story boot cache (thread executor) so a fresh restart serves the recent Story
+    # instantly. /api/story/boot already returns the last cache (or a "Restoring…" placeholder); this
+    # builds the full graph once after first paint, refreshes the cache, and broadcasts story_updated.
+    async def _warm_story():
+        try:
+            await asyncio.sleep(4)                          # let first paint settle before any heavy build
+            # Warm restart: a cache already exists → /api/story/boot serves it instantly, so skip the
+            # GIL-heavy rebuild (it refreshes on the next Land or Story open). Only a COLD start (no
+            # cache) pays the build — and even then boot returns "building" instantly meanwhile.
+            if story_cache_mod.read_story_cache(persistence.openfde_dir):
+                logger.info("story cache present — skipping startup rebuild")
+                return
+            await _refresh_story_cache_and_broadcast()
+            logger.info("story cache warmed at startup (cold)")
+        except Exception:  # noqa: BLE001 — best-effort warm-up, never fatal
+            logger.debug("background story warm failed", exc_info=True)
+    warm_story_task = asyncio.create_task(_warm_story())
+
     # ── Watch Any Agent: glow the canvas live on ANY external edit (Cursor,
     # Claude Code, terminal, human) — suppressed while our own council run glows.
     async def _resolve_watch_function(rel: str):
@@ -4558,7 +4640,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         pass
     finally:
         logger.info("Server stopping")
-        for t in (watch_task, capture_task, summarizer_task, backfill_task, memory_task, warm_task):
+        for t in (watch_task, capture_task, summarizer_task, backfill_task, memory_task,
+                  warm_task, warm_story_task):
             t.cancel()
             try:
                 await t

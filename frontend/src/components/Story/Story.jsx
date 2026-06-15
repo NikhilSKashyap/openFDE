@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getPromptGraph } from '../../api/backend'
+import { getPromptGraph, getStoryBoot } from '../../api/backend'
 import { tryCopy } from '../../lib/clipboard'
 import Md from '../../lib/markdown'
 
@@ -38,9 +38,13 @@ const LANES = [
 const LEGACY_LIFECYCLE = { active: 'next', mixed: 'next', deferred: 'deferred', abandoned: 'abandoned' }
 const lifecycleOf = c => c.lifecycle || LEGACY_LIFECYCLE[c.status] || 'next'
 
-export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCommit, onSelectConcept, setActiveView }) {
+export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCommit, onSelectConcept, setActiveView, storyNonce = 0 }) {
   const [graph, setGraph]     = useState(null)
-  const [loading, setLoading] = useState(true)
+  // `confirmed` is the law for the empty state: only the FULL endpoint is authoritative, so we show
+  // "No concepts yet" only after a confirmed graph comes back empty — never while the cached boot or
+  // the background refresh is still pending. (Until then, !confirmed drives the "refreshing" hint.)
+  const [confirmed, setConfirmed] = useState(false)
+  const bootedRef = useRef(false)            // boot-from-cache runs once, before we have any graph
   const [selectedId, setSelectedId] = useState(null)
   const [tellMode, setTellMode] = useState(false)   // Story Tell: the merged narrative timeline
   const [eventsOpen, setEventsOpen] = useState(false) // raw/technical Events layer inside Tell
@@ -48,18 +52,25 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
   // user to Canvas. Canvas spotlighting stays available as an explicit secondary action.
   const [detail, setDetail] = useState(null)        // {kind, node?, tick?, branch?}
 
-  // Fetch on mount and whenever the episode set changes (a new prompt / a Land).
-  // Async IIFE + alive guard so setState only runs inside the async body.
+  // Progressive hydration: paint the cached recent Story instantly (boot), then replace with the
+  // authoritative full graph in the background. Boot runs only before we have any graph, so a
+  // refetch (new prompt, Land, story_updated) never flickers back to the cache. Refetch on mount,
+  // when the episode set changes, or on story_updated.
   useEffect(() => {
     let alive = true
     ;(async () => {
-      const g = await getPromptGraph()
+      if (!bootedRef.current) {
+        bootedRef.current = true
+        const boot = await getStoryBoot()       // instant, cache-only
+        if (!alive) return
+        if (boot?.ok) setGraph(prev => prev ?? boot)
+      }
+      const full = await getPromptGraph()        // authoritative; also refreshes the server cache
       if (!alive) return
-      setGraph(g?.ok ? g : { ok: false, concepts: [], counts: {} })
-      setLoading(false)
+      if (full?.ok) { setGraph(full); setConfirmed(true) }
     })()
     return () => { alive = false }
-  }, [episodes.length])
+  }, [episodes.length, storyNonce])
 
   const concepts = graph?.concepts || []
   const epById = Object.fromEntries(episodes.map(e => [e.episodeId, e]))
@@ -89,6 +100,12 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
             {lanes.map(l => `${l.items.length} ${l.key}`).join(' · ')}
           </span>
         )}
+        {!confirmed && concepts.length > 0 && !tellMode && (
+          <span style={{ fontSize: 10, color: 'var(--accent-orange)', opacity: 0.85 }}
+                title="Showing the restored recent Story — the full graph is rebuilding">
+            refreshing full Story…
+          </span>
+        )}
         {tellMode && (
           <button
             onClick={() => setEventsOpen(v => !v)}
@@ -104,7 +121,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
             Events
           </button>
         )}
-        {concepts.length > 0 && (
+        {concepts.length > 0 && confirmed && (
           <button
             onClick={() => setTellMode(v => !v)}
             title={tellMode ? 'Back to the concept columns' : 'Replay the build as a narrative timeline — beats on a spine, what happened between them on the bridges'}
@@ -137,13 +154,19 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
         </div>
       )}
 
-      {loading ? (
-        <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>Building the story…</div>
-      ) : concepts.length === 0 ? (
+      {!graph ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>Restoring Story…</div>
+      ) : (confirmed && concepts.length === 0) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12, lineHeight: 1.5 }}>
           No concepts yet. Prompt episodes (captured from any agent, or landed through OpenFDE)
           become the story — the latest beat's titles are what you're building <b>now</b>, queued
           ideas land in <b>next</b>, and ideas you watch, defer, or drop fill the other lanes.
+        </div>
+      ) : concepts.length === 0 ? (
+        // Cached/boot says empty but the authoritative full graph hasn't confirmed yet — never
+        // claim "No concepts yet" here.
+        <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>
+          {graph.building ? 'Restoring Story…' : 'Refreshing full Story…'}
         </div>
       ) : tellMode ? (
         <div style={{ display: 'flex', flex: 1, minHeight: 0, gap: 10 }}>
