@@ -2,8 +2,9 @@
 Tests for the startup-responsiveness contract.
 
 Law: /api/boot serves CACHED/cheap state only — it must NEVER run analyze_repo, the backfill scan,
-or the semantic graph (those are background jobs on a worker process). The heavy worker function
-must stay top-level/picklable so it can run on the ProcessPoolExecutor.
+or the semantic graph (those run in the background). analyze_repo runs off the event loop on a
+THREAD executor — a ProcessPool was deferred for shutdown reliability — but analyze_repo is kept a
+top-level function so process isolation stays an option if we revisit it.
 """
 import pickle
 import subprocess
@@ -69,9 +70,11 @@ class BootContractTest(unittest.TestCase):
         self.assertTrue(warm["hasSnapshot"])
         self.assertIsNone(warm["canvasSnapshot"])               # tiny by default (no ?canvas=1)
 
-    def test_heavy_worker_is_picklable_for_the_process_pool(self):
+    def test_analyze_repo_stays_top_level_picklable(self):
+        # Runs on a thread today; kept top-level/picklable so process isolation remains an option
+        # (ProcessPool deferred for shutdown reliability).
         from openfde.architect import analyze_repo
-        self.assertTrue(pickle.dumps(analyze_repo))             # top-level → runnable in a worker process
+        self.assertTrue(pickle.dumps(analyze_repo))
 
     def test_latest_terminal_tag_picks_newest_terminal(self):
         self.p.upsert_episode({"episodeId": "old", "status": "open",

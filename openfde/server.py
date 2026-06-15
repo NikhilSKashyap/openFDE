@@ -1024,7 +1024,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_archgraph(request: web.Request) -> web.Response:
         """Return the ArchGraph for the watched repository (cached by worktree signature).
 
-        Cached; on a miss the read-only analyzer runs on the process pool (off the event loop).
+        Cached; on a miss the read-only analyzer runs off the event loop in a thread.
         ``?refresh=1`` forces a recompute.
         """
         force = request.query.get("refresh") in ("1", "true")
@@ -4275,7 +4275,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             logger.debug("memory_kit bootstrap failed", exc_info=True)
     memory_task = asyncio.create_task(_bootstrap_memory())
 
-    # ── Warm the ArchGraph in the background via the process pool, then nudge the canvas with
+    # ── Warm the ArchGraph in the background (thread executor), then nudge the canvas with
     # state_updated. /api/boot already serves the last warm snapshot, so the user never waits on
     # this — it just refreshes once the fresh scan lands.
     async def _warm_arch():
