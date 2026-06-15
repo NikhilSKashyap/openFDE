@@ -8,6 +8,7 @@ import WorkPanel from './components/WorkPanel/WorkPanel'
 import { deriveMoment } from './productFlow/deriveMoment'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import AgentSettings from './components/AgentSettings/AgentSettings'
+import Plugins from './components/Plugins/Plugins'
 import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
 import FunctionPatch, { TrailEditor } from './components/Whiteboard/FunctionPatch'
@@ -192,6 +193,7 @@ export default function App() {
   const [agentSettings, setAgentSettings] = useState(null)
   const [agentOptions, setAgentOptions]   = useState(null)
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false)
+  const [pluginsOpen, setPluginsOpen] = useState(false)
   const [semanticGraphOpen, setSemanticGraphOpen] = useState(false)
   // Canvas spotlight — a concept (tether) or a commit to light up on the canvas.
   // { kind:'tether'|'commit', label, count, files, amberFiles?, concepts?, summary? }
@@ -2304,6 +2306,7 @@ export default function App() {
         onSetBackend={onSetBackend}
         onOpenAgentSettings={() => { setPaletteOpen(false); setAgentSettingsOpen(true) }}
         onOpenSemanticGraph={() => { setPaletteOpen(false); setSemanticGraphOpen(true) }}
+        onOpenPlugins={() => { setPaletteOpen(false); setPluginsOpen(true) }}
       />
       {agentSettingsOpen && agentSettings && agentOptions && (
         <AgentSettings
@@ -2313,6 +2316,7 @@ export default function App() {
           onSettingsChange={setAgentSettings}
         />
       )}
+      {pluginsOpen && <Plugins onClose={() => setPluginsOpen(false)} />}
       {semanticGraphOpen && (
         <SemanticGraphCard
           onClose={() => setSemanticGraphOpen(false)}

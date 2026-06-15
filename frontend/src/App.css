@@ -2810,6 +2810,65 @@
 }
 .agentset-doclink:hover { opacity: 1; text-decoration: underline; }
 
+/* Plugins — read-only capability registry (Plugin Registry v1-B Lite) */
+.plugins {
+  position: fixed; top: 11%; left: 50%; transform: translateX(-50%); z-index: 1000;
+  width: 520px; max-width: 92vw; max-height: 80vh;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex; flex-direction: column; overflow: hidden; font-size: 13px;
+}
+.plugins-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+}
+.plugins-title { font-weight: 600; font-size: 14px; color: var(--text); }
+.plugins-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.plugins-x {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 14px; padding: 2px 4px; line-height: 1;
+}
+.plugins-x:hover { color: var(--text); }
+.plugins-body { padding: 12px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.plugins-empty { color: var(--text-muted); padding: 24px 4px; text-align: center; }
+.plugins-empty.warn { color: var(--active); }
+.plugins-group { display: flex; flex-direction: column; gap: 7px; }
+.plugins-group-label {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.plugin-card {
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+  background: var(--surface-2); display: flex; flex-direction: column; gap: 6px;
+}
+.plugin-card.is-active { border-color: color-mix(in srgb, var(--accent-orange, var(--accent)) 55%, transparent); }
+.plugin-card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plugin-name { font-weight: 600; color: var(--text); }
+.plugin-status {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 6px; border-radius: 10px; background: var(--border); color: var(--text-muted);
+}
+.plugin-status.ok    { color: var(--solid); background: color-mix(in srgb, var(--solid) 16%, transparent); }
+.plugin-status.warn  { color: var(--active); background: color-mix(in srgb, var(--active) 16%, transparent); }
+.plugin-status.muted { color: var(--text-muted); opacity: 0.7; }
+.plugin-state { margin-left: auto; font-size: 10px; color: var(--text-muted); }
+.plugin-state.on  { color: var(--solid); font-weight: 600; }
+.plugin-state.det { color: var(--accent-orange, var(--accent)); }
+.plugin-state.off { opacity: 0.6; }
+.plugin-activates { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+.plugin-activates-lbl { text-transform: uppercase; letter-spacing: 0.04em; font-size: 9px; opacity: 0.8; }
+.plugin-provides { display: flex; flex-wrap: wrap; gap: 5px; }
+.plugin-chip {
+  font-size: 10px; padding: 2px 7px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+}
+.plugins-foot {
+  padding: 9px 14px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text-muted);
+}
+
 /* Architecture Evidence (semantic graph, Step 37a) */
 .agentset.semgraph { width: 560px; max-width: 92vw; }
 .semgraph-meta { display: flex; gap: 8px; align-items: baseline; font-size: 12px;

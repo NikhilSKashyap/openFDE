@@ -107,5 +107,67 @@ class WiringTest(unittest.TestCase):
                          f"plugins import pulled in architect:\n{out.stderr}")
 
 
+class WebXrSuggestionTest(unittest.TestCase):
+    """v1-B Lite: the WebXR domain pack is a deterministic SUGGESTION — surfaced as
+    metadata when cheap repo markers match, never active, never installed/loaded."""
+
+    def _webxr(self, root):
+        for m in plugins.list_plugins(root):
+            if m["id"] == "webxr":
+                return m
+        self.fail("webxr provider was not listed")
+
+    def test_webxr_is_always_listed_as_a_domain_pack(self):
+        d, root = _repo({"app.py": "x\n"})
+        with d:
+            w = self._webxr(root)
+            self.assertEqual(w["kind"], "domain_pack")
+
+    def test_dependency_hint_suggests_webxr(self):
+        d, root = _repo({"package.json": '{"dependencies":{"three":"^0.160.0"}}'})
+        with d:
+            w = self._webxr(root)
+            self.assertTrue(w["detected"])
+            self.assertEqual(w["status"], "suggested")
+
+    def test_glb_asset_suggests_webxr(self):
+        d, root = _repo({"index.html": "<html></html>", "models/duck.glb": "GLB",
+                         "main.js": "console.log(1)\n"})
+        with d:
+            self.assertEqual(self._webxr(root)["status"], "suggested")
+
+    def test_html_plus_xr_api_marker_suggests_webxr(self):
+        d, root = _repo({"index.html":
+                         '<script>navigator.xr.requestSession("immersive-vr")</script>'})
+        with d:
+            w = self._webxr(root)
+            self.assertTrue(w["detected"])
+            self.assertEqual(w["status"], "suggested")
+
+    def test_non_xr_repo_marks_webxr_missing(self):
+        d, root = _repo({"app.py": "def f():\n    return 1\n",
+                         "pkg/util.py": "x = 1\n"})
+        with d:
+            w = self._webxr(root)
+            self.assertFalse(w["detected"])
+            self.assertEqual(w["status"], "missing")
+
+    def test_suggestion_is_never_active_even_when_detected(self):
+        # Read-only: a suggestion describes a pack the repo *could* use; v1-B Lite
+        # loads/installs nothing, so it must never report itself active.
+        d, root = _repo({"package.json": '{"dependencies":{"aframe":"^1.5.0"}}'})
+        with d:
+            w = self._webxr(root)
+            self.assertTrue(w["detected"])
+            self.assertFalse(w["active"])
+
+    def test_every_manifest_exposes_detected(self):
+        d, root = _repo({"package.json": "{}", "a.ts": "export const x = 1\n"})
+        with d:
+            for m in plugins.list_plugins(root):
+                self.assertIn("detected", m)
+                self.assertIsInstance(m["detected"], bool)
+
+
 if __name__ == "__main__":
     unittest.main()

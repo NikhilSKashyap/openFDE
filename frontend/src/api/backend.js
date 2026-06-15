@@ -274,6 +274,17 @@ export const postEvent = (evt) =>
 export const getProject = () => apiFetch('/api/project')
 
 /**
+ * Fetch the plugin registry: built-in capability providers + their per-repo
+ * activation, plus any deterministic suggestions (Plugin Registry v1-B Lite,
+ * read-only — nothing is installed). Shape:
+ *   { ok, kinds:[...], plugins:[{id, kind, displayName, status, activatesOn,
+ *     provides:[...], active, detected}] }
+ *
+ * @returns {Promise<{ok: boolean, kinds: string[], plugins: Array}|null>}
+ */
+export const getPlugins = () => apiFetch('/api/plugins')
+
+/**
  * Persist project metadata (also regenerates PROJECT.md on the server).
  *
  * @param {Object} data - { name, description, entries }

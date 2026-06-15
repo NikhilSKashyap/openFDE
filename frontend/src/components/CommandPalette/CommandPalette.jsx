@@ -18,6 +18,7 @@ export default function CommandPalette({
   onSetBackend,
   onOpenAgentSettings,
   onOpenSemanticGraph,
+  onOpenPlugins,
 }) {
   const [query, setQuery]           = useState('')
   const [highlighted, setHighlighted] = useState(0)
@@ -189,6 +190,12 @@ export default function CommandPalette({
       hint: 'semantic graph: tethers, counts, provider runs',
       icon: <IconAgentSettings />,
       action: () => { onOpenSemanticGraph?.(); onClose() },
+    },
+    {
+      id: 'plugins', group: 'Settings', label: 'Plugins',
+      hint: 'capability providers + activation for this repo',
+      icon: <IconPlugin />,
+      action: () => { onOpenPlugins?.(); onClose() },
     },
     // Execution backend selector (Step 19)
     ...(backends || []).map(b => ({
@@ -555,6 +562,16 @@ function IconAgentSettings() {
       <circle cx="6.5" cy="6.5" r="2" stroke="var(--accent)" strokeWidth="1.2"/>
       <path d="M6.5 1v1.6M6.5 10.4V12M1 6.5h1.6M10.4 6.5H12M2.6 2.6l1.1 1.1M9.3 9.3l1.1 1.1M10.4 2.6 9.3 3.7M3.7 9.3 2.6 10.4"
         stroke="var(--accent)" strokeWidth="1.1" strokeLinecap="round"/>
+    </svg>
+  )
+}
+
+function IconPlugin() {
+  // A puzzle-piece nub — the "pluggable capability" mark.
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <path d="M2 4.2h2.1a1.1 1.1 0 1 1 2.1 0H8.3V6.3a1.1 1.1 0 1 1 0 2.1v2.2H6.2a1.1 1.1 0 1 0-2.1 0H2V8.4a1.1 1.1 0 1 0 0-2.1z"
+        stroke="var(--accent)" strokeWidth="1.1" strokeLinejoin="round"/>
     </svg>
   )
 }
