@@ -75,6 +75,7 @@ from openfde.council import run_council
 from openfde import council_context as council_context_mod
 from openfde import council_router as council_router_mod
 from openfde import session as session_mod
+from openfde import boot_cache as boot_cache_mod
 from openfde import __version__ as _OPENFDE_VERSION
 from openfde.architect import analyze_repo, generate_canvas_state
 from openfde.explain import explain_selection
@@ -905,11 +906,64 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     #  REST — /api/archgraph                                              #
     # ================================================================== #
 
-    async def get_archgraph(request: web.Request) -> web.Response:
-        """Return the ArchGraph for the watched repository.
+    # Episode states that are a stable restore point — a warm cache stamped here is what the next
+    # boot restores from ("Restored from P14"). PR-created counts too (episode carries a pr.url).
+    _TERMINAL_STATES = {"landed", "verified", "needs_manual_land", "blocked"}
 
-        Runs the OpenArchitect read-only analyzer on the watched repo path.
-        Results include modules, files, functions, edges, and warnings.
+    def _latest_terminal_tag() -> str:
+        for e in persistence.load_episodes():                # newest-first
+            if e.get("status") in _TERMINAL_STATES or (e.get("pr") or {}).get("url"):
+                return e.get("tag") or e.get("episodeId") or ""
+        return ""
+
+    # In-process ArchGraph cache. analyze_repo() is ~1s on a mid-size repo and the canvas awaits it,
+    # so recomputing per request blocked first paint. Key by the worktree signature (HEAD + dirty
+    # set): a hit returns instantly, a miss recomputes once and persists the warm snapshot to disk
+    # so even a fresh process boot serves the last canvas immediately.
+    _arch_mem = {"sig": None, "graph": None}
+
+    def _write_warm_after_episode(episode=None) -> None:
+        """Snapshot a known-good restore point when an episode reaches a stable terminal state — the
+        trusted warm-start the next boot restores from. Reuses the last computed arch (no recompute);
+        best-effort so it never blocks the terminal transition. Never waits for shutdown."""
+        try:
+            st = git_status(path)
+            boot_cache_mod.write_warm(
+                persistence.openfde_dir, file_tree=build_file_tree(path),
+                arch=_arch_mem.get("graph"), head=st.get("head", ""),
+                dirty_sig=boot_cache_mod.dirty_signature(st), repo_root=str(path),
+                episode_tag=(episode or {}).get("tag", "") or _latest_terminal_tag(),
+                generated_at=datetime.now(timezone.utc).isoformat())
+        except (OSError, KeyError, AttributeError):
+            logger.warning("could not write warm cache after episode terminal state")
+
+    def _archgraph(force: bool = False) -> dict:
+        st = git_status(path)
+        sig = boot_cache_mod.dirty_signature(st)
+        if not force and _arch_mem["sig"] == sig and _arch_mem["graph"] is not None:
+            return _arch_mem["graph"]
+        if not force:                                   # cold process: adopt a matching disk snapshot
+            warm = boot_cache_mod.read_warm(persistence.openfde_dir)
+            if warm and warm.get("arch") and not boot_cache_mod.is_stale(
+                    warm["meta"], head=st.get("head", ""), dirty_sig=sig):
+                _arch_mem.update(sig=sig, graph=warm["arch"])
+                return warm["arch"]
+        graph = analyze_repo(path)
+        _arch_mem.update(sig=sig, graph=graph)
+        try:                                            # keep the warm cache fresh — best-effort
+            boot_cache_mod.write_warm(
+                persistence.openfde_dir, file_tree=build_file_tree(path), arch=graph,
+                head=st.get("head", ""), dirty_sig=sig, repo_root=str(path),
+                generated_at=datetime.now(timezone.utc).isoformat())
+        except OSError:
+            logger.warning("could not write warm arch cache")
+        return graph
+
+    async def get_archgraph(request: web.Request) -> web.Response:
+        """Return the ArchGraph for the watched repository (cached by worktree signature).
+
+        Runs the OpenArchitect read-only analyzer on the watched repo path. Results include
+        modules, files, functions, edges, and warnings. ``?refresh=1`` forces a recompute.
 
         Args:
             request: web.Request
@@ -917,8 +971,44 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         Returns:
             web.Response — JSON ArchGraph dict.
         """
-        graph = analyze_repo(path)
+        force = request.query.get("refresh") in ("1", "true")
+        loop = asyncio.get_event_loop()
+        graph = await loop.run_in_executor(None, lambda: _archgraph(force=force))
         return web.json_response(graph)
+
+    async def get_boot(request: web.Request) -> web.Response:
+        """The tiny first-paint payload — repo identity + the last warm snapshot (file tree + canvas),
+        served from disk WITHOUT running analyze_repo, so the cockpit is never blank on boot.
+
+        ``stale`` says the snapshot no longer matches HEAD/worktree (the UI shows "refreshing…" and
+        re-fetches /api/archgraph in the background); ``restoredFrom`` is the episode the snapshot was
+        stamped at (or the latest terminal episode), for the "Restored from P14 · refreshing…" label.
+        """
+        want_canvas = request.query.get("canvas") in ("1", "true")
+
+        def _payload():
+            st = git_status(path)
+            sig = boot_cache_mod.dirty_signature(st)
+            warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
+            meta = warm.get("meta") or {}
+            tree = warm.get("fileTree") or build_file_tree(path)     # 3ms scan if no cache yet
+            ident = session_mod.session_payload(path, server_started_at, _OPENFDE_VERSION)
+            restored = meta.get("episodeTag") or _latest_terminal_tag()
+            return {
+                "ok": True,
+                "repoName": ident.get("repoName"), "branch": ident.get("branch"),
+                "gitRoot": ident.get("gitRoot"), "openfdeVersion": _OPENFDE_VERSION,
+                "fileTree": tree,                                   # ~4 KB — cheap
+                # The full ArchGraph is ~400 KB, so by default boot stays tiny and the canvas hydrates
+                # from the (now cached, fast) /api/archgraph. ?canvas=1 inlines it for a one-shot paint.
+                "canvasSnapshot": warm.get("arch") if want_canvas else None,
+                "hasSnapshot": bool(warm.get("arch")),
+                "restoredFrom": restored,
+                "stale": boot_cache_mod.is_stale(meta, head=st.get("head", ""), dirty_sig=sig),
+                "generatedAt": meta.get("generatedAt") or "",
+            }
+        loop = asyncio.get_event_loop()
+        return web.json_response(await loop.run_in_executor(None, _payload))
 
     async def post_explain(request: web.Request) -> web.Response:
         """Explain a canvas selection deterministically (Step 26).
@@ -1925,6 +2015,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         })
         await manager.broadcast({"type": "event_appended", "event": ce})
         await manager.broadcast({"type": "episode_updated", "episode": ep})
+        _write_warm_after_episode(ep)        # land = a trusted restore point → warm-cache it now
         # Explicit commit_created so any client can mirror the prompt→commit story
         # into OpenPM (a Done task under this prompt) without waiting on a poll.
         _dt, _ds = commit_display(ep.get("title"), ep.get("summary"), commit["summary"])
@@ -3944,6 +4035,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get("/ws",                          ws_handler)
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
     app.router.add_get( "/api/session",               get_session)
+    app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/files",                 get_files)
     app.router.add_get( "/api/state",                 get_state)
     app.router.add_put( "/api/state",                 put_state)

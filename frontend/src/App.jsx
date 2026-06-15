@@ -578,15 +578,22 @@ export default function App() {
       backendRef.current = true
       setBackendAvailable(true)
 
-      // Hydrate canvas state — only when backend has data (non-empty boxes).
-      // Mark the resulting state change as a hydrate so the debounced PUT that
-      // it triggers is skipped (otherwise reload re-persists and dirties PLAN.md).
+      // ── CANVAS-CRITICAL FIRST ──────────────────────────────────────────────
+      // The cockpit must show its architecture ASAP, so load the two things the canvas needs —
+      // persisted boxes and the ArchGraph — BEFORE tasks/events/specs/timeline (those aren't
+      // needed for the first paint). The ArchGraph is served from the warm boot cache, so this
+      // returns in ~0.4s instead of waiting on a ~1s analyze_repo recompute.
       const savedState = await getState()
       if (!cancelled && savedState?.boxes?.length > 0) {
         skipStateSaveRef.current = true
         _rawCanvasDispatch({ type: 'HYDRATE', boxes: savedState.boxes, arrows: savedState.arrows ?? [] })
       }
+      const graph = await getArchgraph()
+      if (!cancelled && graph && Array.isArray(graph.files)) {
+        setArchGraph(graph)
+      }
 
+      // ── DEFERRED: not needed for the first canvas paint ───────────────────────
       // Hydrate tasks — only when backend has data (non-empty task list)
       const savedTasks = await getTasks()
       if (!cancelled && savedTasks?.length > 0) {
@@ -605,12 +612,6 @@ export default function App() {
       const savedSpecs = await getBoxSpecs()
       if (!cancelled && savedSpecs && typeof savedSpecs === 'object') {
         setBoxSpecs(savedSpecs)
-      }
-
-      // Read-only ArchGraph for drilldown (files + functions)
-      const graph = await getArchgraph()
-      if (!cancelled && graph && Array.isArray(graph.files)) {
-        setArchGraph(graph)
       }
 
       // Real git history for the Timeline code rail

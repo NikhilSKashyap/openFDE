@@ -75,6 +75,16 @@ export const getFiles = () => apiFetch('/api/files', { _timeout: 9000 })
  */
 export const getSession = () => apiFetch('/api/session')
 
+/**
+ * Tiny first-paint bootstrap: repo identity + cached file tree + warm-cache flags, served from
+ * disk WITHOUT running analyze_repo, so the cockpit is never blank on boot. ?canvas=1 inlines the
+ * cached ArchGraph for a one-shot paint.
+ * @returns {Promise<{ok, repoName, branch, openfdeVersion, fileTree, hasSnapshot, restoredFrom,
+ *   stale, generatedAt, canvasSnapshot?}|null>}
+ */
+export const getBoot = (withCanvas = false) =>
+  apiFetch(`/api/boot${withCanvas ? '?canvas=1' : ''}`, { _timeout: 9000 })
+
 // ── Canvas state ──────────────────────────────────────────────────────────
 
 /**
