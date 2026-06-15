@@ -85,6 +85,13 @@ export const getSession = () => apiFetch('/api/session')
 export const getBoot = (withCanvas = false) =>
   apiFetch(`/api/boot${withCanvas ? '?canvas=1' : ''}`, { _timeout: 9000 })
 
+/**
+ * First-paint hydration in ONE cache-only call: persisted canvas boxes/arrows (the modules),
+ * the warm ArchGraph snapshot, and the cached file tree (Explorer). No git, no analyze, no scan.
+ * @returns {Promise<{ok, boxes, arrows, arch, fileTree, hasCanvas, hasSnapshot}|null>}
+ */
+export const getBootCanvas = () => apiFetch('/api/boot/canvas', { _timeout: 9000 })
+
 // ── Canvas state ──────────────────────────────────────────────────────────
 
 /**

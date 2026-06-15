@@ -109,6 +109,35 @@ class BootContractTest(unittest.TestCase):
         self.assertEqual(eps[0]["commits"][0]["displayTitle"], "feat: login")  # cached title, no `git show`
         self.assertEqual(payload["outside"]["commits"], [])      # Outside bucket is the /full endpoint's job
 
+    def test_boot_canvas_first_paint_is_cache_only(self):
+        # First paint hydrates from ONE call: the persisted canvas boxes (the modules — the canvas
+        # is blank without them), the warm arch snapshot, and the cached file tree. Patch git /
+        # analyze / file-tree-scan to explode and prove first paint never touches them.
+        self.p.save_state({"boxes": [{"id": "box:module:api", "title": "api"}], "arrows": []})
+        boot_cache.write_warm(self.p.openfde_dir, file_tree={"name": "root", "children": []},
+                              arch={"files": [{"path": "a.py"}]}, head="h", dirty_sig="s")
+        with mock.patch("openfde.server.git_status",
+                        side_effect=AssertionError("first paint must not git")), \
+             mock.patch("openfde.architect.analyze_repo",
+                        side_effect=AssertionError("first paint must not analyze")), \
+             mock.patch("openfde.server.build_file_tree",
+                        side_effect=AssertionError("first paint must not scan the file tree")):
+            payload = server.build_boot_canvas(self.p)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["boxes"]), 1)               # the persisted module box → modules render
+        self.assertTrue(payload["hasCanvas"])
+        self.assertEqual(payload["arch"]["files"][0]["path"], "a.py")   # warm arch snapshot (box detail)
+        self.assertEqual(payload["fileTree"]["name"], "root")    # cached Explorer tree
+        self.assertTrue(payload["hasSnapshot"])
+
+    def test_boot_canvas_empty_before_first_scan(self):
+        # A never-scanned repo (no persisted canvas, no warm cache) returns empties — the only case
+        # where "Scan repo → canvas" is legitimately shown.
+        payload = server.build_boot_canvas(self.p)
+        self.assertEqual(payload["boxes"], [])
+        self.assertFalse(payload["hasCanvas"])
+        self.assertFalse(payload["hasSnapshot"])
+
     def test_latest_terminal_tag_picks_newest_terminal(self):
         self.p.upsert_episode({"episodeId": "old", "status": "open",
                                "createdAt": "2026-06-09T00:00:00Z"})

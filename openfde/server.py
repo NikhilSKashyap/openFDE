@@ -395,6 +395,26 @@ def build_rail_payload(persistence) -> dict:
                         "commitCount": 0, "files": [], "fileCount": 0}}
 
 
+def build_boot_canvas(persistence) -> dict:
+    """Cache-only FIRST-PAINT hydration, in ONE call: the persisted canvas (the boxes+arrows that
+    ARE the architecture modules — the canvas is empty without them), the warm ArchGraph snapshot
+    (box-internal file/function detail), and the cached file tree (Explorer). Pure disk reads —
+    NEVER git, analyze_repo, or a file-tree scan — so it paints the cockpit instantly and can never
+    queue behind Story/git endpoints. ``boxes``/``arch`` are empty only before the repo has ever been
+    scanned (no persisted canvas / no warm cache). Top-level + dependency-light so a test can patch
+    the heavy seams to explode and prove first paint never touches them.
+    """
+    warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
+    state = persistence.load_state() or {}
+    return {"ok": True,
+            "boxes": state.get("boxes") or [],
+            "arrows": state.get("arrows") or [],
+            "arch": warm.get("arch"),
+            "fileTree": warm.get("fileTree"),
+            "hasCanvas": bool(state.get("boxes")),
+            "hasSnapshot": bool(warm.get("arch"))}
+
+
 async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> None:
     """Start the OpenFDE server for the given repository path.
 
@@ -545,6 +565,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             web.Response — JSON {boxes: [...], arrows: [...]}
         """
         return web.json_response(persistence.load_state())
+
+    async def get_boot_canvas(request: web.Request) -> web.Response:
+        """First-paint hydration: persisted canvas boxes/arrows + warm arch + cached file tree, in
+        ONE cache-only call. Runs on boot's dedicated pool so it never queues behind Story/git, and
+        never analyzes or scans — the cockpit shows its modules + Explorer instantly."""
+        loop = asyncio.get_event_loop()
+        return web.json_response(
+            await loop.run_in_executor(_boot_pool, lambda: build_boot_canvas(persistence)))
 
     async def put_state(request: web.Request) -> web.Response:
         """Persist canvas state and regenerate PLAN.md.
@@ -4137,6 +4165,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
     app.router.add_get( "/api/session",               get_session)
     app.router.add_get( "/api/boot",                  get_boot)
+    app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)
     app.router.add_get( "/api/state",                 get_state)
     app.router.add_put( "/api/state",                 put_state)

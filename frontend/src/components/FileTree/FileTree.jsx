@@ -38,16 +38,18 @@ const statusStyle = { padding: '12px 14px', fontSize: 11.5, color: 'var(--text-m
  *
  * @param {{ repoName?: string }} props - the watched repo name, for the loading label.
  */
-export default function FileTree({ repoName = '' }) {
+export default function FileTree({ repoName = '', cachedTree = null }) {
   const [query, setQuery] = useState('')
-  const [tree, setTree]   = useState(null)         // null until the backend answers
-  const [state, setState] = useState('loading')    // 'loading' | 'live' | 'offline'
+  // Paint the cached tree (from /api/boot/canvas) IMMEDIATELY so the Explorer is never blank on
+  // first load; null only when there is no cache yet (a never-scanned repo).
+  const [tree, setTree]   = useState(cachedTree ? [normalizeNode(cachedTree, 0)] : null)
+  const [state, setState] = useState(cachedTree ? 'live' : 'loading')
 
-  // Load the live file tree on mount. On a fresh `openfde watch` the backend is briefly
-  // saturated by startup assimilation, so the first /api/files call can be slow or fail.
-  // We RETRY before declaring offline: a transient startup stall must not strand the
-  // Explorer on an empty/offline state — the watched repo has to show up. Only a backend
-  // that stays unreachable across all attempts (≈12 s) settles to 'offline'.
+  // The cached tree paints instantly above. Refresh from the LIVE /api/files in the background to
+  // pick up new files. On a fresh `openfde watch` the backend is briefly saturated, so /api/files
+  // can be slow or fail — we RETRY before declaring offline, and a transient stall never strands
+  // the Explorer (the cache is already showing). Only a backend unreachable across all attempts
+  // (≈12 s) AND with no cached tree settles to 'offline'.
   useEffect(() => {
     let cancelled = false
     let attempt = 0
@@ -63,14 +65,16 @@ export default function FileTree({ repoName = '' }) {
         }
         attempt += 1
         if (attempt < MAX_ATTEMPTS) {
-          setTimeout(load, 1500)                    // keep showing "Loading…" and retry
-        } else {
-          setState('offline')                      // backend unavailable — no fake files
+          setTimeout(load, 1500)                    // keep showing the cache (or "Loading…") and retry
+        } else if (!cachedTree) {
+          setState('offline')                      // backend unavailable + no cache — no fake files
         }
       })
     }
-    load()
-    return () => { cancelled = true }
+    // Defer the live refresh slightly so it never competes with first-paint hydration.
+    const t = setTimeout(load, cachedTree ? 1200 : 0)
+    return () => { cancelled = true; clearTimeout(t) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const filtered = (state === 'live' && query.trim())

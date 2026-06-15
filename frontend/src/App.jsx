@@ -43,6 +43,7 @@ import {
   getAgentSettings,
   getSession,
   getBoot,
+  getBootCanvas,
   postAgentRun,
   postCouncilRun,
   cancelCouncilRun,
@@ -179,6 +180,8 @@ export default function App() {
   // ── Watched-repo identity (authoritative, from /api/session) ──────────────
   const [session, setSession] = useState(null)
   const [boot, setBoot] = useState(null)        // restore-confidence: counts from .openfde on boot
+  const [bootFileTree, setBootFileTree] = useState(null)  // cached Explorer tree for instant first paint
+  const [canvasHydrated, setCanvasHydrated] = useState(false)  // gate: non-canvas hydration waits for first paint
   // ── Agent role settings (Step 21) ────────────────────────────────────────
   const [agentSettings, setAgentSettings] = useState(null)
   const [agentOptions, setAgentOptions]   = useState(null)
@@ -430,6 +433,7 @@ export default function App() {
   // current by refetching the git timeline on window focus + a light poll while
   // the tab is visible (not just once at startup).
   useEffect(() => {
+    if (!canvasHydrated) return undefined   // gate: non-canvas endpoints wait for first paint
     const refetch = async () => {
       if (document.hidden) return
       single('timeline', () => getGitTimeline().then(c => { if (Array.isArray(c)) setGitCommits(c) }))
@@ -451,7 +455,7 @@ export default function App() {
       if (window.requestIdleCallback) cancelIdleCallback(ric); else clearTimeout(ric)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [canvasHydrated])
 
   // Click a commit chip → fetch its impact → spotlight touched boxes + concepts,
   // mark partially-touched concepts' untouched boxes amber.
@@ -606,49 +610,68 @@ export default function App() {
       } catch { /* localStorage unavailable — the identity label still works */ }
       setSession(s)
     })
-    // Restore-confidence: the tiny boot payload carries restored counts from .openfde, so the UI
-    // can say "Restored 200 episodes · 70 tasks · refreshing…" immediately instead of looking blank
-    // (which reads as "my work vanished") while heavy hydration runs. Ask for the cached canvas
-    // snapshot too (?canvas=1) and paint the architecture from it on FIRST PAINT — before the
-    // live (~1.5MB) /api/archgraph fetch — so Explorer/modules are visible instantly, never a
-    // blank/manual-scan state when a warm cache exists. The probe refines it in the background.
-    getBoot(true).then(b => {
-      if (cancelled || !b?.ok) return
-      setBoot(b)
-      const snap = b.canvasSnapshot
-      if (snap && Array.isArray(snap.files) && snap.files.length) {
-        setArchGraph(prev => prev || snap)   // don't clobber a live graph that already landed
-      }
-    })
+    // FIRST PAINT — ONE cache-only call (/api/boot/canvas) hydrates the canvas (the persisted boxes
+    // ARE the architecture modules — the canvas is empty without them), the warm ArchGraph (box
+    // detail), and the Explorer file tree. Nothing else fires until this lands (the probe below is
+    // gated on canvasHydrated), so it never queues behind Story/git and the cockpit shows its
+    // modules + Explorer instantly instead of a blank "Scan repo → canvas" state. Retries while the
+    // backend is still warming; only gives up (and lets the live probe try) after ~3.5s.
+    let attempt = 0
+    const hydrateFirstPaint = () => {
+      getBootCanvas().then(bc => {
+        if (cancelled) return
+        if (bc?.ok) {
+          backendRef.current = true
+          setBackendAvailable(true)
+          if (Array.isArray(bc.boxes) && bc.boxes.length) {
+            skipStateSaveRef.current = true
+            _rawCanvasDispatch({ type: 'HYDRATE', boxes: bc.boxes, arrows: bc.arrows ?? [] })
+          }
+          if (bc.arch && Array.isArray(bc.arch.files)) setArchGraph(prev => prev || bc.arch)
+          if (bc.fileTree) setBootFileTree(bc.fileTree)
+          setCanvasHydrated(true)          // unleash the rest of hydration — AFTER first paint
+          return
+        }
+        attempt += 1
+        if (attempt < 6) setTimeout(hydrateFirstPaint, 600)   // backend still warming — retry
+        else setCanvasHydrated(true)        // give up on cache; let the gated probe try live
+      })
+    }
+    hydrateFirstPaint()
+    getBoot().then(b => { if (!cancelled && b?.ok) setBoot(b) })  // tiny: restored-counts label
     return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ------------------------------------------------------------------ //
   //  Backend probe + hydration (runs once on mount)                     //
   // ------------------------------------------------------------------ //
+  // GATED on canvasHydrated: the live/secondary hydration runs only AFTER first paint (the cached
+  // canvas + Explorer are already on screen), so this pile of endpoints never competes with the
+  // first-paint call and never starves it.
   useEffect(() => {
+    if (!canvasHydrated) return undefined
     let cancelled = false
 
     async function probe() {
-      const available = await isBackendAvailable()
-      if (cancelled || !available) return
-
-      backendRef.current = true
-      setBackendAvailable(true)
-
-      // ── CANVAS-CRITICAL FIRST ──────────────────────────────────────────────
-      // The cockpit must show its architecture ASAP, so load the two things the canvas needs —
-      // persisted boxes and the ArchGraph — BEFORE tasks/events/specs/timeline (those aren't
-      // needed for the first paint). The ArchGraph is served from the warm boot cache, so this
-      // returns in ~0.4s instead of waiting on a ~1s analyze_repo recompute.
-      const savedState = await getState()
-      if (!cancelled && savedState?.boxes?.length > 0) {
-        skipStateSaveRef.current = true
-        _rawCanvasDispatch({ type: 'HYDRATE', boxes: savedState.boxes, arrows: savedState.arrows ?? [] })
+      // boot/canvas already confirmed the backend is up (backendRef). Only probe when it didn't
+      // (the give-up path), so we still settle to an offline state if the backend never came up.
+      if (!backendRef.current) {
+        const available = await isBackendAvailable()
+        if (cancelled || !available) return
+        backendRef.current = true
+        setBackendAvailable(true)
       }
-      // The warm snapshot (from getBoot above) already painted the architecture, so refine it with
-      // the live ArchGraph in the BACKGROUND — don't block the rest of hydration on this ~1.5MB
-      // fetch (which can be slow under load). First paint no longer waits on it.
+
+      // Boxes + Explorer + arch already painted from /api/boot/canvas. Refine the architecture with
+      // the LIVE ArchGraph in the background (the snapshot may be a few edits stale); re-fetch the
+      // canvas state live too (cheap) in case it changed since the cache was written.
+      getState().then(savedState => {
+        if (!cancelled && savedState?.boxes?.length > 0) {
+          skipStateSaveRef.current = true
+          _rawCanvasDispatch({ type: 'HYDRATE', boxes: savedState.boxes, arrows: savedState.arrows ?? [] })
+        }
+      })
       getArchgraph().then(graph => {
         if (!cancelled && graph && Array.isArray(graph.files)) setArchGraph(graph)
       })
@@ -700,7 +723,7 @@ export default function App() {
     probe()
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [canvasHydrated])
 
   // ── Live activity glow (adaptive) ─────────────────────────────────────────
   // Keep boxesRef synced so the WS handlers can map a file path → its module.
@@ -2017,7 +2040,7 @@ export default function App() {
               title={leftOpen ? 'Collapse file tree' : 'Expand file tree'}>
               {leftOpen ? '‹' : '›'}
             </button>
-            {leftOpen && <FileTree repoName={session?.repoName || ''} />}
+            {leftOpen && <FileTree repoName={session?.repoName || ''} cachedTree={bootFileTree} />}
           </aside>
           <main className="panel-middle">
             <Whiteboard
