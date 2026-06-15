@@ -367,6 +367,34 @@ def build_boot_payload(path, persistence, started_at: str, version: str, *,
     }
 
 
+def build_rail_payload(persistence) -> dict:
+    """CHEAP prompt-rail payload — the default /api/review/episodes, safe to poll often.
+
+    CONTRACT: reads ONLY persisted state. Each episode plus the commits it ALREADY declares
+    (commitShas + cached per-commit titles in commitMeta). It must NEVER run git (timeline /
+    `git show` / merge-base), reconciliation, PR readiness, or ensure_facts — that full detail
+    (and the cross-episode Outside bucket) is the heavy /api/review/episodes/full path. Top-level +
+    dependency-light so a test can patch the git/reconcile/readiness seams to explode and prove the
+    rail never touches them (the poll was 49s on a large repo and saturated the box).
+    """
+    persistence.backfill_episode_meta()                    # tag/title/seq — deterministic, no git
+    enriched = []
+    for e in persistence.load_episodes():
+        shas = e.get("commitShas") or []
+        cm = e.get("commitMeta") or {}
+        commits = [{"sha": s, "shortSha": (s or "")[:7],
+                    "displayTitle": (cm.get(s) or {}).get("title") or (e.get("title") or ""),
+                    "displaySummary": (cm.get(s) or {}).get("summary") or "",
+                    "confidence": (cm.get(s) or {}).get("confidence"),
+                    "files": [], "fileCount": 0} for s in shas]
+        enriched.append({**e, "commits": commits, "commitCount": len(shas),
+                         "fileCount": len(e.get("files") or []), "prReadiness": None})
+    return {"ok": True, "episodes": enriched,
+            "outside": {"episodeId": "outside", "kind": "manual", "status": "landed",
+                        "prompt": "Outside OpenFDE", "summary": "", "commits": [],
+                        "commitCount": 0, "files": [], "fileCount": 0}}
+
+
 async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> None:
     """Start the OpenFDE server for the given repository path.
 
@@ -1781,7 +1809,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """Build the prompt-episodes list (newest-first, with landed commits) + the
         "Outside OpenFDE" bucket. SYNC and git-subprocess heavy (git_timeline + up to
         80 `git show` + reconciliation + per-episode merge-base readiness), so the
-        async handler runs it OFF the event loop.
+        async handler runs it OFF the event loop. This is the on-demand FULL endpoint;
+        the frequent rail poll uses the cheap ``_review_episodes_rail`` above.
 
         Returns:
             dict — {ok, episodes:[{…episode, commits, commitCount, fileCount}],
@@ -1905,9 +1934,17 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return {"ok": True, "episodes": enriched, "outside": outside_bucket}
 
     async def get_review_episodes(request: web.Request) -> web.Response:
-        """List prompt episodes with their commits + the Outside bucket. The work is
-        git-subprocess heavy, so it runs OFF the event loop — a concurrent /api/boot
-        (or any other request) stays responsive instead of blocking behind it."""
+        """Default rail endpoint: CHEAP, cache-only (persisted episodes + their declared
+        commits). Safe to poll often — no git, no reconciliation, no readiness. The full
+        enriched view is /api/review/episodes/full, loaded after first paint / on demand."""
+        loop = asyncio.get_event_loop()
+        return web.json_response(await loop.run_in_executor(None, lambda: build_rail_payload(persistence)))
+
+    async def get_review_episodes_full(request: web.Request) -> web.Response:
+        """Full enriched view: git_timeline + reconciliation + per-commit files + PR readiness
+        + the Outside bucket. Git-subprocess heavy, so it runs OFF the event loop and is fetched
+        sparingly (once after first paint, and when a shipping/detail view opens), never on the
+        frequent rail poll."""
         loop = asyncio.get_event_loop()
         return web.json_response(await loop.run_in_executor(None, _review_episodes_payload))
 
@@ -4165,6 +4202,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/git/worktree/impact", get_worktree_impact)
     app.router.add_post("/api/review/reassimilate", post_review_reassimilate)
     app.router.add_get( "/api/review/episodes", get_review_episodes)
+    app.router.add_get( "/api/review/episodes/full", get_review_episodes_full)
     app.router.add_get( "/api/story/prompt-graph", get_prompt_story_graph)
     app.router.add_post("/api/review/episodes/summarize", post_summarize_episodes)
     app.router.add_post("/api/review/episodes", post_review_episode_create)

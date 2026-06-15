@@ -81,6 +81,34 @@ class BootContractTest(unittest.TestCase):
         from openfde.architect import analyze_repo
         self.assertTrue(pickle.dumps(analyze_repo))
 
+    def test_rail_payload_is_cheap_and_never_touches_git(self):
+        # The default /api/review/episodes is the prompt-rail poll — it must serve persisted state
+        # only. Patch every heavy seam (git, reconciliation, readiness) to explode and prove the
+        # rail builds without them; the 49s git-heavy detail is the separate /full endpoint.
+        self.p.upsert_episode({
+            "episodeId": "e1", "source": "openfde-capture", "status": "landed",
+            "title": "Add login", "files": ["a.py", "b.py"], "commitShas": ["abc1234def0"],
+            "createdAt": "2026-06-10T00:00:00Z",
+            "commitMeta": {"abc1234def0": {"title": "feat: login", "summary": "the thing"}}})
+        with mock.patch("openfde.server.git_status",
+                        side_effect=AssertionError("rail must not git_status")), \
+             mock.patch("openfde.server.git_timeline",
+                        side_effect=AssertionError("rail must not git_timeline")), \
+             mock.patch("openfde.server.commit_files",
+                        side_effect=AssertionError("rail must not `git show`")), \
+             mock.patch("openfde.server.pr_readiness",
+                        side_effect=AssertionError("rail must not compute PR readiness")), \
+             mock.patch("openfde.server.episode_commits_mod.reconcile_episodes",
+                        side_effect=AssertionError("rail must not reconcile")):
+            payload = server.build_rail_payload(self.p)
+        eps = payload["episodes"]
+        self.assertEqual(len(eps), 1)
+        self.assertEqual(eps[0]["commitCount"], 1)
+        self.assertEqual(eps[0]["fileCount"], 2)
+        self.assertIsNone(eps[0]["prReadiness"])                 # readiness loads on demand, not on the rail
+        self.assertEqual(eps[0]["commits"][0]["displayTitle"], "feat: login")  # cached title, no `git show`
+        self.assertEqual(payload["outside"]["commits"], [])      # Outside bucket is the /full endpoint's job
+
     def test_latest_terminal_tag_picks_newest_terminal(self):
         self.p.upsert_episode({"episodeId": "old", "status": "open",
                                "createdAt": "2026-06-09T00:00:00Z"})

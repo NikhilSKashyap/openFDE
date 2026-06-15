@@ -577,7 +577,9 @@ export const reassimilateReview = (files = [], reason = 'file_activity') =>
  * newest-first with their landed commits + an "Outside OpenFDE" bucket.
  * @returns {Promise<{ok, episodes:Array, outside:Object}|null>}
  */
-export const getReviewEpisodes = () => apiFetch('/api/review/episodes')
+export const getReviewEpisodes = (opts = {}) => apiFetch('/api/review/episodes', opts)
+/** Full enriched episodes (commits+files, PR readiness, Outside bucket). Heavy — fetch sparingly. */
+export const getReviewEpisodesFull = (opts = {}) => apiFetch('/api/review/episodes/full', { _timeout: 60_000, ...opts })
 
 /** Create a prompt episode (e.g. a "Manual changes" bucket). @returns {Promise<Object|null>} */
 export const createEpisode = (payload = {}) =>

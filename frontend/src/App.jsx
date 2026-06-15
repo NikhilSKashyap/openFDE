@@ -51,6 +51,7 @@ import {
   getWorktreeImpact,
   reassimilateReview,
   getReviewEpisodes,
+  getReviewEpisodesFull,
   landEpisode,
   askConcept,
   getConceptCards,
@@ -205,7 +206,18 @@ export default function App() {
   // Probe the worktree non-destructively; only re-render when the porcelain
   // signature changed (cheap dirty-state key) so typing never thrashes the chip.
   // Plain function — it closes over only stable imports + state setters.
-  const refreshWorktree = async () => {
+  // Single-flight de-dup: collapse overlapping calls to the same endpoint (focus + interval +
+  // idle probe, WS bursts) into ONE in-flight request, so a slow poll never stacks up behind
+  // itself and we never have N copies of /api/review/episodes racing.
+  const inflightRef = useRef({})
+  const single = (key, fn) => {
+    if (inflightRef.current[key]) return inflightRef.current[key]
+    const p = Promise.resolve().then(fn).finally(() => { delete inflightRef.current[key] })
+    inflightRef.current[key] = p
+    return p
+  }
+
+  const refreshWorktree = () => single('worktree', async () => {
     if (document.hidden) return
     const imp = await getWorktreeImpact()
     if (!imp?.ok) return
@@ -216,19 +228,27 @@ export default function App() {
       if (prev && prev.signature === imp.signature && prev.dirty === imp.dirty) return prev
       return { dirty: imp.dirty, count: imp.fileCount, signature: imp.signature }
     })
-  }
+  })
 
   // Prompt Story Rail: load episodes (prompt turns) + the Outside-OpenFDE bucket.
   // Also mirror the prompt→commit story into OpenPM: every landed commit becomes a
   // Done card grouped/labeled by its prompt. Idempotent (SYNC_EPISODE_COMMITS only
   // adds commits not already represented), so frequent polls don't churn the board.
-  const refreshEpisodes = async () => {
+  const refreshEpisodes = () => single('episodes', async () => {
     if (document.hidden) return null
-    const res = await getReviewEpisodes()
+    const res = await getReviewEpisodes()      // CHEAP rail: persisted episodes + cached commit titles
     if (!res?.ok) return null
     const eps = Array.isArray(res.episodes) ? res.episodes : []
-    setEpisodes(eps)
-    setOutsideBucket(res.outside || null)
+    // The cheap rail omits PR readiness + the Outside bucket (those come from refreshEpisodesFull).
+    // Merge so a frequent rail poll never wipes the richer fields the full fetch already loaded.
+    setEpisodes(prev => eps.map(e => {
+      const old = (prev || []).find(p => p.episodeId === e.episodeId)
+      return old?.prReadiness ? { ...e, prReadiness: old.prReadiness } : e
+    }))
+    setOutsideBucket(prev => {
+      const next = res.outside || null
+      return (next?.commits?.length || 0) === 0 && (prev?.commits?.length || 0) > 0 ? prev : next
+    })
     // Operational/meta episodes (chatter, file-lists, "Here's the CC prompt") never
     // become OpenPM cards — only product/build prompts with a clean title.
     const productEps = eps.filter(ep => ep.signal !== 'operational' && !ep.storyFacts?.operational)
@@ -253,7 +273,19 @@ export default function App() {
     })))
     if (commits.length) pmDispatch({ type: 'SYNC_EPISODE_COMMITS', commits })
     return eps     // enriched list — onLandChanges re-spotlights the landed episode from it
-  }
+  })
+
+  // Heavy, SPARSE enrichment: the full episodes view (reconciled commits + files, PR readiness,
+  // Outside bucket). Fetched once after first paint and on window focus — NEVER on the frequent
+  // rail poll — so the machine is never saturated by a 49s git-heavy call on a tight interval.
+  const refreshEpisodesFull = () => single('episodesFull', async () => {
+    if (document.hidden) return
+    const res = await getReviewEpisodesFull()
+    if (!res?.ok) return
+    const eps = Array.isArray(res.episodes) ? res.episodes : []
+    setEpisodes(eps)                         // full view supersedes the cheap rail (carries readiness)
+    setOutsideBucket(res.outside || null)
+  })
 
   // Pull the SERVER's reconciled task list and adopt it as local truth. GET
   // /api/tasks heals each card to its episode's current verification, so this is
@@ -400,21 +432,22 @@ export default function App() {
   useEffect(() => {
     const refetch = async () => {
       if (document.hidden) return
-      const commits = await getGitTimeline()
-      if (Array.isArray(commits)) setGitCommits(commits)
-      refreshWorktree()   // keep the "Review changes" affordance current (signature-gated)
-      refreshEpisodes()   // keep the prompt story rail current
+      single('timeline', () => getGitTimeline().then(c => { if (Array.isArray(c)) setGitCommits(c) }))
+      refreshWorktree()   // single-flighted; keeps the "Review changes" affordance current
+      refreshEpisodes()   // single-flighted CHEAP rail; keeps the prompt story rail current
     }
-    // Defer the initial heavy probe (episodes + timeline + worktree impact — all git-subprocess
-    // backed) past first paint so /api/boot and the canvas hydration aren't competing with it.
-    // The focus listener + 15s poll still keep the commit rail / Review chip fresh.
+    // First paint matters more than freshness: defer the initial probe past it, and fetch the
+    // HEAVY full episodes (reconciled commits + files + PR readiness + Outside bucket) only ONCE
+    // here and on focus — never on the 15s interval — so the rail poll can never saturate the box.
+    const initial = () => { refetch(); refreshEpisodesFull() }
+    const onFocus = () => { refetch(); refreshEpisodesFull() }
     const ric = window.requestIdleCallback
-      ? requestIdleCallback(refetch, { timeout: 2000 })
-      : setTimeout(refetch, 600)
-    window.addEventListener('focus', refetch)
-    const id = setInterval(refetch, 15000)
+      ? requestIdleCallback(initial, { timeout: 2500 })
+      : setTimeout(initial, 800)
+    window.addEventListener('focus', onFocus)
+    const id = setInterval(refetch, 15000)   // cheap rail only
     return () => {
-      window.removeEventListener('focus', refetch); clearInterval(id)
+      window.removeEventListener('focus', onFocus); clearInterval(id)
       if (window.requestIdleCallback) cancelIdleCallback(ric); else clearTimeout(ric)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -575,8 +608,18 @@ export default function App() {
     })
     // Restore-confidence: the tiny boot payload carries restored counts from .openfde, so the UI
     // can say "Restored 200 episodes · 70 tasks · refreshing…" immediately instead of looking blank
-    // (which reads as "my work vanished") while heavy hydration runs.
-    getBoot().then(b => { if (!cancelled && b?.ok) setBoot(b) })
+    // (which reads as "my work vanished") while heavy hydration runs. Ask for the cached canvas
+    // snapshot too (?canvas=1) and paint the architecture from it on FIRST PAINT — before the
+    // live (~1.5MB) /api/archgraph fetch — so Explorer/modules are visible instantly, never a
+    // blank/manual-scan state when a warm cache exists. The probe refines it in the background.
+    getBoot(true).then(b => {
+      if (cancelled || !b?.ok) return
+      setBoot(b)
+      const snap = b.canvasSnapshot
+      if (snap && Array.isArray(snap.files) && snap.files.length) {
+        setArchGraph(prev => prev || snap)   // don't clobber a live graph that already landed
+      }
+    })
     return () => { cancelled = true }
   }, [])
 
@@ -603,10 +646,12 @@ export default function App() {
         skipStateSaveRef.current = true
         _rawCanvasDispatch({ type: 'HYDRATE', boxes: savedState.boxes, arrows: savedState.arrows ?? [] })
       }
-      const graph = await getArchgraph()
-      if (!cancelled && graph && Array.isArray(graph.files)) {
-        setArchGraph(graph)
-      }
+      // The warm snapshot (from getBoot above) already painted the architecture, so refine it with
+      // the live ArchGraph in the BACKGROUND — don't block the rest of hydration on this ~1.5MB
+      // fetch (which can be slow under load). First paint no longer waits on it.
+      getArchgraph().then(graph => {
+        if (!cancelled && graph && Array.isArray(graph.files)) setArchGraph(graph)
+      })
 
       // ── DEFERRED: not needed for the first canvas paint ───────────────────────
       // Hydrate tasks — only when backend has data (non-empty task list)
@@ -828,6 +873,7 @@ export default function App() {
       }
     }, 700)
     return () => clearInterval(id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchActivity])
 
   // ------------------------------------------------------------------ //
