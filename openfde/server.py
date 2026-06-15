@@ -56,6 +56,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -332,21 +333,22 @@ def latest_terminal_tag(persistence) -> str:
 
 
 def build_boot_payload(path, persistence, started_at: str, version: str, *,
-                       want_canvas: bool = False) -> dict:
+                       want_canvas: bool = False, identity: dict = None) -> dict:
     """The tiny first-paint payload — repo identity + the last warm snapshot + restored counts.
 
-    CONTRACT: reads CACHED/cheap state ONLY (warm cache on disk, a 3 ms file-tree scan, git status,
-    episode/task counts). It must NEVER run analyze_repo / backfill / the semantic graph / the
-    memory-kit bootstrap — those are background jobs. Top-level + dependency-light so a test can
-    prove the contract by patching those heavy functions to blow up and asserting boot still works.
+    CONTRACT: CACHE-ONLY. Reads the warm cache on disk + episode/task counts (+ a ~3 ms file-tree
+    scan only when there is no cache yet). It must NEVER spawn git, run analyze_repo / backfill /
+    the semantic graph / the memory-kit bootstrap — those are background jobs. ``identity``
+    (repoName/branch/gitRoot) is resolved ONCE at server start and passed in, so boot spawns no git
+    subprocess and stays sub-second even on a loaded machine; the frontend re-fetches /api/archgraph
+    on every boot, so the snapshot is an instant placeholder, not the source of truth. Top-level +
+    dependency-light so a test can patch the heavy functions to blow up and assert boot still works.
     """
-    st = git_status(path)
-    sig = boot_cache_mod.dirty_signature(st)
     warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
     meta = warm.get("meta") or {}
     cached_tree = warm.get("fileTree")
     tree = cached_tree if cached_tree is not None else build_file_tree(path)   # ~3 ms scan if no cache
-    ident = session_mod.session_payload(path, started_at, version)
+    ident = identity or session_mod.session_payload(path, started_at, version)
     episodes = persistence.load_episodes()
     return {
         "ok": True,
@@ -356,7 +358,7 @@ def build_boot_payload(path, persistence, started_at: str, version: str, *,
         "canvasSnapshot": warm.get("arch") if want_canvas else None,
         "hasSnapshot": bool(warm.get("arch")),
         "restoredFrom": meta.get("episodeTag") or latest_terminal_tag(persistence),
-        "stale": boot_cache_mod.is_stale(meta, head=st.get("head", ""), dirty_sig=sig),
+        "stale": False,            # cache-only boot: the live /api/archgraph fetch refreshes the canvas
         "generatedAt": meta.get("generatedAt") or "",
         "episodeCount": len(episodes),
         "taskCount": len(persistence.load_tasks() or []),
@@ -977,6 +979,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # so even a fresh process boot serves the last canvas immediately.
     _arch_mem = {"sig": None, "graph": None}
 
+    # /api/boot must stay sub-second even while the capture poll, arch warm, and the heavy
+    # (now off-loop) Story/Review/Timeline handlers are all using the default thread pool. Give
+    # boot its OWN tiny pool so its cache read never queues behind them.
+    _boot_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ofde-boot")
+    # Repo identity (repoName/branch/gitRoot) is stable for the server's lifetime — resolve it ONCE
+    # here (the only git boot ever needs) so /api/boot itself spawns NO subprocess and is cache-only.
+    _boot_identity = session_mod.session_payload(path, server_started_at, _OPENFDE_VERSION)
+
     def _write_warm_after_episode(episode=None) -> None:
         """Snapshot a known-good restore point when an episode reaches a stable terminal state — the
         trusted warm-start the next boot restores from. Reuses the last computed arch (no recompute);
@@ -1042,13 +1052,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         want_canvas = request.query.get("canvas") in ("1", "true")
         loop = asyncio.get_event_loop()
         t0 = time.perf_counter()
-        # build_boot_payload reads CACHE/cheap state only — it must never analyze/backfill. Run it in
-        # a thread (its work is git + small file reads), so the handler itself never blocks the loop.
+        # build_boot_payload is CACHE-ONLY (no git — identity is precomputed) and runs on boot's own
+        # tiny pool, so the handler returns sub-second even while everything else loads.
         payload = await loop.run_in_executor(
-            None, build_boot_payload, path, persistence, server_started_at, _OPENFDE_VERSION)
-        if want_canvas:                                  # one-shot first paint: inline the cached arch
-            warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
-            payload["canvasSnapshot"] = warm.get("arch")
+            _boot_pool,
+            lambda: build_boot_payload(path, persistence, server_started_at, _OPENFDE_VERSION,
+                                       want_canvas=want_canvas, identity=_boot_identity))
         logger.info("/api/boot served in %dms (restore: %s)",
                     int((time.perf_counter() - t0) * 1000), payload.get("restorePath"))
         return web.json_response(payload)
@@ -1768,13 +1777,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # across requests; "not on base" is never cached (a push can change it).
     _onbase_cache: dict = {}
 
-    async def get_review_episodes(request: web.Request) -> web.Response:
-        """List prompt episodes newest-first with their landed commits, plus an
-        "Outside OpenFDE" bucket for commits not linked to any episode.
+    def _review_episodes_payload() -> dict:
+        """Build the prompt-episodes list (newest-first, with landed commits) + the
+        "Outside OpenFDE" bucket. SYNC and git-subprocess heavy (git_timeline + up to
+        80 `git show` + reconciliation + per-episode merge-base readiness), so the
+        async handler runs it OFF the event loop.
 
         Returns:
-            web.Response — {ok, episodes:[{…episode, commits, commitCount,
-                            fileCount}], outside:{…synthetic bucket}}.
+            dict — {ok, episodes:[{…episode, commits, commitCount, fileCount}],
+                    outside:{…synthetic bucket}}.
         """
         persistence.backfill_episode_meta()                    # title/tag/seq/signal
         episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
@@ -1891,7 +1902,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "commits": outside_commits, "commitCount": len(outside_commits),
             "files": [], "fileCount": 0,
         }
-        return web.json_response({"ok": True, "episodes": enriched, "outside": outside_bucket})
+        return {"ok": True, "episodes": enriched, "outside": outside_bucket}
+
+    async def get_review_episodes(request: web.Request) -> web.Response:
+        """List prompt episodes with their commits + the Outside bucket. The work is
+        git-subprocess heavy, so it runs OFF the event loop — a concurrent /api/boot
+        (or any other request) stays responsive instead of blocking behind it."""
+        loop = asyncio.get_event_loop()
+        return web.json_response(await loop.run_in_executor(None, _review_episodes_payload))
 
     async def get_prompt_story_graph(request: web.Request) -> web.Response:
         """Prompt Story Graph — the conceptual narrative built from prompt episodes.
@@ -3747,7 +3765,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             limit = int(request.query.get("limit", "100"))
         except ValueError:
             limit = 100
-        return web.json_response(git_timeline(path, limit))
+        loop = asyncio.get_event_loop()                        # git log = subprocess → off the loop
+        return web.json_response(await loop.run_in_executor(None, lambda: git_timeline(path, limit)))
 
     async def post_git_commit(request: web.Request) -> web.Response:
         """Stage meaningful repo files and commit, then record a timeline event.
@@ -3847,18 +3866,20 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                             fileCount, shownCount, stat, patch, patchTruncated,
                             untracked, affectedConcepts, partialConcepts, signature}.
         """
-        imp = worktree_impact(path)
-        file_paths = [f["path"] for f in imp.get("files", [])]
-        graph = semantic_graph_mod.load_graph(path)
-        concepts = semantic_graph_mod.concepts_for_files(graph, file_paths) if graph else []
-        partial = semantic_graph_mod.tethers_partially_touched(graph, file_paths) if graph else []
-        return web.json_response({
-            "ok": True, "dirty": imp["dirty"],
-            "files": imp["files"], "fileCount": imp["fileCount"], "shownCount": imp["shownCount"],
-            "stat": imp["stat"], "patch": imp["patch"], "patchTruncated": imp["patchTruncated"],
-            "untracked": imp["untracked"], "affectedConcepts": concepts,
-            "partialConcepts": partial, "signature": imp["signature"],
-        })
+        def _compute():                                        # git diff + graph reads → off the loop
+            imp = worktree_impact(path)
+            file_paths = [f["path"] for f in imp.get("files", [])]
+            graph = semantic_graph_mod.load_graph(path)
+            concepts = semantic_graph_mod.concepts_for_files(graph, file_paths) if graph else []
+            partial = semantic_graph_mod.tethers_partially_touched(graph, file_paths) if graph else []
+            return {
+                "ok": True, "dirty": imp["dirty"],
+                "files": imp["files"], "fileCount": imp["fileCount"], "shownCount": imp["shownCount"],
+                "stat": imp["stat"], "patch": imp["patch"], "patchTruncated": imp["patchTruncated"],
+                "untracked": imp["untracked"], "affectedConcepts": concepts,
+                "partialConcepts": partial, "signature": imp["signature"],
+            }
+        return web.json_response(await asyncio.get_event_loop().run_in_executor(None, _compute))
 
     # ================================================================== #
     #  REST — /api/report  (REPORT.md, Step 18)                         #

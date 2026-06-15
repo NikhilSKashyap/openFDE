@@ -566,14 +566,21 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
         return fc
 
     # Capture-forward: baseline every existing transcript (Claude + Codex) to its end.
-    offsets = {}
-    for path, ad in _sources():
-        _ctx(path, ad)
-        try:
-            offsets[str(path)] = path.stat().st_size
-        except OSError:
-            pass
-    known = {e.get("captureKey") for e in persistence.load_episodes() if e.get("captureKey")}
+    # Globbing + statting the user's full transcript history (hundreds of files) plus the
+    # episode-store read is pure I/O — do it OFF the event loop so a cold boot's /api/boot
+    # (and every other request) is never starved while we baseline.
+    def _baseline_sync():
+        offs, ctxs = {}, {}
+        for p, a in _sources():
+            ctxs[str(p)] = a["init_ctx"](p)
+            try:
+                offs[str(p)] = p.stat().st_size
+            except OSError:
+                pass
+        kn = {e.get("captureKey") for e in persistence.load_episodes() if e.get("captureKey")}
+        return offs, ctxs, kn
+    offsets, _ctx_init, known = await asyncio.get_event_loop().run_in_executor(None, _baseline_sync)
+    file_ctx.update(_ctx_init)
     pending = {}       # sessionId → last human prompt not yet captured for this repo
     baselines = {}     # episodeId → dirty set at capture time (in-memory)
     last_change = {}   # episodeId → monotonic time of its last file-set change (quiet timer)
@@ -610,17 +617,25 @@ async def watch_loop(repo_root, persistence, manager, *, interval=_DEFAULT_INTER
         try:
             await asyncio.sleep(interval)
             tick += 1
-            for path, ad in _sources():
-                key = str(path)
+            # Glob + stat the whole transcript history OFF the loop; only transcripts that
+            # actually GREW come back to be processed (usually none) — so each poll tick costs
+            # the event loop ~nothing and never starves /api/boot or the live glow.
+            def _scan_grown():
+                grown = []
+                for p, a in _sources():
+                    k = str(p)
+                    st0 = offsets.get(k, 0)
+                    try:
+                        sz = p.stat().st_size
+                    except OSError:
+                        continue
+                    if sz <= st0:
+                        offsets[k] = sz           # unchanged / new-baseline / rotated
+                    else:
+                        grown.append((p, a, k, st0))
+                return grown
+            for path, ad, key, start in await asyncio.get_event_loop().run_in_executor(None, _scan_grown):
                 fctx = _ctx(path, ad)
-                start = offsets.get(key, 0)
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue
-                if size <= start:
-                    offsets[key] = size           # unchanged / new-baseline / rotated
-                    continue
                 # The transcript grew → its session's agent is mid-turn (thinking, tool
                 # calls, results), even when no repo file changes. This liveness signal
                 # keeps the idle fallback from splitting a long turn (_maybe_autoland).

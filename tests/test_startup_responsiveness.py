@@ -42,15 +42,20 @@ class BootContractTest(unittest.TestCase):
                                "createdAt": "2026-06-10T00:00:00Z"})
         self.p.add_backfill_candidate({"episodeId": "c1", "source": "openfde-backfill",
                                        "backfillConfidence": "discussion", "captureKey": "k1"})
+        ident = {"repoName": "r", "branch": "main", "gitRoot": str(self.root)}
         with mock.patch("openfde.architect.analyze_repo",
                         side_effect=AssertionError("boot must not analyze")) as analyze, \
              mock.patch("openfde.backfill.backfill_historical",
                         side_effect=AssertionError("boot must not backfill")) as backfill, \
+             mock.patch("openfde.server.git_status",
+                        side_effect=AssertionError("boot must be cache-only (no git)")) as gitst, \
              mock.patch("openfde.semantic_graph.build_graph",
                         side_effect=AssertionError("boot must not build the semantic graph")) as sem:
-            payload = server.build_boot_payload(self.root, self.p, "started", "9.9.9")
+            # identity is precomputed at server start, so the cache-only boot spawns NO git subprocess
+            payload = server.build_boot_payload(self.root, self.p, "started", "9.9.9", identity=ident)
         analyze.assert_not_called()
         backfill.assert_not_called()
+        gitst.assert_not_called()
         sem.assert_not_called()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["episodeCount"], 1)            # real episode restored

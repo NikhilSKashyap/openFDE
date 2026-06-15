@@ -405,10 +405,18 @@ export default function App() {
       refreshWorktree()   // keep the "Review changes" affordance current (signature-gated)
       refreshEpisodes()   // keep the prompt story rail current
     }
-    refetch()             // initial probe so the chip can appear without manual reload
+    // Defer the initial heavy probe (episodes + timeline + worktree impact — all git-subprocess
+    // backed) past first paint so /api/boot and the canvas hydration aren't competing with it.
+    // The focus listener + 15s poll still keep the commit rail / Review chip fresh.
+    const ric = window.requestIdleCallback
+      ? requestIdleCallback(refetch, { timeout: 2000 })
+      : setTimeout(refetch, 600)
     window.addEventListener('focus', refetch)
     const id = setInterval(refetch, 15000)
-    return () => { window.removeEventListener('focus', refetch); clearInterval(id) }
+    return () => {
+      window.removeEventListener('focus', refetch); clearInterval(id)
+      if (window.requestIdleCallback) cancelIdleCallback(ric); else clearTimeout(ric)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -621,11 +629,9 @@ export default function App() {
         setBoxSpecs(savedSpecs)
       }
 
-      // Real git history for the Timeline code rail
-      const commits = await getGitTimeline()
-      if (!cancelled && Array.isArray(commits)) {
-        setGitCommits(commits)
-      }
+      // (Git history for the commit rail is loaded by the DEFERRED probe in the focus/poll
+      // effect above — see requestIdleCallback(refetch) — so it no longer competes with
+      // first-paint hydration here.)
 
       // Execution backends + active backend (Step 19)
       const be = await getExecutionBackends()
