@@ -1,7 +1,7 @@
 // Standalone assertions for the Watch-glow target helpers — run with:
 //   node src/lib/watchTarget.test.mjs
 import assert from 'node:assert'
-import { fileNodeId, functionNodeId, watchTargetId, moduleBoxIdForFile, watchActivityTargets } from './watchTarget.js'
+import { fileNodeId, functionNodeId, watchTargetId, moduleBoxIdForFile, watchActivityTargets, watchFocusTargetId } from './watchTarget.js'
 
 const boxes = [
   { id: 'box:module:api', linkedFiles: ['frontend/src/api/backend.js'] },
@@ -58,5 +58,18 @@ assert.equal(noFn.watchKey, 'box:file:openfde/watch_function.py')
 // (d) a file that maps to no module on the canvas → null (no Land → no glow).
 assert.equal(watchActivityTargets('vendor/zzz/unrelated.ts', 'f', repoBoxes), null)
 assert.equal(watchActivityTargets('', 'f', repoBoxes), null)
+
+// ── watchFocusTargetId: the node the camera centers on, by VISIBILITY precedence ──────────────
+const FN = 'box:function:openfde/watch_function.py:changed_line_numbers'
+const FILE = 'box:file:openfde/watch_function.py'
+const MOD = 'box:module:openfde'
+// function laid out (module+file expanded) → center on the FUNCTION (the touched target).
+assert.equal(watchFocusTargetId(F, 'changed_line_numbers', { [FN]: {} }, { [FILE]: {} }, MOD), FN)
+// function NOT laid out yet, file is → center on the FILE (not the module/container).
+assert.equal(watchFocusTargetId(F, 'changed_line_numbers', {}, { [FILE]: {} }, MOD), FILE)
+// nothing expanded yet → fall back to the owning MODULE so the edit is at least on-screen.
+assert.equal(watchFocusTargetId(F, 'changed_line_numbers', {}, {}, MOD), MOD)
+// no function inferred → file when laid out, never a function node.
+assert.equal(watchFocusTargetId(F, null, { [FN]: {} }, { [FILE]: {} }, MOD), FILE)
 
 console.log('watchTarget.test.mjs: all assertions passed')

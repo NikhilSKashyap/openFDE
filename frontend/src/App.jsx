@@ -145,6 +145,7 @@ export default function App() {
   // tiers over time without new events.
   const [watchActivity, setWatchActivity] = useState({})  // fileNodeId -> last-touch ts
   const [watchTiers, setWatchTiers] = useState({})        // fileNodeId -> 'active'|'trail'
+  const [watchFocus, setWatchFocus] = useState(null)      // { file, fnName, moduleId, ts } → center camera
   const watchAutoExpandedRef = useRef(new Set())          // modules WE auto-expanded
   const runRef = useRef(null)
   // ── Git timeline + diff inspection (Step 18) ─────────────────────────────
@@ -781,6 +782,9 @@ export default function App() {
     const key = functionId || targets.watchKey
     setWatchActivity(prev => ({ ...prev, [key]: Date.now() }))
     setWatchTiers(prev => (prev[key] === 'active' ? prev : { ...prev, [key]: 'active' }))
+    // Center the camera on the TOUCHED target (function/file), not the module container — the canvas
+    // resolves the most specific laid-out node and re-centers as the expansion settles.
+    setWatchFocus({ file, fnName, moduleId: targets.moduleId, ts: Date.now() })
   }
 
   // Architect plan arrived: pre-pulse the planned files and drill into their
@@ -2095,6 +2099,7 @@ export default function App() {
               watchBoxIds={watchTiers}
               watchConnected={backendAvailable}
               hydrating={!canvasHydrated}
+              watchFocus={watchFocus}
               liveFollow={liveFollow}
               onToggleLiveFollow={() => setLiveFollow(v => !v)}
               spotlight={canvasSpotlight}

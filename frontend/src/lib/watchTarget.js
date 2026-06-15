@@ -56,3 +56,22 @@ export const watchActivityTargets = (file, functionName, boxes) => {
   const fileId = fileNodeId(file)
   return { moduleId, fileId, expandIds: [moduleId, fileId], watchKey: watchTargetId(file, functionName) }
 }
+
+/**
+ * The MOST SPECIFIC node currently VISIBLE for a file edit, used to center the camera (and to
+ * confirm the ring's target). Precedence: the function node when it's laid out (the module + file
+ * are expanded), else the file node when IT is laid out, else the owning module box. `fnById` and
+ * `fileById` are the layout's lookup maps (only laid-out nodes are keys), so this naturally tracks
+ * the expansion settling — it returns the file/module first, then the function once it lays out.
+ * Returns null when nothing maps. Generic: no repo/file/function names hardcoded.
+ */
+export const watchFocusTargetId = (file, functionName, fnById, fileById, moduleId) => {
+  if (!file) return null
+  if (functionName) {
+    const fnKey = functionNodeId(file, functionName)
+    if (fnById && fnById[fnKey]) return fnKey
+  }
+  const fKey = fileNodeId(file)
+  if (fileById && fileById[fKey]) return fKey
+  return moduleId || null
+}

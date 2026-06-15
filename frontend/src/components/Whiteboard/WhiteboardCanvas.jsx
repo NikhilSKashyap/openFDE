@@ -9,6 +9,7 @@ import { computeArchLayout, computeFlowArrows } from './archLayout'
 import { computeArchLayoutElk } from './elkArchLayout'
 import { computeStoryLayout } from './storyLayout'
 import { pickPrimaryFn } from '../../lib/flowResolve'
+import { watchFocusTargetId } from '../../lib/watchTarget'
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s || ''))
@@ -87,6 +88,7 @@ export default function WhiteboardCanvas({
   watchBoxIds = null,
   watchConnected = false,          // backend/WS reachable → show the Live pill, even before activity
   hydrating = false,               // first-paint canvas still loading → show a skeleton, not the blank CTA
+  watchFocus = null,               // { file, fnName, moduleId, ts } → center the camera on the touched target
   // Live follow (Step 40): center the camera on the file an agent is editing.
   liveFollow = true, onToggleLiveFollow = null,
   // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
@@ -96,6 +98,7 @@ export default function WhiteboardCanvas({
   const svgRef = useRef(null)
   const scrollRef = useRef(null)          // .wb-canvas-scroll — Live-follow camera pans this
   const followRef = useRef({ id: null, timer: null })
+  const focusTargetRef = useRef({ key: null, timer: null })   // watchFocus camera centering
   const interaction = useRef(null)
   const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
@@ -719,6 +722,35 @@ export default function WhiteboardCanvas({
     }, 240)
     return () => clearTimeout(f.timer)
   }, [liveFollow, watchRings, scale])
+
+  // ── Watch focus: center the camera on the TOUCHED file/function (not the module container) ──
+  //    Resolves the most specific node that's actually laid out (function → file → module) and
+  //    re-centers as the expansion settles, so the edit target is on-screen even before the
+  //    function box finishes laying out. Independent of liveFollow's ring-following. Guarded so it
+  //    scrolls only when the resolved target CHANGES (a new edit, or the function becoming visible).
+  useEffect(() => {
+    if (!watchFocus || !liveFollow) return undefined   // respect the Live · following toggle
+    const ft = focusTargetRef.current
+    const id = watchFocusTargetId(watchFocus.file, watchFocus.fnName, layout.fnById, layout.fileById, watchFocus.moduleId)
+    const el = scrollRef.current
+    if (!id || !el) return undefined
+    const key = `${watchFocus.ts}:${id}`
+    if (ft.key === key) return undefined           // already centered on this target for this edit
+    const g = id.startsWith('box:function:') ? layout.fnById?.[id]
+      : id.startsWith('box:file:') ? layout.fileById?.[id]
+      : (nodes.find(n => n.id === id) || null)
+    if (!g) return undefined
+    clearTimeout(ft.timer)
+    ft.timer = setTimeout(() => {
+      ft.key = key
+      el.scrollTo({
+        left: Math.max(0, (g.x + g.w / 2) * scale - el.clientWidth / 2),
+        top: Math.max(0, (g.y + g.h / 2) * scale - el.clientHeight / 2),
+        behavior: 'smooth',
+      })
+    }, 200)
+    return () => clearTimeout(ft.timer)
+  }, [watchFocus, layout, nodes, scale, liveFollow])
 
   // Show →: smooth-scroll the failing function into view once its geometry
   // exists (expansion + ELK settle re-run this via the layout dep).

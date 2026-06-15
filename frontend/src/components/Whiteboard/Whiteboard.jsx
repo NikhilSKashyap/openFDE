@@ -35,6 +35,7 @@ export default function Whiteboard({
   watchBoxIds = null,
   watchConnected = false,
   hydrating = false,
+  watchFocus = null,
   liveFollow = true,
   onToggleLiveFollow,
   spotlight = null,
@@ -159,6 +160,7 @@ export default function Whiteboard({
           watchBoxIds={watchBoxIds}
           watchConnected={watchConnected}
           hydrating={hydrating}
+          watchFocus={watchFocus}
           liveFollow={liveFollow}
           onToggleLiveFollow={onToggleLiveFollow}
           spotlight={spotlight}
