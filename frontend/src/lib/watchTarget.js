@@ -28,6 +28,10 @@ export const moduleBoxIdForFile = (file, boxes) => {
   const list = boxes || []
   const exact = list.find(b => (b.linkedFiles || []).includes(file))
   if (exact) return exact.id
+  // linkedPath DIR-PREFIX: module boxes cap linkedFiles (~25), so a deep file like
+  // openfde/watch_function.py only maps to its module via the box's linkedPath.
+  const byPath = list.find(b => b.linkedPath && (file === b.linkedPath || file.startsWith(`${b.linkedPath}/`)))
+  if (byPath) return byPath.id
   const base = file.split('/').pop()
   const byBase = list.find(b => (b.linkedFiles || []).some(f => f.split('/').pop() === base))
   return byBase ? byBase.id : null

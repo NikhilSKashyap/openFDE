@@ -89,6 +89,8 @@ class BootContractTest(unittest.TestCase):
             "episodeId": "e1", "source": "openfde-capture", "status": "landed",
             "title": "Add login", "files": ["a.py", "b.py"], "commitShas": ["abc1234def0"],
             "createdAt": "2026-06-10T00:00:00Z",
+            "prompt": "X" * 4000,                                # big fields that must NOT ship on the rail
+            "storyFacts": {"operational": False, "concepts": [{"name": "c"}] * 50},
             "commitMeta": {"abc1234def0": {"title": "feat: login", "summary": "the thing"}}})
         with mock.patch("openfde.server.git_status",
                         side_effect=AssertionError("rail must not git_status")), \
@@ -103,9 +105,16 @@ class BootContractTest(unittest.TestCase):
             payload = server.build_rail_payload(self.p)
         eps = payload["episodes"]
         self.assertEqual(len(eps), 1)
-        self.assertEqual(eps[0]["commitCount"], 1)
-        self.assertEqual(eps[0]["fileCount"], 2)
-        self.assertIsNone(eps[0]["prReadiness"])                 # readiness loads on demand, not on the rail
+        chip = eps[0]
+        self.assertEqual(chip["commitCount"], 1)
+        self.assertEqual(chip["fileCount"], 2)                   # the COUNT, not the files array
+        self.assertIsNone(chip["prReadiness"])                   # readiness loads on demand, not on the rail
+        # TINY chip: the heavy per-episode fields must NOT be shipped on the 15s poll.
+        self.assertNotIn("prompt", chip)                         # was ~4KB of prompt text
+        self.assertNotIn("files", chip)                          # array dropped; fileCount kept
+        self.assertEqual(chip["storyFacts"], {"operational": False})   # operational flag only, no concepts
+        import json as _json
+        self.assertLess(len(_json.dumps(chip)), 600)             # a chip is small + fixed-size
         self.assertEqual(eps[0]["commits"][0]["displayTitle"], "feat: login")  # cached title, no `git show`
         self.assertEqual(payload["outside"]["commits"], [])      # Outside bucket is the /full endpoint's job
 
@@ -126,9 +135,9 @@ class BootContractTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(len(payload["boxes"]), 1)               # the persisted module box → modules render
         self.assertTrue(payload["hasCanvas"])
-        self.assertEqual(payload["arch"]["files"][0]["path"], "a.py")   # warm arch snapshot (box detail)
+        self.assertNotIn("arch", payload)                        # the ~1.5MB arch is NOT shipped on first paint
+        self.assertTrue(payload["hasSnapshot"])                  # …but the UI knows one exists (loads via /api/archgraph)
         self.assertEqual(payload["fileTree"]["name"], "root")    # cached Explorer tree
-        self.assertTrue(payload["hasSnapshot"])
 
     def test_boot_canvas_empty_before_first_scan(self):
         # A never-scanned repo (no persisted canvas, no warm cache) returns empties — the only case

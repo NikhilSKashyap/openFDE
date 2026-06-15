@@ -411,15 +411,22 @@ export default function App() {
   const runReassimilation = async () => {
     // Don't re-assimilate while a run is actively writing — requeue and wait for quiet.
     if (executingRef.current) { scheduleReassimilation(900); return }
+    // Single-flight: never run two reassimilations at once (a burst of file_activity was issuing
+    // duplicate /api/review/reassimilate calls). Requeue so the new files still get picked up.
+    if (inflightRef.current.reassim) { scheduleReassimilation(900); return }
     const files = [...pendingReassimRef.current]
     if (!files.length) return
     pendingReassimRef.current = new Set()
-    const res = await reassimilateReview(files, 'file_activity')
-    if (res?.ok && res.archGraph && Array.isArray(res.archGraph.files)) {
-      setArchGraph(res.archGraph)          // refresh understanding; canvas boxes unaffected
+    inflightRef.current.reassim = true
+    try {
+      const res = await reassimilateReview(files, 'file_activity')
+      if (res?.ok && res.archGraph && Array.isArray(res.archGraph.files)) {
+        setArchGraph(res.archGraph)        // refresh understanding; canvas boxes unaffected
+      }
+      refreshWorktree()                    // concepts may have changed → refresh the Review affordance
+    } finally {
+      delete inflightRef.current.reassim
     }
-    // Concepts may have changed → refresh the Review Delta affordance.
-    refreshWorktree()
   }
 
   // Debounce: collapse a burst of edits into one re-assimilation ~1.8s after the
@@ -627,8 +634,7 @@ export default function App() {
             skipStateSaveRef.current = true
             _rawCanvasDispatch({ type: 'HYDRATE', boxes: bc.boxes, arrows: bc.arrows ?? [] })
           }
-          if (bc.arch && Array.isArray(bc.arch.files)) setArchGraph(prev => prev || bc.arch)
-          if (bc.fileTree) setBootFileTree(bc.fileTree)
+          if (bc.fileTree) setBootFileTree(bc.fileTree)   // arch (box-internal detail) loads later, gated
           setCanvasHydrated(true)          // unleash the rest of hydration — AFTER first paint
           return
         }
@@ -740,7 +746,14 @@ export default function App() {
   // canvas there's no glow (Watch presupposes Land). Entries fade after ~2.6s.
   function resolveWatchBox(path) {
     const boxes = boxesRef.current || []
+    // 1) exact linkedFiles match, then 2) linkedPath DIR-PREFIX — module boxes cap linkedFiles
+    //    (~25), so a deep file like openfde/watch_function.py only maps to its module via linkedPath;
+    //    then 3) basename. Without (2) the watch glow silently no-ops on most files.
     let b = boxes.find(bx => (bx.linkedFiles || []).includes(path))
+    if (!b) b = boxes.find(bx => {
+      const lp = bx.linkedPath
+      return lp && (path === lp || path.startsWith(lp + '/'))
+    })
     if (!b) {
       const base = path.split('/').pop()
       b = boxes.find(bx => (bx.linkedFiles || []).some(f => f.split('/').pop() === base))

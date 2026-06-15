@@ -22,6 +22,12 @@ assert.equal(moduleBoxIdForFile('totally/unrelated.ts', boxes), null)           
 assert.equal(moduleBoxIdForFile('', boxes), null)
 assert.equal(moduleBoxIdForFile('x.py', null), null)                            // tolerant of no boxes
 
+// linkedPath DIR-PREFIX: a deep file NOT in the capped linkedFiles still maps to its module — the
+// fix for the watch glow silently no-op'ing on most files (e.g. openfde/watch_function.py).
+const lpBoxes = [{ id: 'box:module:openfde', linkedPath: 'openfde', linkedFiles: ['openfde/__init__.py'] }]
+assert.equal(moduleBoxIdForFile('openfde/watch_function.py', lpBoxes), 'box:module:openfde')
+assert.equal(moduleBoxIdForFile('frontend/src/App.jsx', lpBoxes), null)         // different tree → no match
+
 // the most specific known target: function id WINS over file id when a function name is known…
 assert.equal(watchTargetId('openfde/server.py', 'start'),
              'box:function:openfde/server.py:start')

@@ -370,46 +370,52 @@ def build_boot_payload(path, persistence, started_at: str, version: str, *,
 def build_rail_payload(persistence) -> dict:
     """CHEAP prompt-rail payload — the default /api/review/episodes, safe to poll often.
 
-    CONTRACT: reads ONLY persisted state. Each episode plus the commits it ALREADY declares
-    (commitShas + cached per-commit titles in commitMeta). It must NEVER run git (timeline /
-    `git show` / merge-base), reconciliation, PR readiness, or ensure_facts — that full detail
-    (and the cross-episode Outside bucket) is the heavy /api/review/episodes/full path. Top-level +
-    dependency-light so a test can patch the git/reconcile/readiness seams to explode and prove the
-    rail never touches them (the poll was 49s on a large repo and saturated the box).
+    CONTRACT: TINY CHIP data only, from persisted state. Each episode contributes a small,
+    fixed-size chip (id/tag/title/status/counts + commit chips with cached titles) — NOT the whole
+    episode object (no full prompt text, no files arrays, no storyFacts concepts, no verify/PR
+    detail), so the 15s poll ships ~tens of KB instead of ~440 KB. It must NEVER run git, ensure_facts,
+    reconciliation, or readiness; the full detail (files, readiness, Outside bucket, concepts) loads
+    on demand via /api/review/episodes/full. Top-level + dependency-light so a test can patch the
+    git/reconcile/readiness seams to explode and prove the rail never touches them.
     """
     persistence.backfill_episode_meta()                    # tag/title/seq — deterministic, no git
-    enriched = []
+    chips = []
     for e in persistence.load_episodes():
         shas = e.get("commitShas") or []
         cm = e.get("commitMeta") or {}
-        commits = [{"sha": s, "shortSha": (s or "")[:7],
-                    "displayTitle": (cm.get(s) or {}).get("title") or (e.get("title") or ""),
-                    "displaySummary": (cm.get(s) or {}).get("summary") or "",
-                    "confidence": (cm.get(s) or {}).get("confidence"),
-                    "files": [], "fileCount": 0} for s in shas]
-        enriched.append({**e, "commits": commits, "commitCount": len(shas),
-                         "fileCount": len(e.get("files") or []), "prReadiness": None})
-    return {"ok": True, "episodes": enriched,
+        chips.append({
+            "episodeId": e.get("episodeId"), "tag": e.get("tag"), "sequence": e.get("sequence"),
+            "title": e.get("title"), "status": e.get("status"), "kind": e.get("kind"),
+            "signal": e.get("signal"), "createdAt": e.get("createdAt"), "updatedAt": e.get("updatedAt"),
+            "fileCount": len(e.get("files") or []), "commitCount": len(shas), "commitShas": shas,
+            "commits": [{"sha": s, "shortSha": (s or "")[:7],
+                         "displayTitle": (cm.get(s) or {}).get("title") or (e.get("title") or "")}
+                        for s in shas],
+            # operational flag only (drives the OpenPM filter) — not the full concept list.
+            "storyFacts": {"operational": bool((e.get("storyFacts") or {}).get("operational"))},
+            "prReadiness": None,
+        })
+    return {"ok": True, "episodes": chips,
             "outside": {"episodeId": "outside", "kind": "manual", "status": "landed",
                         "prompt": "Outside OpenFDE", "summary": "", "commits": [],
                         "commitCount": 0, "files": [], "fileCount": 0}}
 
 
 def build_boot_canvas(persistence) -> dict:
-    """Cache-only FIRST-PAINT hydration, in ONE call: the persisted canvas (the boxes+arrows that
-    ARE the architecture modules — the canvas is empty without them), the warm ArchGraph snapshot
-    (box-internal file/function detail), and the cached file tree (Explorer). Pure disk reads —
-    NEVER git, analyze_repo, or a file-tree scan — so it paints the cockpit instantly and can never
-    queue behind Story/git endpoints. ``boxes``/``arch`` are empty only before the repo has ever been
-    scanned (no persisted canvas / no warm cache). Top-level + dependency-light so a test can patch
-    the heavy seams to explode and prove first paint never touches them.
+    """Cache-only FIRST-PAINT hydration, in ONE small call: the persisted canvas (the boxes+arrows
+    that ARE the architecture modules — the canvas is empty without them) + the cached file tree
+    (Explorer). Pure disk reads — NEVER git, analyze_repo, or a file-tree scan. Deliberately does
+    NOT ship the full ~1.5 MB ArchGraph: the modules render from boxes alone, so the heavy arch
+    (box-internal file/function detail) loads separately via the gated /api/archgraph AFTER first
+    paint. ``hasSnapshot`` still tells the UI a warm arch exists. ``boxes`` is empty only before the
+    repo has ever been scanned. Top-level + dependency-light so a test can patch the heavy seams to
+    explode and prove first paint never touches them.
     """
     warm = boot_cache_mod.read_warm(persistence.openfde_dir) or {}
     state = persistence.load_state() or {}
     return {"ok": True,
             "boxes": state.get("boxes") or [],
             "arrows": state.get("arrows") or [],
-            "arch": warm.get("arch"),
             "fileTree": warm.get("fileTree"),
             "hasCanvas": bool(state.get("boxes")),
             "hasSnapshot": bool(warm.get("arch"))}
@@ -1034,6 +1040,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # set): a hit returns instantly, a miss recomputes once and persists the warm snapshot to disk
     # so even a fresh process boot serves the last canvas immediately.
     _arch_mem = {"sig": None, "graph": None}
+    _arch_inflight = {"sig": None, "fut": None}   # coalesce concurrent analyze_repo scans
 
     # /api/boot must stay sub-second even while the capture poll, arch warm, and the heavy
     # (now off-loop) Story/Review/Timeline handlers are all using the default thread pool. Give
@@ -1075,8 +1082,20 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 _arch_mem.update(sig=sig, graph=warm["arch"])
                 logger.info("archgraph: served from disk snapshot (no scan)")
                 return warm["arch"]
+        # Coalesce concurrent misses for the same signature into ONE scan — at startup the gated
+        # /api/archgraph and the deferred background warm would otherwise each run analyze_repo and
+        # double the GIL pressure while the cockpit is trying to paint.
+        inflight = _arch_inflight.get("fut")
+        if not force and inflight is not None and _arch_inflight.get("sig") == sig:
+            return await inflight
         t0 = time.perf_counter()
-        graph = await loop.run_in_executor(None, analyze_repo, path)        # CPU scan, off the loop
+        fut = loop.run_in_executor(None, analyze_repo, path)               # CPU scan, off the loop
+        _arch_inflight.update(sig=sig, fut=fut)
+        try:
+            graph = await fut
+        finally:
+            if _arch_inflight.get("fut") is fut:
+                _arch_inflight.update(sig=None, fut=None)
         logger.info("archgraph: scanned in %dms", int((time.perf_counter() - t0) * 1000))
         _arch_mem.update(sig=sig, graph=graph)
         try:                                            # keep the warm cache fresh — best-effort
@@ -4369,6 +4388,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # this — it just refreshes once the fresh scan lands.
     async def _warm_arch():
         try:
+            # First paint (cached boxes + Explorer from /api/boot/canvas) must win the GIL before
+            # this ~seconds-long analyze_repo starts — otherwise it starves the very call that paints
+            # the cockpit. The gated /api/archgraph then drives (and coalesces with) the real scan.
+            await asyncio.sleep(3)
             t0 = time.perf_counter()
             await _archgraph_async()
             logger.info("background arch warm done in %dms", int((time.perf_counter() - t0) * 1000))
