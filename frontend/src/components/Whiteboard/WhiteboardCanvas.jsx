@@ -98,7 +98,7 @@ export default function WhiteboardCanvas({
   const svgRef = useRef(null)
   const scrollRef = useRef(null)          // .wb-canvas-scroll — Live-follow camera pans this
   const followRef = useRef({ id: null, timer: null })
-  const focusTargetRef = useRef({ key: null, timer: null })   // watchFocus camera centering
+  const focusTargetRef = useRef({ stamp: null, posKey: null })   // watchFocus camera centering
   const interaction = useRef(null)
   const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
@@ -731,25 +731,33 @@ export default function WhiteboardCanvas({
   useEffect(() => {
     if (!watchFocus || !liveFollow) return undefined   // respect the Live · following toggle
     const ft = focusTargetRef.current
-    const id = watchFocusTargetId(watchFocus.file, watchFocus.fnName, layout.fnById, layout.fileById, watchFocus.moduleId)
     const el = scrollRef.current
-    if (!id || !el) return undefined
-    const key = `${watchFocus.ts}:${id}`
-    if (ft.key === key) return undefined           // already centered on this target for this edit
-    const g = id.startsWith('box:function:') ? layout.fnById?.[id]
-      : id.startsWith('box:file:') ? layout.fileById?.[id]
-      : (nodes.find(n => n.id === id) || null)
-    if (!g) return undefined
-    clearTimeout(ft.timer)
-    ft.timer = setTimeout(() => {
-      ft.key = key
-      el.scrollTo({
-        left: Math.max(0, (g.x + g.w / 2) * scale - el.clientWidth / 2),
-        top: Math.max(0, (g.y + g.h / 2) * scale - el.clientHeight / 2),
-        behavior: 'smooth',
-      })
-    }, 200)
-    return () => clearTimeout(ft.timer)
+    if (!el) return undefined
+    // Resolve only to a LAID-OUT file/function (moduleId=null) — never yank the camera to the
+    // module's centre (a middle file) before the touched node lays out, nor on its later collapse.
+    const id = watchFocusTargetId(watchFocus.file, watchFocus.fnName, layout.fnById, layout.fileById, null)
+    if (!id) return undefined
+    // Center on the node's ACTUAL rendered position. The React layout object lags between the
+    // compact dagre seed and the final ELK pass (centering off it scrolled to the seed's y and
+    // clamped to 0), but the DOM always reflects what's painted — so read the node's box from the
+    // DOM and re-center as it settles. The id contains ':' and '/', which are fine inside a quoted
+    // attribute selector.
+    const nodeEl = el.querySelector(`[data-node-id="${id}"]`)
+    if (!nodeEl) return undefined   // not in the DOM yet → wait for the next layout commit
+    const nr = nodeEl.getBoundingClientRect(), er = el.getBoundingClientRect()
+    const cx = (nr.left - er.left) + el.scrollLeft + nr.width / 2    // absolute content coords —
+    const cy = (nr.top - er.top) + el.scrollTop + nr.height / 2      // invariant to our own scroll
+    const stamp = String(watchFocus.ts)
+    if (ft.stamp !== stamp) { ft.stamp = stamp; ft.posKey = null }
+    const posKey = `${id}:${Math.round(cy)}`     // re-center when the node MOVES (dagre→ELK); else skip
+    if (ft.posKey === posKey) return undefined
+    ft.posKey = posKey
+    el.scrollTo({
+      left: Math.max(0, cx - el.clientWidth / 2),
+      top: Math.max(0, cy - el.clientHeight / 2),
+      behavior: 'smooth',
+    })
+    return undefined
   }, [watchFocus, layout, nodes, scale, liveFollow])
 
   // Show →: smooth-scroll the failing function into view once its geometry
