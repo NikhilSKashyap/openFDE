@@ -196,23 +196,58 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
 // (+ concept branches from `graph.storyTimeline`) — derived, immutable, no
 // drag, nothing measured, nothing persisted.
 const NV = {
-  XP: 470,   // spine pitch (box + evidence ladder)
-  W: 176, H: 96,                 // episode box (matches .tellmap-box)
-  DX: 210, DY: 172,              // first curved step off a parent
-  FANX: 56, FANY: 110,           // stagger for siblings on the same side
-  HALO: 22,                      // halo chip row height (estimate; chips wrap ~2/row)
-  PAD: 64, LH: 150,              // board padding; ladder row height
+  XP: 560,   // spine pitch (box + evidence ladder)
+  W: 196, H: 104,                // episode box (matches .tellmap-box)
+  DX: 250, DY: 250,              // first curved step off a parent
+  FANX: 78, FANY: 132,           // stagger for siblings on the same side
+  HALO: 24,                      // halo chip row height
+  PAD: 86, LH: 178,              // board padding; ladder row height
+  GAPX: 28, GAPY: 28,            // collision padding
+  HALOW: 254,                    // CSS halo width, used for deterministic estimates
 }
 
-// Estimated halo stack height — decision notes orbit their episode, so the
-// board reserves room for them without measuring the DOM (≈2 chips per row).
-const haloH = n => (n > 0 ? Math.ceil(n / 2) * NV.HALO + 8 : 0)
+const branchTitle = b => String(b?.title || '')
+
+// Deterministic chip-pack estimate: CSS truncates chips at ~230px, but long
+// notes still take a whole row. This mirrors "pack chips into rows" without DOM
+// measurement, so halos reserve enough room before React paints them.
+function haloH(branches = []) {
+  if (!branches.length) return 0
+  let rows = 1
+  let used = 0
+  for (const b of branches) {
+    const w = Math.min(230, 44 + branchTitle(b).length * 7)
+    if (used && used + w + 6 > NV.HALOW) { rows += 1; used = 0 }
+    used += w + (used ? 6 : 0)
+  }
+  return rows * NV.HALO + 12
+}
+
+function nodeRect(id, p, tlById) {
+  const sn = tlById[id] || {}
+  const above = haloH(sn.branchesAbove || [])
+  const below = haloH(sn.branchesBelow || [])
+  return {
+    x: p.x - 30, y: p.y - above - 12,
+    w: NV.W + 60, h: above + NV.H + below + 24,
+  }
+}
+
+function overlaps(a, b) {
+  return a.x < b.x + b.w + NV.GAPX && a.x + a.w + NV.GAPX > b.x
+      && a.y < b.y + b.h + NV.GAPY && a.y + a.h + NV.GAPY > b.y
+}
 
 function layoutNarrative(nv, tl) {
   const pos = {}                                     // episodeId -> {x, y} (y rel. to spine=0)
   ;(nv.spineEpisodeIds || []).forEach((id, i) => { pos[id] = { x: i * NV.XP, y: 0 } })
   const fan = {}                                     // `${parentId}:${side}` -> sibling count
   const take = (pid, side) => (fan[`${pid}:${side}`] = (fan[`${pid}:${side}`] || 0) + 1)
+  const tlById = Object.fromEntries((tl?.spine || []).map(n => [n.episodeId, n]))
+  const occupied = []
+  for (const id of (nv.spineEpisodeIds || [])) {
+    occupied.push(nodeRect(id, pos[id], tlById))
+  }
 
   const ordered = (nv.nodes || []).slice().sort((a, b) => (a.sequence || 0) - (b.sequence || 0))
   for (const n of ordered) {
@@ -221,17 +256,32 @@ function layoutNarrative(nv, tl) {
     if (!p) continue
     const side = n.lane === 'abandoned' ? 1 : -1     // dropped ↘ below, explored ↗ above
     const k = take(n.parentEpisodeId, side) - 1
-    pos[n.episodeId] = { x: p.x + NV.DX + k * NV.FANX,
-                         y: p.y + side * (NV.DY + k * NV.FANY) }
+    const candidate = {
+      x: p.x + NV.DX + k * NV.FANX,
+      y: p.y + side * (NV.DY + k * NV.FANY),
+    }
+    // Keep the spine's evidence ladder as a quiet reading corridor: branches
+    // start beyond the ladder, then get pushed farther outward until their full
+    // card+halo rectangle no longer collides with already placed beats.
+    const corridor = NV.LH / 2 + NV.H / 2 + 46
+    if (side < 0) candidate.y = Math.min(candidate.y, -corridor)
+    else candidate.y = Math.max(candidate.y, corridor)
+    let guard = 0
+    while (occupied.some(r => overlaps(nodeRect(n.episodeId, candidate, tlById), r)) && guard < 24) {
+      candidate.y += side * (NV.H + NV.GAPY + 24)
+      candidate.x += 18
+      guard += 1
+    }
+    pos[n.episodeId] = candidate
+    occupied.push(nodeRect(n.episodeId, candidate, tlById))
   }
 
   // Bounds include each episode's halo stacks (decision notes hug their box).
-  const tlById = Object.fromEntries((tl?.spine || []).map(n => [n.episodeId, n]))
   let minY = 0, maxY = NV.H, maxX = NV.W
   for (const [id, p] of Object.entries(pos)) {
-    const sn = tlById[id] || {}
-    minY = Math.min(minY, p.y - haloH((sn.branchesAbove || []).length))
-    maxY = Math.max(maxY, p.y + NV.H + haloH((sn.branchesBelow || []).length))
+    const r = nodeRect(id, p, tlById)
+    minY = Math.min(minY, r.y)
+    maxY = Math.max(maxY, r.y + r.h)
     maxX = Math.max(maxX, p.x + NV.W)
   }
   const offY = NV.PAD - minY

@@ -1256,7 +1256,7 @@
 
 /* recorded beats live in the orange voice — calm border, not a glow */
 .tellmap-box {
-  width: 176px; height: 96px; box-sizing: border-box; flex-shrink: 0;
+  width: 196px; height: 104px; box-sizing: border-box; flex-shrink: 0;
   display: flex; flex-direction: column; gap: 3px;
   background: var(--surface-2);
   border: 1px solid color-mix(in srgb, var(--accent-orange) 38%, var(--border));
@@ -1290,7 +1290,7 @@
 }
 .tellmap-summary {
   flex: 1; min-height: 0; font-size: 10.5px; color: var(--text-muted); line-height: 1.35;
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
 }
 .tellmap-foot { display: flex; gap: 5px; align-items: center; }
 .tellmap-chip {
@@ -1803,14 +1803,14 @@
 
 /* decision-note halos — compact chips hugging their episode, never graph paths */
 .nv-halo {
-  position: absolute; left: -22px; width: 220px; display: flex; flex-wrap: wrap;
+  position: absolute; left: -28px; width: 254px; display: flex; flex-wrap: wrap;
   gap: 3px 6px; z-index: 2;
 }
 .nv-halo.up { align-content: flex-end; }
 .nv-chip {
   font-size: 9px; font-family: ui-monospace, monospace; line-height: 1.7;
   padding: 0 8px; border-radius: 99px; cursor: pointer; white-space: nowrap;
-  max-width: 205px; overflow: hidden; text-overflow: ellipsis;
+  max-width: 230px; overflow: hidden; text-overflow: ellipsis;
   color: var(--text-muted); background: color-mix(in srgb, var(--surface-2) 72%, transparent);
   border: 1px dashed color-mix(in srgb, var(--text-muted) 35%, transparent);
   transition: color 0.12s, border-color 0.12s;
