@@ -499,6 +499,45 @@ class JsTsArchGraphTest(unittest.TestCase):
             # `readFile` is from a bare package → never resolves to an in-repo node
             self.assertFalse(any(fl["toFunctionId"].endswith(":readFile") for fl in flows))
 
+    def test_one_line_class_method_call_flow(self):
+        # Regression: the definition guard must skip only the def TOKEN, not every
+        # call on its line. A ONE-LINE method body whose call shares the signature's
+        # line — and names a module-level function with the SAME short name — must
+        # still produce the same-file flow (it was dropped with the signature).
+        src = ("export function add(a: number, b: number): number { return a + b }\n"
+               "\n"
+               "export class Calc {\n"
+               "  add(n: number): number { return add(n, 1) }\n"
+               "}\n")
+        d, root = _node_repo(scripts={"test": "vitest"}, files={"src/calc.ts": src})
+        with d:
+            g = self._graph(root)
+            names = {f["name"] for f in g["functions"]}
+            self.assertIn("Calc.add", names)        # the one-line method is a node
+            self.assertIn("add", names)
+            flow = [fl for fl in g["flows"]
+                    if fl["fromFunctionId"].endswith("calc.ts:Calc.add")
+                    and fl["toFunctionId"].endswith("calc.ts:add")]
+            self.assertTrue(flow, "Calc.add() → add() same-file flow must be detected")
+            self.assertEqual(flow[0]["confidence"], "high")
+
+    def test_single_param_arrow_without_parens(self):
+        # `const f = x => …` (and exported / async) was missed by the v1 patterns.
+        # The existing scrubber keeps comment/string decoys from being extracted.
+        src = ("export const double = x => x * 2\n"
+               "const triple = n => n * 3\n"
+               "const wrap = async v => v\n"
+               "// const fake = z => z\n"
+               'const decoy = "a => b"\n')
+        d, root = _node_repo(scripts={"test": "vitest"}, files={"src/arrows.ts": src})
+        with d:
+            names = {f["name"] for f in self._graph(root)["functions"]}
+            self.assertIn("double", names)          # exported single-param arrow
+            self.assertIn("triple", names)          # non-exported single-param arrow
+            self.assertIn("wrap", names)            # async single-param arrow
+            self.assertNotIn("fake", names)         # inside a comment → scrubbed out
+            self.assertNotIn("decoy", names)        # value is a string, not an arrow
+
 
 if __name__ == "__main__":
     unittest.main()

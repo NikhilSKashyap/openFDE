@@ -734,8 +734,11 @@ def _brace_block(scrubbed: str, start: int):
 
 
 # Top-level declaration forms (column 0). Ordered specific→general; a name claimed
-# by an earlier pattern is not re-emitted. The arrow patterns allow a TS return-type
-# annotation (`): T =>`) and a leading generic (`<T>(…) =>`) — the gaps in v1.
+# by an earlier pattern is not re-emitted. The parenthesized arrow patterns allow a
+# TS return-type annotation (`): T =>`) and a leading generic (`<T>(…) =>`); the last
+# two cover the unparenthesized SINGLE-param arrow (`const f = x => …`, optional
+# `async`). Requiring `=>` (never `>`/`>=`) keeps comparisons out; a single param
+# can't carry a TS type without parens, so `x => …` is the only no-paren form.
 _JS_DECL_PATTERNS: list = [
     re.compile(r"^export\s+default\s+(?:async\s+)?function\*?\s+(\w+)\s*[(<]", re.M),
     re.compile(r"^export\s+(?:async\s+)?function\*?\s+(\w+)\s*[(<]", re.M),
@@ -744,6 +747,8 @@ _JS_DECL_PATTERNS: list = [
     re.compile(r"^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\*?\s*\(", re.M),
     re.compile(r"^export\s+(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=;{]+?)?=>", re.M),
     re.compile(r"^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=;{]+?)?=>", re.M),
+    re.compile(r"^export\s+(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\w+\s*=>", re.M),
+    re.compile(r"^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\w+\s*=>", re.M),
 ]
 
 # Class declaration (optionally exported / default / abstract).
@@ -1402,16 +1407,28 @@ def _js_flows(abs_path, rel, module_id, flows, func_dicts, fn_by_id,
             methods_here[tuple(d["name"].split(".", 1))] = d
         else:
             local_by_name[d["name"]] = d
-    # Lines that ARE a def's signature — a bare `name(` there is the definition,
-    # not a call (kills the "method named like a function" false flow).
-    def_short_lines = {(_short_name(d["name"]), d["line"]) for d in defs}
+    # OFFSETS of definition NAME tokens the bare-call scan could mistake for a call:
+    # `function name(` declarations and class `method(` signatures (the only forms
+    # where the name is immediately followed by `(`). We skip the TOKEN, not the
+    # whole line — so a one-line method body's real calls, later on the same line
+    # (`add(n) { return add(n, 1) }`), are still detected.
+    sig_offsets = set()
+    for pat in _JS_DECL_PATTERNS[:3]:               # function-declaration name tokens
+        for m in pat.finditer(scrubbed):
+            sig_offsets.add(m.start(1))
+    for cm in _JS_CLASS_RE.finditer(scrubbed):      # class method-signature name tokens
+        blk = _brace_block(scrubbed, cm.end())
+        if blk is None:
+            continue
+        for mm in _JS_METHOD_RE.finditer(scrubbed[blk[0] + 1:blk[1]]):
+            sig_offsets.add(blk[0] + 1 + mm.start(1))
 
     # (1) same-file: bare `name(` → a top-level callable defined here (high).
     for nm, d in local_by_name.items():
         for m in re.finditer(r"(?<![\w.$])" + re.escape(nm) + r"\s*\(", scrubbed):
-            line = _line_of(line_starts, m.start())
-            if (nm, line) in def_short_lines:
+            if m.start() in sig_offsets:            # the definition token, not a call
                 continue
+            line = _line_of(line_starts, m.start())
             add(owner_of(line), d["id"], "high", line)
 
     # (2) same-file: `this.method(` → a sibling method of the caller's class (high).
@@ -1439,9 +1456,9 @@ def _js_flows(abs_path, rel, module_id, flows, func_dicts, fn_by_id,
             if not callee_id:
                 continue
             for m in re.finditer(r"(?<![\w.$])" + re.escape(local) + r"\s*\(", scrubbed):
-                line = _line_of(line_starts, m.start())
-                if (local, line) in def_short_lines:
+                if m.start() in sig_offsets:        # the definition token, not a call
                     continue
+                line = _line_of(line_starts, m.start())
                 add(owner_of(line), callee_id, "medium", line)
 
 
