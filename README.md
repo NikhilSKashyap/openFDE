@@ -36,10 +36,11 @@ later when several agents are building in parallel, nobody can say what was
 tried, what was dropped, or why the surviving path won.
 
 The theory is simple: coding agents are the engines, your imagination is the
-wings, and OpenFDE is the cockpit and the orange box. While the work is
-happening, it gives you instruments: scope, live file glow, diffs, tasks,
-checks, and shipping gates. After the work lands, it gives you the recorder:
-the prompt, the files, the commits, the receipts, and the story.
+wings, and you are still the pilot. OpenFDE is the cockpit and the orange box.
+While the work is happening, it gives you the controls and instruments: scope,
+live file glow, diffs, tasks, checks, and shipping gates. After the work lands,
+it gives you the recorder: the prompt, the files, the commits, the receipts,
+and the story.
 
 When agents do more of the building, the missing artifact is no longer just the
 code. It is the record of how the code came to be. Whoever has that record has
