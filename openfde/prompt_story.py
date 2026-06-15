@@ -162,9 +162,15 @@ def _is_signal_example_unit(unit: str) -> bool:
 
 
 def _is_bad_concept_phrase(phrase: str) -> bool:
-    """True when a stored/derived phrase is too noisy to become a Story concept."""
+    """True when a stored/derived phrase is too noisy to become a Story concept — generic
+    chatter, signal-example fragments, OR demo PLANNING (external demo targets / demo-sequence
+    language). Demo-plan phrases stay in raw episode detail; they never become OpenFDE Story
+    concepts or branch chips."""
     text = (phrase or "").strip()
     if not text:
+        return True
+    from openfde.episode_summary import is_demo_plan_concept
+    if is_demo_plan_concept(text):
         return True
     low = text.lower().strip(" \t,-–—\"'`*")
     if low in _STOP_PHRASES or low in _NOISY_CONCEPT_PHRASES:

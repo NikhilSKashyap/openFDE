@@ -122,6 +122,102 @@ def is_operational(prompt: str) -> bool:
     return joined in _ACK_WORDS
 
 
+# ── Story-noise vocabulary: OS junk, demo planning, and change-based retitling ───
+# These keep non-product work (a .DS_Store commit, "NanoGPT live demo" planning) out of
+# the product Story while never touching real OpenFDE changes.
+
+# OS / editor cruft — never product work, even when accidentally committed. Deliberately
+# TINY: it must not swallow README, source, or real docs.
+_JUNK_BASENAMES = {".DS_Store", "Thumbs.db", "desktop.ini", ".AppleDouble"}
+
+
+def is_junk_path(path: str) -> bool:
+    """True for OS/editor junk (``.DS_Store``, ``Thumbs.db``, …) by basename — local cruft
+    that is never an OpenFDE product change, even if a commit swept it in."""
+    base = str(path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return base in _JUNK_BASENAMES
+
+
+# External demo subjects (other repos we record demos on) and demo-SEQUENCE language. A
+# concept naming these is demo PLANNING, not an OpenFDE product concept.
+_DEMO_TARGET_WORDS = ("nanogpt", "tailwind")
+_DEMO_PLAN_MARKERS = (
+    "live demo", "action demo", "action demos", "live run", "demo flow", "demo script",
+    "walkthrough demo", "demo walkthrough", "self walkthrough", "feature walkthrough",
+    "explanatory demo", "demo sequence", "two-minute", "two minute", "2-minute",
+)
+
+
+def is_demo_plan_concept(text: str) -> bool:
+    """True when a phrase is demo PLANNING — an external demo target (NanoGPT, Tailwind) or
+    demo-sequence/recording language (live demo, action demo, live run, walkthrough demo,
+    self walkthrough, …). Such phrases stay in raw episode detail, never in Story concepts.
+
+    Conservative on purpose: the phrase must name a demo target or a demo-sequence marker.
+    The bare word "demo" does NOT qualify, so product copy ("Echo demo provider", "no-key
+    demo") and real features survive."""
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+    if any(w in low for w in _DEMO_TARGET_WORDS):
+        return True
+    if any(m in low for m in _DEMO_PLAN_MARKERS):
+        return True
+    return bool(re.search(r"\bdemo\s*(?:[0-9]|one|two|three)\b", low))
+
+
+def is_demo_prompt(text: str) -> bool:
+    """True when a PROMPT is about preparing/sequencing a demo (not implementing product).
+    Used only to decide whether to title an episode by its code change instead of its words —
+    never to hide a real commit. Needs a demo/walkthrough mention AND demo-prep context."""
+    low = (text or "").lower()
+    if not low.strip() or not any(h in low for h in ("demo", "walkthru", "walkthrough")):
+        return False
+    ctx = ("prep", "script", "two-minute", "2min", "2 min", "walkthr", "live", "record",
+           "nanogpt", "tailwind", "explain", "narrative", "presentation", "slide",
+           "demo 1", "demo 2", "demo 3", "demo1", "demo2", "demo3")
+    return any(c in low for c in ctx)
+
+
+def _clean_commit_subject(subject: str) -> str:
+    """Drop a conventional-commit prefix (``openfde:`` / ``feat:`` / …) for use as a title."""
+    s = (subject or "").strip()
+    return re.sub(r"^(?:openfde|feat|fix|chore|docs|refactor|style|perf|test)\s*:\s*",
+                  "", s, flags=re.I).strip()
+
+
+def _dominant_component(files) -> str:
+    """The most specific UI component/module name from changed paths — ``components/<Name>/``
+    or a ``<Name>.(jsx|tsx|ts|js)`` basename — skipping generic shells (App/index/main)."""
+    generic = {"app", "index", "main", "styles", "style", "globals"}
+    for f in (files or []):
+        f = str(f or "")
+        m = re.search(r"/components/([^/]+)/", f) or re.search(r"/([A-Za-z0-9]+)\.[jt]sx?$", f)
+        if m and m.group(1).lower() not in generic:
+            return m.group(1)
+    return ""
+
+
+def product_title_from_change(files, commit_subject: str = ""):
+    """A product ``(title, summary)`` derived from the CODE CHANGE — for an episode whose
+    prompt is demo-ish but whose files/commit are a real OpenFDE change. Prefers a clean,
+    non-demo commit subject; otherwise names the dominant component + change kind from the
+    files. Returns ``None`` when there is no real source file to name (so callers keep the
+    existing title)."""
+    real = [f for f in (files or [])
+            if f and not is_junk_path(f) and not str(f).lower().endswith(".md")]
+    if not real:
+        return None
+    subj = _clean_commit_subject(commit_subject)
+    if subj and not is_demo_plan_concept(subj) and not is_demo_prompt(subj):
+        return _cap_title(subj), f"Changed {', '.join(real[:4])}."
+    comp = _dominant_component(real)
+    if not comp:
+        return None                 # can't name the change specifically — keep the existing title
+    kind = "layout" if any(str(f).lower().endswith((".css", ".scss")) for f in real) else "update"
+    return _cap_title(f"{comp} {kind}"), f"Updated {comp} ({', '.join(real[:4])})."
+
+
 def _cap_title(t: str, n: int = 46) -> str:
     t = (t or "").strip().rstrip(".,;:—–-")
     if len(t) > n:

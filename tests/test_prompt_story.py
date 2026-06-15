@@ -571,6 +571,22 @@ class NarrativeGraphTest(unittest.TestCase):
         self.assertEqual(nv["spineEpisodeIds"], ["e1", "e2"])
 
 
+class DemoPlanConceptFilterTest(unittest.TestCase):
+    def test_demo_plan_phrases_never_become_concepts_or_chips(self):
+        # Even if persisted facts still carry demo planning, the graph filter drops it:
+        # a real active concept survives, the external-demo deferred/abandoned do not.
+        g = build_prompt_graph([{
+            "episodeId": "e1", "tag": "P1", "sequence": 1, "signal": "product",
+            "prompt": "story readability", "title": "Story Layout", "commitShas": ["s1"],
+            "storyFacts": {"concepts": ["Story Layout"],
+                           "deferred": ["NanoGPT action demo", "Tailwind action demo"],
+                           "abandoned": ["live run in this demo"], "operational": False},
+        }])
+        titles = " ".join(c["title"].lower() for c in g["concepts"])
+        self.assertIn("story layout", titles)
+        for bad in ("nanogpt", "tailwind", "live run"):
+            self.assertNotIn(bad, titles)
+
 
 if __name__ == "__main__":
     unittest.main()

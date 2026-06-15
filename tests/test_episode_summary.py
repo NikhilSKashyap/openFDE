@@ -333,5 +333,41 @@ class PersistenceMetaTest(unittest.TestCase):
         self.assertEqual(again[0]["sequence"], 1)
 
 
+class StoryNoiseHelpersTest(unittest.TestCase):
+    def test_junk_paths(self):
+        self.assertTrue(es.is_junk_path(".DS_Store"))
+        self.assertTrue(es.is_junk_path("frontend/.DS_Store"))
+        self.assertFalse(es.is_junk_path("README.md"))
+        self.assertFalse(es.is_junk_path("openfde/server.py"))
+
+    def test_demo_plan_concepts_flagged(self):
+        for s in ("NanoGPT live demo", "Tailwind action demo", "live run in this demo",
+                  "separate action demos", "OpenFDE self walkthrough", "explanatory demo flow",
+                  "demo 2", "feature walkthrough"):
+            self.assertTrue(es.is_demo_plan_concept(s), s)
+
+    def test_real_concepts_survive_demo_filter(self):
+        # bare "demo" and real OpenFDE features must NOT be mistaken for demo planning.
+        for s in ("Plugin Registry", "Echo demo provider", "no-key demo", "verification gate",
+                  "Story Layout", "dotted and solid scope", "failure lens"):
+            self.assertFalse(es.is_demo_plan_concept(s), s)
+
+    def test_demo_prompt_detection(self):
+        self.assertTrue(es.is_demo_prompt("let's prep for demo 1 - walkthru of openFDE"))
+        self.assertTrue(es.is_demo_prompt("demo2 is nanogpt, demo3 is tailwind, give a walkthru"))
+        self.assertFalse(es.is_demo_prompt("update the README install section"))
+        self.assertFalse(es.is_demo_prompt("add a demo provider called Echo"))   # product, not demo-prep
+
+    def test_product_title_from_change(self):
+        t, _s = es.product_title_from_change(
+            ["frontend/src/App.css", "frontend/src/components/Story/Story.jsx"],
+            "openfde: update walkthrough demo narrative and styling")
+        self.assertIn("Story", t)                          # named by the component, not the demo prompt
+        # a clean, non-demo commit subject is preferred verbatim
+        t2, _ = es.product_title_from_change(["openfde/verify.py"], "openfde: tighten the verify gate")
+        self.assertIn("verify gate", t2.lower())
+        self.assertIsNone(es.product_title_from_change(["DEMO1.md"], ""))   # no real source to name
+
+
 if __name__ == "__main__":
     unittest.main()

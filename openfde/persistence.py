@@ -797,17 +797,23 @@ class Persistence:
         return eps
 
     def flag_nonimplementation_episodes(self, root, episodes: list = None) -> list:
-        """Stamp ``nonImplementation`` on episodes that are meta *by effect* — they landed
-        no commits AND every file they touched is gitignored (demo scripts, ROADMAP/FLOW,
-        ``.openfde/**``). These are real prompts that changed nothing in the codebase, so
-        :func:`prompt_story.is_operational_episode` keeps them off the Story spine while the
-        Events layer still has them. The verdict is persisted, so it is stable and the pure
-        Story builders just read the flag (no git in derivation).
+        """Reclassify episodes that are meta *by effect* so they leave the product Story
+        (concepts + spine + narrative) while the Events layer keeps them. An episode is meta
+        when it touched files and EITHER:
 
-        Cheap + idempotent: only **uncommitted** episodes with files need a ``git
-        check-ignore`` (committed work is implementation by definition; an episode with no
-        files yet is undecided), so the git call covers a small in-flight set and runs once
-        per batch. Content-operational episodes are left untouched (already hidden).
+          • it landed **no commits** AND every file is gitignored (a demo script, ROADMAP/
+            FLOW, ``.openfde/**``) — a real prompt that changed nothing in the codebase, OR
+          • every file is **OS/editor junk** (``.DS_Store`` …) — local cruft, even committed.
+
+        A meta verdict stamps ``nonImplementation=True`` AND ``signal="operational"`` and
+        empties ``storyFacts.concepts`` (so stale concepts don't linger);
+        :func:`prompt_story.is_operational_episode` then hides it everywhere. The verdict is
+        persisted and reversible: if a flagged episode later gains a real commit / tracked
+        file, it flips back to ``product``.
+
+        Cheap + idempotent: only episodes whose meta-ness depends on git (uncommitted, with
+        files, not *content*-operational) need one batched ``git check-ignore``. Genuine
+        content-operational chatter (operational but not flagged by us) is left untouched.
 
         Args:
             root: Path — repository root (``.openfde`` lives directly under it).
@@ -815,9 +821,10 @@ class Persistence:
                 change); when None, load from disk.
 
         Returns:
-            list[dict] — the episodes, with ``nonImplementation`` set where decidable.
+            list[dict] — the episodes, reclassified where decidable.
         """
         from openfde.git_timeline import ignored_paths
+        from openfde.episode_summary import is_junk_path
         eps = episodes if episodes is not None else self.load_episodes()
         if not eps:
             return eps
@@ -825,24 +832,93 @@ class Persistence:
         def _committed(e: dict) -> bool:
             return bool(e.get("commitShas") or e.get("commits"))
 
-        # Uncommitted episodes that touched files are the only ones whose meta-ness depends
-        # on git; everything else is decided without a subprocess.
-        probe = [e for e in eps if e.get("signal") != "operational"
-                 and e.get("files") and not _committed(e)]
+        def _content_operational(e: dict) -> bool:
+            # operational by CONTENT (chatter) — not a verdict we stamped; leave it alone.
+            return e.get("signal") == "operational" and not e.get("nonImplementation")
+
+        # Only uncommitted, file-touching, non-content-operational episodes need git (this
+        # includes episodes we previously flagged, so a still-ignored docs episode stays meta).
+        probe = [e for e in eps if e.get("files") and not _committed(e)
+                 and not _content_operational(e)]
         ignored = ignored_paths(root, sorted({f for e in probe for f in (e.get("files") or [])}))
 
         changed = False
         for e in eps:
-            if e.get("signal") == "operational":
-                continue                                   # meta by content — already hidden
+            if _content_operational(e):
+                continue
             files = e.get("files") or []
-            if _committed(e) or not files:
-                verdict = False                            # committed code, or nothing touched
+            if files and all(is_junk_path(f) for f in files):
+                verdict = True                              # OS junk only — meta even if committed
+            elif not files or _committed(e):
+                verdict = False                             # nothing touched, or committed real code
             else:
-                verdict = all(f in ignored for f in files)  # all gitignored → meta by effect
-            if bool(e.get("nonImplementation")) != verdict:
-                e["nonImplementation"] = verdict
+                verdict = all(f in ignored for f in files)  # all gitignored, no commit → meta
+            if verdict and not (e.get("nonImplementation") and e.get("signal") == "operational"):
+                e["nonImplementation"] = True
+                e["signal"] = "operational"
+                sf = e.get("storyFacts")
+                if isinstance(sf, dict):
+                    sf["operational"] = True
+                    sf["concepts"] = []
                 changed = True
+            elif not verdict and e.get("nonImplementation"):
+                e["nonImplementation"] = False              # gained a real commit / tracked file
+                e["signal"] = "product"
+                changed = True
+        if changed:
+            self._write_json(self.episodes_path, eps)
+        return eps
+
+    def clean_story_facts(self, episodes: list = None) -> list:
+        """Keep demo-PLANNING out of product Story concepts, and title real product episodes
+        by their change. For each **non-operational** episode:
+
+          • move demo-plan phrases (NanoGPT/Tailwind, live demo, action demo, walkthrough
+            demo, …) out of ``storyFacts.concepts/deferred/abandoned/next/watch`` into
+            ``storyFacts.demoPlan`` — they stay in raw detail, never as Story concept chips;
+          • when the prompt is demo-ish but the files/commit are a real OpenFDE change and the
+            title still reads demo-ish, retitle from the change (e.g. ``OpenFDE Walkthrough
+            Demo`` → ``Story Layout``), so the spine reads as the product work it actually is.
+
+        Pure (no git); persists if anything changed. Operational episodes are skipped — their
+        raw facts are left intact in the Events layer.
+        """
+        from openfde.episode_summary import (is_demo_plan_concept, is_demo_prompt,
+                                              product_title_from_change)
+        eps = episodes if episodes is not None else self.load_episodes()
+        if not eps:
+            return eps
+        changed = False
+        for e in eps:
+            if e.get("signal") == "operational":
+                continue
+            sf = e.get("storyFacts")
+            if isinstance(sf, dict):
+                moved = []
+                for lane in ("concepts", "deferred", "abandoned", "next", "watch"):
+                    vals = sf.get(lane)
+                    if isinstance(vals, list) and any(is_demo_plan_concept(v) for v in vals):
+                        sf[lane] = [v for v in vals if not is_demo_plan_concept(v)]
+                        moved += [v for v in vals if is_demo_plan_concept(v)]
+                        changed = True
+                if moved:
+                    sf["demoPlan"] = list(dict.fromkeys((sf.get("demoPlan") or []) + moved))
+            # Retitle: demo-ish prompt + real product change + a demo-PLANNING title → name the
+            # change. The title gate is narrow (is_demo_plan_concept / is_demo_prompt) so product
+            # features that merely contain "demo" — "JS/TS Demo Readiness", "Demo Cockpit" — keep
+            # their names; only "OpenFDE Walkthrough Demo"-style planning titles are replaced.
+            title = e.get("title") or ""
+            title_is_demo = is_demo_plan_concept(title) or is_demo_prompt(title)
+            if (is_demo_prompt(e.get("prompt") or "") and title_is_demo
+                    and (e.get("commitShas") or e.get("commits") or e.get("files"))):
+                subj = next((c.get("subject") or c.get("summary") or ""
+                             for c in (e.get("commits") or []) if c.get("subject") or c.get("summary")), "")
+                res = product_title_from_change(e.get("files"), subj)
+                if res:
+                    e["title"], e["summary"] = res
+                    if isinstance(sf, dict) and not sf.get("concepts"):
+                        sf["concepts"] = [e["title"]]   # the product concept follows the title
+                    changed = True
         if changed:
             self._write_json(self.episodes_path, eps)
         return eps
