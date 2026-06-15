@@ -86,6 +86,7 @@ export default function WhiteboardCanvas({
   runNodeStates = null, runEdgeStates = null,
   watchBoxIds = null,
   watchConnected = false,          // backend/WS reachable → show the Live pill, even before activity
+  hydrating = false,               // first-paint canvas still loading → show a skeleton, not the blank CTA
   // Live follow (Step 40): center the camera on the file an agent is editing.
   liveFollow = true, onToggleLiveFollow = null,
   // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
@@ -1252,7 +1253,16 @@ export default function WhiteboardCanvas({
         </div>
       )}
 
-      {isEmpty && (
+      {/* While first-paint hydration is in flight, NEVER show the blank "Scan repo" manual CTA —
+          a warm cache may be about to restore the modules. Show a calm skeleton instead. */}
+      {isEmpty && hydrating && (
+        <div className="wb-empty-cta">
+          <span className="wb-restoring" style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            Restoring canvas…
+          </span>
+        </div>
+      )}
+      {isEmpty && !hydrating && (
         <div className="wb-empty-cta">
           <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
             {repoName

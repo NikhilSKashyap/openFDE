@@ -1074,14 +1074,19 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         st = await loop.run_in_executor(None, lambda: git_status(path))     # git = I/O, thread is fine
         sig = boot_cache_mod.dirty_signature(st)
         if not force and _arch_mem["sig"] == sig and _arch_mem["graph"] is not None:
-            return _arch_mem["graph"]
-        if not force:                                   # cold process: adopt a matching disk snapshot
+            return _arch_mem["graph"]                       # exact cache hit
+        if not force:
+            # Prefer ANY cached arch — even a STALE one — over re-analyzing. analyze_repo can take
+            # tens of seconds on a large repo (observed: 57s), and it must NEVER run under the user
+            # during first paint / browsing. A slightly stale architecture is fine: reassimilation on
+            # file edits and an explicit rescan (?refresh=1 / "Scan repo") keep it fresh.
+            if _arch_mem["graph"] is not None:
+                return _arch_mem["graph"]                   # in-memory snapshot (possibly stale)
             warm = boot_cache_mod.read_warm(persistence.openfde_dir)
-            if warm and warm.get("arch") and not boot_cache_mod.is_stale(
-                    warm["meta"], head=st.get("head", ""), dirty_sig=sig):
+            if warm and warm.get("arch"):
                 _arch_mem.update(sig=sig, graph=warm["arch"])
                 logger.info("archgraph: served from disk snapshot (no scan)")
-                return warm["arch"]
+                return warm["arch"]                         # disk snapshot (possibly stale)
         # Coalesce concurrent misses for the same signature into ONE scan — at startup the gated
         # /api/archgraph and the deferred background warm would otherwise each run analyze_repo and
         # double the GIL pressure while the cockpit is trying to paint.
@@ -4388,13 +4393,17 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # this — it just refreshes once the fresh scan lands.
     async def _warm_arch():
         try:
-            # First paint (cached boxes + Explorer from /api/boot/canvas) must win the GIL before
-            # this ~seconds-long analyze_repo starts — otherwise it starves the very call that paints
-            # the cockpit. The gated /api/archgraph then drives (and coalesces with) the real scan.
-            await asyncio.sleep(3)
+            await asyncio.sleep(3)                          # let first paint settle before any work
+            # Only pay the (possibly minute-long) full scan on a COLD start — no warm arch on disk.
+            # If a snapshot exists we keep serving it (stale is fine); a 57s analyze_repo must never
+            # run under the user. Reassimilation + an explicit rescan keep the arch current.
+            warm = boot_cache_mod.read_warm(persistence.openfde_dir)
+            if warm and warm.get("arch"):
+                logger.info("arch warm: snapshot present — skipping startup scan")
+                return
             t0 = time.perf_counter()
             await _archgraph_async()
-            logger.info("background arch warm done in %dms", int((time.perf_counter() - t0) * 1000))
+            logger.info("background arch warm (cold) done in %dms", int((time.perf_counter() - t0) * 1000))
             await manager.broadcast({"type": "state_updated", "payload": {"reason": "arch_warm"}})
         except Exception:  # noqa: BLE001 — best-effort warm-up, never fatal
             logger.debug("background arch warm failed", exc_info=True)

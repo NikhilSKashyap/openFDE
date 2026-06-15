@@ -12,7 +12,7 @@ import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
 import FunctionPatch, { TrailEditor } from './components/Whiteboard/FunctionPatch'
 import { pickPrimaryFn } from './lib/flowResolve'
-import { watchTargetId } from './lib/watchTarget'
+import { watchActivityTargets } from './lib/watchTarget'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
@@ -100,6 +100,9 @@ export default function App() {
   const [canvasState, _rawCanvasDispatch] = useCanvasState()
   // Live mirror of boxes so WS handlers (stable closures) can map file→module.
   const boxesRef = useRef(canvasState.boxes)
+  // Live mirror of the ArchGraph so the file_activity WS handler can tell whether it's loaded
+  // (a module can only EXPAND to show files/functions once the arch is present).
+  const archGraphRef = useRef(null)
   const [tasks, pmDispatch] = usePMState()
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [panelMode, setPanelMode] = useState('Agent')
@@ -734,6 +737,7 @@ export default function App() {
   // ── Live activity glow (adaptive) ─────────────────────────────────────────
   // Keep boxesRef synced so the WS handlers can map a file path → its module.
   useEffect(() => { boxesRef.current = canvasState.boxes }, [canvasState.boxes])
+  useEffect(() => { archGraphRef.current = archGraph }, [archGraph])
 
   const fileNodeId = (p) => `box:file:${p}`
   function moduleBoxForFile(path) {
@@ -741,25 +745,9 @@ export default function App() {
   }
 
   // ── Watch Any Agent (Step 38): ambient glow when ANY editor (Cursor, Claude
-  // Code, terminal, human) touches a repo file — no council run. Maps the file to
-  // its module box (exact link, else basename); if it maps to nothing on the
-  // canvas there's no glow (Watch presupposes Land). Entries fade after ~2.6s.
-  function resolveWatchBox(path) {
-    const boxes = boxesRef.current || []
-    // 1) exact linkedFiles match, then 2) linkedPath DIR-PREFIX — module boxes cap linkedFiles
-    //    (~25), so a deep file like openfde/watch_function.py only maps to its module via linkedPath;
-    //    then 3) basename. Without (2) the watch glow silently no-ops on most files.
-    let b = boxes.find(bx => (bx.linkedFiles || []).includes(path))
-    if (!b) b = boxes.find(bx => {
-      const lp = bx.linkedPath
-      return lp && (path === lp || path.startsWith(lp + '/'))
-    })
-    if (!b) {
-      const base = path.split('/').pop()
-      b = boxes.find(bx => (bx.linkedFiles || []).some(f => f.split('/').pop() === base))
-    }
-    return b || null
-  }
+  // Code, terminal, human) touches a repo file — no council run. The file→module/file/function
+  // mapping lives in watchActivityTargets (lib/watchTarget, unit-tested); a file that maps to no
+  // module on the canvas gets no glow (Watch presupposes Land). Entries fade after ~2.6s.
   function handleFileActivity({ file, functionId, function: fnName }) {
     if (!file) return
     // Re-assimilation collects EVERY changed path — including brand-new files that
@@ -767,23 +755,30 @@ export default function App() {
     // on-canvas check below (which gates only the ambient glow).
     pendingReassimRef.current.add(file)
     scheduleReassimilation()
-    const box = resolveWatchBox(file)
-    if (!box) return  // not on the canvas — glow presupposes Land (re-assim still runs)
+    // ONE source of truth for the file→canvas plan (module id, file id, what to expand, what to
+    // pulse) — shared with watchTarget's tests so the live path can't silently drift.
+    const targets = watchActivityTargets(file, fnName, boxesRef.current)
+    if (!targets) return  // not on the canvas — glow presupposes Land (re-assim still runs)
+    // A module can only EXPAND to show its files/functions once the ArchGraph is loaded. If it
+    // isn't yet (the gated startup load may still be in flight or have been starved), fetch it NOW
+    // so the edit actually expands the module instead of leaving a ring on a collapsed box.
+    if (!archGraphRef.current) {
+      getArchgraph().then(g => { if (g && Array.isArray(g.files)) setArchGraph(g) })
+    }
     // Expand the module AND the file box. Track what WE expanded so settle can auto-collapse;
-    // anything the user already had open isn't in our set and stays expanded. The file box must
-    // be expanded for the function ring to have geometry when the backend infers the function.
-    const fileId = fileNodeId(file)
+    // anything the user already had open isn't in our set and stays expanded.
     setExpandedIds(prev => {
       const next = new Set(prev)
       let changed = false
-      for (const id of [box.id, fileId]) {
+      for (const id of targets.expandIds) {
         if (!next.has(id)) { next.add(id); watchAutoExpandedRef.current.add(id); changed = true }
       }
       return changed ? next : prev
     })
-    // Pulse the MOST SPECIFIC known target: the inferred function (box:function:<path>:<name>),
-    // else the file (box:file:<path>). computeRunRings rolls it up to whatever is visible.
-    const key = functionId || watchTargetId(file, fnName)
+    // Pulse the MOST SPECIFIC known target: an explicit functionId, else the inferred function
+    // (box:function:<path>:<name>), else the file (box:file:<path>). computeRunRings rolls it up to
+    // whatever node is currently visible.
+    const key = functionId || targets.watchKey
     setWatchActivity(prev => ({ ...prev, [key]: Date.now() }))
     setWatchTiers(prev => (prev[key] === 'active' ? prev : { ...prev, [key]: 'active' }))
   }
@@ -2099,6 +2094,7 @@ export default function App() {
               runEdgeStates={run?.edgeStates}
               watchBoxIds={watchTiers}
               watchConnected={backendAvailable}
+              hydrating={!canvasHydrated}
               liveFollow={liveFollow}
               onToggleLiveFollow={() => setLiveFollow(v => !v)}
               spotlight={canvasSpotlight}

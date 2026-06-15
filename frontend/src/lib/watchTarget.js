@@ -36,3 +36,23 @@ export const moduleBoxIdForFile = (file, boxes) => {
   const byBase = list.find(b => (b.linkedFiles || []).some(f => f.split('/').pop() === base))
   return byBase ? byBase.id : null
 }
+
+/**
+ * The full file_activity → canvas plan for a changed file, in ONE place (so the live handler and
+ * its test agree). Given the changed `file`, an optional inferred function name, and the persisted
+ * boxes, returns what to expand and what to pulse — or null when the file maps to no module on the
+ * canvas (no Land → no glow). Generic: no repo/file/function names hardcoded.
+ *
+ *   { moduleId, fileId, expandIds:[module, file], watchKey }
+ *
+ * expandIds drives setExpandedIds (module must open to lay out files; file must open to lay out
+ * functions). watchKey is the MOST SPECIFIC pulse target: the function node when a name is known,
+ * else the file node (computeRunRings rolls it up to whatever is visible).
+ */
+export const watchActivityTargets = (file, functionName, boxes) => {
+  if (!file) return null
+  const moduleId = moduleBoxIdForFile(file, boxes)
+  if (!moduleId) return null
+  const fileId = fileNodeId(file)
+  return { moduleId, fileId, expandIds: [moduleId, fileId], watchKey: watchTargetId(file, functionName) }
+}

@@ -1,7 +1,7 @@
 // Standalone assertions for the Watch-glow target helpers — run with:
 //   node src/lib/watchTarget.test.mjs
 import assert from 'node:assert'
-import { fileNodeId, functionNodeId, watchTargetId, moduleBoxIdForFile } from './watchTarget.js'
+import { fileNodeId, functionNodeId, watchTargetId, moduleBoxIdForFile, watchActivityTargets } from './watchTarget.js'
 
 const boxes = [
   { id: 'box:module:api', linkedFiles: ['frontend/src/api/backend.js'] },
@@ -35,5 +35,28 @@ assert.equal(watchTargetId('openfde/server.py', 'start'),
 assert.equal(watchTargetId('openfde/server.py', null), 'box:file:openfde/server.py')
 assert.equal(watchTargetId('openfde/server.py', ''), 'box:file:openfde/server.py')
 assert.equal(watchTargetId('openfde/server.py', undefined), 'box:file:openfde/server.py')
+
+// ── watchActivityTargets: the full file_activity → expand + pulse plan ────────────────────────
+// A real module box whose linkedFiles is capped (does NOT list the deep file) — mirrors the live
+// state.json where box:module:openfde lists ~25 files but owns hundreds via linkedPath.
+const repoBoxes = [{ id: 'box:module:openfde', linkedPath: 'openfde', linkedFiles: ['openfde/__init__.py'] }]
+const F = 'openfde/watch_function.py'
+
+// (a) file activity expands the owning module AND the file node.
+const withFn = watchActivityTargets(F, 'changed_line_numbers', repoBoxes)
+assert.equal(withFn.moduleId, 'box:module:openfde')
+assert.deepEqual(withFn.expandIds, ['box:module:openfde', 'box:file:openfde/watch_function.py'])
+
+// (b) the inferred function name WINS over the file fallback for the pulse target.
+assert.equal(withFn.watchKey, 'box:function:openfde/watch_function.py:changed_line_numbers')
+
+// (c) fallback: when the function can't be resolved, the pulse target is the FILE node.
+const noFn = watchActivityTargets(F, null, repoBoxes)
+assert.deepEqual(noFn.expandIds, ['box:module:openfde', 'box:file:openfde/watch_function.py'])
+assert.equal(noFn.watchKey, 'box:file:openfde/watch_function.py')
+
+// (d) a file that maps to no module on the canvas → null (no Land → no glow).
+assert.equal(watchActivityTargets('vendor/zzz/unrelated.ts', 'f', repoBoxes), null)
+assert.equal(watchActivityTargets('', 'f', repoBoxes), null)
 
 console.log('watchTarget.test.mjs: all assertions passed')

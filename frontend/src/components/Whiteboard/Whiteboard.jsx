@@ -34,6 +34,7 @@ export default function Whiteboard({
   runEdgeStates,
   watchBoxIds = null,
   watchConnected = false,
+  hydrating = false,
   liveFollow = true,
   onToggleLiveFollow,
   spotlight = null,
@@ -157,6 +158,7 @@ export default function Whiteboard({
           runEdgeStates={runEdgeStates}
           watchBoxIds={watchBoxIds}
           watchConnected={watchConnected}
+          hydrating={hydrating}
           liveFollow={liveFollow}
           onToggleLiveFollow={onToggleLiveFollow}
           spotlight={spotlight}
