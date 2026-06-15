@@ -85,6 +85,7 @@ from openfde.story import build_story
 from openfde.prompt_story import build_prompt_graph
 from openfde import failure_flow as failure_flow_mod
 from openfde import feedback as feedback_mod
+from openfde import plugins as plugins_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
 from openfde.episode_summary import commit_display, is_bad_title, reconcile_task_status, repair_episode_tasks
@@ -1326,6 +1327,19 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             web.Response — JSON {name, description, entries}
         """
         return web.json_response(persistence.load_project())
+
+    async def get_plugins(request: web.Request) -> web.Response:
+        """Built-in capability providers + their activation for the watched repo
+        (Plugin Registry v1-A). Metadata/probe only — no manifest loading, no
+        install, no external code loaded; built-ins (Python, JS/TS) are surfaced
+        through the same shape a future external plugin will use.
+
+        Returns:
+            web.Response — {ok, kinds, plugins:[{id, kind, displayName, status,
+            activatesOn, provides, active}]}.
+        """
+        return web.json_response({"ok": True, "kinds": list(plugins_mod.PLUGIN_KINDS),
+                                  "plugins": plugins_mod.list_plugins(path)})
 
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.
@@ -4251,6 +4265,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get("/ws",                          ws_handler)
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
     app.router.add_get( "/api/session",               get_session)
+    app.router.add_get( "/api/plugins",               get_plugins)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)

@@ -8,7 +8,7 @@ Python is Pack #1; the door is open for JS/TS, Go, Rust to follow.
 from .base import FailureLocation, LanguagePack, VerifyCheckSpec
 from .js_ts_pack import JsTsPack
 from .python_pack import PythonPack
-from .registry import get_language_packs, get_pack_for_file
+from .registry import all_language_packs, get_language_packs, get_pack_for_file
 
 __all__ = [
     "FailureLocation",
@@ -18,4 +18,5 @@ __all__ = [
     "JsTsPack",
     "get_language_packs",
     "get_pack_for_file",
+    "all_language_packs",
 ]

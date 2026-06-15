@@ -24,6 +24,13 @@ def get_language_packs(root) -> list:
     return [p for p in _ALL_PACKS if p.detects(root)]
 
 
+def all_language_packs() -> list:
+    """Every built-in LanguagePack regardless of repo — for the plugin registry's
+    metadata listing (``openfde.plugins``). ``get_language_packs(root)`` filters these
+    by detection; this surfaces them as providers with their activation probed."""
+    return list(_ALL_PACKS)
+
+
 def get_pack_for_file(path):
     """The pack that owns ``path`` by extension, or ``None`` (no pack for that
     language yet)."""
