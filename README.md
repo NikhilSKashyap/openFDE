@@ -27,7 +27,7 @@ commits, receipts, and a place in the replayable **Story**. Codex can handle
 thinking roles, Claude Code can handle coding, and OpenFDE keeps the work
 visible, scoped, reviewed, and understandable.
 
-## The orange box theory
+## The cockpit and orange box theory
 
 Agentic coding is a black box today. Prompts vanish into terminal scrollback,
 agents commit without context, and the *why* disappears when the session closes.
@@ -35,10 +35,16 @@ The code remains; the reasoning does not. Six months later, or six minutes
 later when several agents are building in parallel, nobody can say what was
 tried, what was dropped, or why the surviving path won.
 
-The theory is simple: when agents do more of the building, the missing artifact
-is no longer just the code. It is the record of how the code came to be. Whoever
-has that record has the best chance of understanding the system later. So the
-record needs a recorder, built with the same instincts as a flight recorder:
+The theory is simple: coding agents are the engines, your imagination is the
+wings, and OpenFDE is the cockpit and the orange box. While the work is
+happening, it gives you instruments: scope, live file glow, diffs, tasks,
+checks, and shipping gates. After the work lands, it gives you the recorder:
+the prompt, the files, the commits, the receipts, and the story.
+
+When agents do more of the building, the missing artifact is no longer just the
+code. It is the record of how the code came to be. Whoever has that record has
+the best chance of understanding the system later. So the record needs a
+recorder, built with the same instincts as a flight recorder:
 
 1. **Always on.** It watches passively: any agent, any editor, no wrapper, no
    ceremony. A record you have to remember to keep is a record you will not have.
