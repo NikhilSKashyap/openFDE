@@ -341,6 +341,35 @@ def _suggested_specs() -> list:
     )]
 
 
+# ── v1-D install SCAFFOLDING (allowlist + confirmation shape only — a strict NO-OP) ──────
+# Known OpenFDE optional packs an install could target later. Install itself is NOT wired: nothing
+# is downloaded, installed, or executed here. This is the allowlist + confirmation payload so a
+# future v1-D slots in, and so a UI "Install" affordance has an HONEST response. NO arbitrary
+# package names / paths / commands — an id outside this set is refused.
+_INSTALLABLE_IDS = frozenset({"webxr"})
+
+
+def install_plan(plugin_id: str) -> dict:
+    """The confirmation payload for a (future) plugin install — ALLOWLIST-GATED and a strict no-op.
+
+    v1-D scaffolding: it neither downloads, installs, nor executes anything; it only reports whether
+    ``plugin_id`` is a known/allowlisted OpenFDE pack and what installing it WOULD add. An unknown id
+    is refused (``installable: False``) — no arbitrary package names, paths, or commands. ``installed``
+    is always False until a real install path is explicitly wired and tested.
+    """
+    pid = str(plugin_id or "").strip()
+    if pid not in _INSTALLABLE_IDS:
+        return {"ok": False, "id": pid, "installable": False, "installed": False,
+                "reason": "unknown plugin id — install is allowlisted to known OpenFDE packs"}
+    meta = next((s for s in _suggested_specs() if s.id == pid), None)
+    return {
+        "ok": True, "id": pid, "installable": True, "installed": False,
+        "displayName": meta.displayName if meta else pid,
+        "provides": list(meta.provides) if meta else [],
+        "reason": "install is not wired yet (v1-D scaffolding) — nothing was downloaded or executed",
+    }
+
+
 _LOCAL_PLUGIN_DIR = ".openfde/plugins"
 _LOCAL_PLUGIN_MAX = 50
 _LOCAL_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,80}$")

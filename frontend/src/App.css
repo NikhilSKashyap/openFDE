@@ -2861,6 +2861,12 @@
 .plugin-state.on  { color: var(--solid); font-weight: 600; }
 .plugin-state.det { color: var(--accent-orange, var(--accent)); }
 .plugin-state.off { opacity: 0.6; }
+/* v1-D install scaffolding — guarded/disabled affordance (no wired install path yet). */
+.plugin-install {
+  font-size: 10px; padding: 2px 9px; border-radius: 10px; margin-left: 6px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
+  cursor: not-allowed; opacity: 0.55;
+}
 .plugin-activates { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
 .plugin-activates-lbl { text-transform: uppercase; letter-spacing: 0.04em; font-size: 9px; opacity: 0.8; }
 .plugin-provides { display: flex; flex-wrap: wrap; gap: 5px; }

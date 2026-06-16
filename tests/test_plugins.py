@@ -348,5 +348,32 @@ class WebxrSummaryTest(unittest.TestCase):
         self.assertTrue(s["warnings"])                  # the boundary line is always present
 
 
+class InstallScaffoldingTest(unittest.TestCase):
+    """v1-D scaffolding: install is ALLOWLIST-GATED and a strict no-op — a confirmation shape only,
+    never a download/install/exec. A known pack reports installable (but not installed); an unknown
+    or foreign id is refused."""
+
+    def test_allowlisted_pack_reports_installable_but_not_installed(self):
+        plan = plugins.install_plan("webxr")
+        self.assertTrue(plan["ok"] and plan["installable"])
+        self.assertFalse(plan["installed"])             # nothing is ever installed in v1-D
+        self.assertTrue(plan["provides"])               # describes what it WOULD add
+        self.assertIn("not wired", plan["reason"].lower())
+
+    def test_unknown_id_is_refused(self):
+        for bad in ("totally-made-up", "../etc/passwd", "openfde-malware", ""):
+            plan = plugins.install_plan(bad)
+            self.assertFalse(plan["ok"])
+            self.assertFalse(plan["installable"])
+            self.assertFalse(plan["installed"])
+
+    def test_install_is_pure_metadata_no_side_effects(self):
+        # Calling it many times changes nothing and never installs — it is a confirmation payload.
+        before = plugins.install_plan("webxr")
+        for _ in range(5):
+            self.assertEqual(plugins.install_plan("webxr"), before)
+        self.assertFalse(before["installed"])
+
+
 if __name__ == "__main__":
     unittest.main()

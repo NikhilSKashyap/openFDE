@@ -88,6 +88,14 @@ function PluginCard({ p }) {
         )}
         <span className={`plugin-status ${tone}`}>{p.status}</span>
         <span className={`plugin-state ${stateTone}`}>{stateLabel}</span>
+        {p.source === 'suggested' && (
+          // v1-D scaffolding: the affordance is visible but GUARDED/disabled — there is no wired,
+          // allowlisted install path yet, so nothing can be downloaded or run from here.
+          <button className="plugin-install" disabled
+                  title="Install isn't available yet — metadata only (v1-D scaffolding)">
+            Install
+          </button>
+        )}
       </div>
       {p.activatesOn && (
         <div className="plugin-activates">

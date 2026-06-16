@@ -1381,6 +1381,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         summary = await loop.run_in_executor(None, lambda: plugins_mod.webxr_summary(path))
         return web.json_response({"ok": True, **summary})
 
+    async def post_plugin_install(request: web.Request) -> web.Response:
+        """v1-D install SCAFFOLDING — allowlist-gated, a strict no-op. Returns a confirmation of what
+        installing a KNOWN OpenFDE pack WOULD add; it does NOT download, install, or execute anything,
+        and an unknown/foreign id is refused (``installable: False``). No network, no subprocess — a
+        real install path must be explicitly wired + tested before this does anything."""
+        return web.json_response(plugins_mod.install_plan(request.match_info.get("id", "")))
+
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.
 
@@ -4507,6 +4514,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/session",               get_session)
     app.router.add_get( "/api/plugins",               get_plugins)
     app.router.add_get( "/api/plugins/webxr/summary", get_webxr_summary)
+    app.router.add_post("/api/plugins/{id}/install",  post_plugin_install)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)
