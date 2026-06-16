@@ -274,11 +274,11 @@ export const postEvent = (evt) =>
 export const getProject = () => apiFetch('/api/project')
 
 /**
- * Fetch the plugin registry: built-in capability providers + their per-repo
- * activation, plus any deterministic suggestions (Plugin Registry v1-B Lite,
- * read-only — nothing is installed). Shape:
- *   { ok, kinds:[...], plugins:[{id, kind, displayName, status, activatesOn,
- *     provides:[...], active, detected}] }
+ * Fetch the plugin registry: built-in providers + per-repo activation, deterministic
+ * suggestions, and validated repo-local manifests (Plugin Registry v1-A → v1-F). The GET is
+ * read-only — enabling a pack (writing its local manifest) is a separate POST. Shape:
+ *   { ok, kinds:[...], plugins:[{id, kind, displayName, version, status, source,
+ *     activatesOn, provides:[...], capabilities:[...], active, detected}] }
  *
  * @returns {Promise<{ok: boolean, kinds: string[], plugins: Array}|null>}
  */

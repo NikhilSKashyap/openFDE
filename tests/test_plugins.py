@@ -345,7 +345,19 @@ class WebxrSummaryTest(unittest.TestCase):
         self.assertEqual(s["frameworks"], [])
         self.assertEqual(s["assets"], [])
         self.assertEqual(s["markers"], [])
+        self.assertEqual(s["fileBadges"], [])           # nothing to badge
         self.assertTrue(s["warnings"])                  # the boundary line is always present
+
+    def test_file_badges_are_a_canvas_annotation_hook(self):
+        # entrypoints + assets become a flat {path, kind, label} list the canvas can badge later.
+        s = self._summary({"src/xr.js": "navigator.xr.requestSession('immersive-vr')\n",
+                           "models/duck.glb": "GLB"})
+        by_path = {b["path"]: b for b in s["fileBadges"]}
+        self.assertEqual(by_path["models/duck.glb"]["kind"], "asset")
+        ep = next(b for p, b in by_path.items() if "src/xr.js" in p)
+        self.assertEqual(ep["kind"], "entrypoint")
+        for b in s["fileBadges"]:                        # each badge carries a human label
+            self.assertTrue(b["label"])
 
 
 class InstallScaffoldingTest(unittest.TestCase):

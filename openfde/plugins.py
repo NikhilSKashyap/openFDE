@@ -320,12 +320,18 @@ def webxr_summary(root) -> dict:
     warnings = ["Architecture hints only — no WebXR runtime or test lens is installed."]
     if truncated:
         warnings.append("Scan bounded — results may be partial on a large repo.")
+    # Canvas annotation HOOK: a flat {path, kind, label} list the frontend can match to canvas boxes
+    # to badge XR entrypoints + 3D assets later. Derived from the scan above — no extra walk, no
+    # canvas refactor, and NO runtime/test-lens claim (these are repo-relative file hints only).
+    file_badges = ([{"path": p, "kind": "entrypoint", "label": "XR entrypoint"} for p in entrypoints]
+                   + [{"path": p, "kind": "asset", "label": "3D asset"} for p in assets])
     return {
         "detected": bool(frameworks or assets or seen_markers),
         "entrypoints": entrypoints,
         "assets": assets,
         "frameworks": frameworks,
         "markers": sorted(seen_markers),
+        "fileBadges": file_badges,
         "warnings": warnings,
     }
 

@@ -105,14 +105,17 @@ export default function Plugins({ onClose }) {
   )
 }
 
-function PluginCard({ p, installing = false, onInstall = null }) {
+function PluginCard({ p, enabling = false, onEnable = null }) {
   const tone = STATUS_TONE[p.status] ?? 'muted'
   // Active means "providing capabilities for this repo now" (built-in + matched).
   // A suggested pack is `detected` but never active (nothing is loaded).
   const stateLabel = p.active ? '● active' : (p.detected ? 'detected' : 'inactive')
   const stateTone  = p.active ? 'on'       : (p.detected ? 'det'      : 'off')
-  // v1-F: enable only when allowlisted (onInstall present) AND the pack isn't enabled yet.
-  const canInstall = onInstall && (p.status === 'suggested' || p.status === 'missing')
+  // Enable only when allowlisted (onEnable present) AND the pack isn't enabled yet.
+  const canEnable = onEnable && (p.status === 'suggested' || p.status === 'missing')
+  // WebXR earns its place once it's enabled (a local manifest) OR its markers are detected —
+  // either way show the architecture-hints affordance; auto-open it once enabled.
+  const showWebxr = p.id === 'webxr' && (p.detected || p.source === 'local')
   return (
     <div className={`plugin-card${p.active ? ' is-active' : ''}`}>
       <div className="plugin-card-top">
@@ -123,12 +126,12 @@ function PluginCard({ p, installing = false, onInstall = null }) {
         )}
         <span className={`plugin-status ${tone}`}>{p.status}</span>
         <span className={`plugin-state ${stateTone}`}>{stateLabel}</span>
-        {canInstall && (
-          // Enables the pack by writing a LOCAL MANIFEST (a JSON file) — no download/import/exec.
-          <button className="plugin-install enabled" disabled={installing}
-                  onClick={() => onInstall(p.id)}
-                  title="Enable as a local manifest — writes a JSON file; no code is downloaded or run">
-            {installing ? 'Enabling…' : 'Install'}
+        {canEnable && (
+          // Enable = write a LOCAL MANIFEST (a JSON file) — no download, no import, no exec.
+          <button className="plugin-install enabled" disabled={enabling}
+                  onClick={() => onEnable(p.id)}
+                  title="Enable as a local manifest — writes .openfde/plugins/{id}.json; no code is downloaded or run">
+            {enabling ? 'Enabling…' : 'Enable'}
           </button>
         )}
       </div>
@@ -143,36 +146,42 @@ function PluginCard({ p, installing = false, onInstall = null }) {
           {p.provides.map(c => <span key={c} className="plugin-chip">{c}</span>)}
         </div>
       )}
-      {p.id === 'webxr' && p.detected && <WebxrDetails />}
+      {showWebxr && <WebxrDetails defaultOpen={p.source === 'local'} />}
     </div>
   )
 }
 
-// WebXR domain-pack details (v1-E): a compact, lazy-loaded affordance on the detected WebXR card.
+// WebXR domain-pack details: a compact affordance shown once WebXR is detected or enabled (local).
 // Architecture hints ONLY — frameworks / assets / entrypoints / markers — with the honest boundary
-// from the backend's `warnings` ("no test lens installed"). No install/run action.
-function WebxrDetails() {
-  const [open, setOpen]       = useState(false)
-  const [data, setData]       = useState(null)
-  const [loading, setLoading] = useState(false)
+// from the backend's `warnings` ("no WebXR runtime or test lens"). Read-only — no run/debug action;
+// the file paths (entrypoints + assets) are the hooks a future canvas pass can badge.
+function WebxrDetails({ defaultOpen = false }) {
+  const [open, setOpen]   = useState(defaultOpen)
+  const [data, setData]   = useState(null)
+  const [tried, setTried] = useState(false)
 
-  function toggle() {
-    const next = !open
-    setOpen(next)
-    if (next && !data && !loading) {
-      setLoading(true)
-      getWebxrSummary().then(r => { setLoading(false); if (r?.ok) setData(r) })
-    }
-  }
+  // Fetch the summary once — lazily on first open, or on mount when defaultOpen (enabled WebXR).
+  // setState only inside the async callback (never synchronously in the effect), so it can't
+  // trigger cascading renders.
+  useEffect(() => {
+    if (!open || tried) return undefined
+    let alive = true
+    getWebxrSummary().then(r => {
+      if (!alive) return
+      setTried(true)
+      if (r?.ok) setData(r)
+    })
+    return () => { alive = false }
+  }, [open, tried])
 
   return (
     <div className="plugin-webxr">
-      <button className="plugin-webxr-toggle" onClick={toggle} aria-expanded={open}>
+      <button className="plugin-webxr-toggle" onClick={() => setOpen(o => !o)} aria-expanded={open}>
         {open ? '▾' : '▸'} WebXR details
       </button>
       {open && (
         <div className="plugin-webxr-body">
-          {loading && <div className="plugin-webxr-loading">Scanning the repo…</div>}
+          {!data && !tried && <div className="plugin-webxr-loading">Scanning the repo…</div>}
           {data && (
             <>
               <WebxrRow label="Frameworks" items={data.frameworks} />
