@@ -123,6 +123,55 @@ class RailBootTest(unittest.TestCase):
         self.assertNotIn("worktree", rail)
         self.assertNotIn("dirty", rail)
 
+    def test_rail_boot_returns_latest_n_newest_first(self):
+        from openfde.server import build_rail_payload
+        eps = [_episode(s) for s in range(1, 16)]            # 15 episodes, stored ascending
+        d, p = self._persistence(eps)
+        with d:
+            boot = build_rail_payload(p, limit=10)
+        self.assertEqual(len(boot["episodes"]), 10)
+        self.assertEqual([c["sequence"] for c in boot["episodes"]], list(range(15, 5, -1)))  # 15..6
+        self.assertEqual(boot["totalCount"], 15)            # UI knows more chips are hydrating
+
+    def test_rail_boot_is_never_authoritative_empty_full_is(self):
+        from openfde.server import build_rail_payload
+        eps = [_episode(s) for s in range(1, 4)]
+        d, p = self._persistence(eps)
+        with d:
+            self.assertFalse(build_rail_payload(p, limit=10)["confirmed"])  # boot ≠ empty signal
+            self.assertTrue(build_rail_payload(p, limit=10)["cached"])
+            self.assertTrue(build_rail_payload(p)["confirmed"])             # full rail is authoritative
+        # A truly empty store: only the FULL rail confirms empty (the UI's gate for an empty rail).
+        d2, p2 = self._persistence([])
+        with d2:
+            self.assertFalse(build_rail_payload(p2, limit=10)["confirmed"])
+            full = build_rail_payload(p2)
+            self.assertTrue(full["confirmed"])
+            self.assertEqual(full["episodes"], [])
+
+    def test_rail_cache_round_trip_and_non_authoritative(self):
+        from openfde.server import build_rail_payload
+        eps = [_episode(s) for s in range(1, 13)]
+        d, p = self._persistence(eps)
+        with d:
+            od = p.openfde_dir
+            self.assertIsNone(sc.read_rail_cache(od))           # no cache yet
+            sc.write_rail_cache(od, build_rail_payload(p, limit=10))
+            self.assertTrue(sc.rail_cache_path(od).exists())
+            got = sc.read_rail_cache(od)
+            self.assertEqual(len(got["episodes"]), 10)          # latest 10 persisted
+            self.assertTrue(got["cached"])
+            self.assertFalse(got["confirmed"])                  # a cache read is never authoritative
+            # version-stale file → ignored, not mis-rendered as an empty rail
+            sc.rail_cache_path(od).write_text(json.dumps({"cacheVersion": "0", "episodes": []}))
+            self.assertIsNone(sc.read_rail_cache(od))
+
+    def test_empty_rail_boot_is_building_not_confirmed(self):
+        empty = sc.empty_rail_boot()
+        self.assertFalse(empty["confirmed"])                    # "no cache yet" ≠ "empty rail"
+        self.assertTrue(empty["building"])
+        self.assertEqual(empty["episodes"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

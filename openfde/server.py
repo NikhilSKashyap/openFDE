@@ -370,7 +370,25 @@ def build_boot_payload(path, persistence, started_at: str, version: str, *,
     }
 
 
-def build_rail_payload(persistence) -> dict:
+def _rail_chip(e: dict) -> dict:
+    """One TINY rail chip from a persisted episode — fixed-size, no full prompt/files/concepts."""
+    shas = e.get("commitShas") or []
+    cm = e.get("commitMeta") or {}
+    return {
+        "episodeId": e.get("episodeId"), "tag": e.get("tag"), "sequence": e.get("sequence"),
+        "title": e.get("title"), "status": e.get("status"), "kind": e.get("kind"),
+        "signal": e.get("signal"), "createdAt": e.get("createdAt"), "updatedAt": e.get("updatedAt"),
+        "fileCount": len(e.get("files") or []), "commitCount": len(shas), "commitShas": shas,
+        "commits": [{"sha": s, "shortSha": (s or "")[:7],
+                     "displayTitle": (cm.get(s) or {}).get("title") or (e.get("title") or "")}
+                    for s in shas],
+        # operational flag only (drives the OpenPM filter) — not the full concept list.
+        "storyFacts": {"operational": bool((e.get("storyFacts") or {}).get("operational"))},
+        "prReadiness": None,
+    }
+
+
+def build_rail_payload(persistence, *, limit=None) -> dict:
     """CHEAP prompt-rail payload — the default /api/review/episodes, safe to poll often.
 
     CONTRACT: TINY CHIP data only, from persisted state. Each episode contributes a small,
@@ -380,28 +398,31 @@ def build_rail_payload(persistence) -> dict:
     reconciliation, or readiness; the full detail (files, readiness, Outside bucket, concepts) loads
     on demand via /api/review/episodes/full. Top-level + dependency-light so a test can patch the
     git/reconcile/readiness seams to explode and prove the rail never touches them.
+
+    ``limit`` → **BOOT mode** (``?mode=boot&limit=10``): the latest ``limit`` chips only (episodes are
+    newest-first), so first paint renders ~10 chips instead of all ~115. Boot is **never** the
+    authoritative empty (``confirmed: False``); the full rail (``limit=None``) is, so the UI may show
+    an empty rail only after that. ``totalCount`` lets the UI know more chips are hydrating.
     """
     persistence.backfill_episode_meta()                    # tag/title/seq — deterministic, no git
-    chips = []
-    for e in persistence.load_episodes():
-        shas = e.get("commitShas") or []
-        cm = e.get("commitMeta") or {}
-        chips.append({
-            "episodeId": e.get("episodeId"), "tag": e.get("tag"), "sequence": e.get("sequence"),
-            "title": e.get("title"), "status": e.get("status"), "kind": e.get("kind"),
-            "signal": e.get("signal"), "createdAt": e.get("createdAt"), "updatedAt": e.get("updatedAt"),
-            "fileCount": len(e.get("files") or []), "commitCount": len(shas), "commitShas": shas,
-            "commits": [{"sha": s, "shortSha": (s or "")[:7],
-                         "displayTitle": (cm.get(s) or {}).get("title") or (e.get("title") or "")}
-                        for s in shas],
-            # operational flag only (drives the OpenPM filter) — not the full concept list.
-            "storyFacts": {"operational": bool((e.get("storyFacts") or {}).get("operational"))},
-            "prReadiness": None,
-        })
-    return {"ok": True, "episodes": chips,
-            "outside": {"episodeId": "outside", "kind": "manual", "status": "landed",
-                        "prompt": "Outside OpenFDE", "summary": "", "commits": [],
-                        "commitCount": 0, "files": [], "fileCount": 0}}
+    eps = persistence.load_episodes()                      # newest-first
+    total = len(eps)
+    boot = limit is not None
+    if boot:
+        # latest N by sequence, newest-first — sort explicitly so boot doesn't depend on store order
+        eps = sorted(eps, key=lambda e: e.get("sequence") or 0, reverse=True)[:max(0, int(limit))]
+    return {
+        "ok": True,
+        "episodes": [_rail_chip(e) for e in eps],
+        "confirmed": not boot,                             # full rail is authoritative; boot is not
+        "cached": boot,
+        "totalCount": total,
+        # Boot drops the Outside bucket (a full-rail / git concern); full rail still omits it here
+        # (it is hydrated by /api/review/episodes/full) but keeps the empty shape for back-compat.
+        "outside": {"episodeId": "outside", "kind": "manual", "status": "landed",
+                    "prompt": "Outside OpenFDE", "summary": "", "commits": [],
+                    "commitCount": 0, "files": [], "fileCount": 0},
+    }
 
 
 def build_boot_canvas(persistence) -> dict:
@@ -2004,9 +2025,30 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_review_episodes(request: web.Request) -> web.Response:
         """Default rail endpoint: CHEAP, cache-only (persisted episodes + their declared
         commits). Safe to poll often — no git, no reconciliation, no readiness. The full
-        enriched view is /api/review/episodes/full, loaded after first paint / on demand."""
+        enriched view is /api/review/episodes/full, loaded after first paint / on demand.
+
+        ``?mode=boot`` → BOOT: the latest ~10 chips for instant first paint, served as a TINY READ
+        of the persisted rail cache (~5 KB) on the dedicated boot pool — it NEVER parses the whole
+        store on the request path. Cold (no cache yet) → a non-authoritative empty + a background
+        build (default pool), so the read stays tiny and the cache is ready for the next tick.
+        ``?limit=N`` builds a fresh slice."""
         loop = asyncio.get_event_loop()
-        return web.json_response(await loop.run_in_executor(None, lambda: build_rail_payload(persistence)))
+        if request.query.get("mode") == "boot" and request.query.get("limit") is None:
+            cached = await loop.run_in_executor(
+                _boot_pool, lambda: story_cache_mod.read_rail_cache(persistence.openfde_dir))
+            if cached is None:
+                asyncio.create_task(_refresh_rail_cache())   # build it off the boot pool for next paint
+                return web.json_response(story_cache_mod.empty_rail_boot())
+            return web.json_response(cached)
+        limit = None
+        if request.query.get("limit") is not None:
+            try:
+                limit = max(1, min(int(request.query["limit"]), 200))
+            except (TypeError, ValueError):
+                pass
+        pool = _boot_pool if limit is not None else None
+        return web.json_response(
+            await loop.run_in_executor(pool, lambda: build_rail_payload(persistence, limit=limit)))
 
     async def get_review_episodes_full(request: web.Request) -> web.Response:
         """Full enriched view: git_timeline + reconciliation + per-commit files + PR readiness
@@ -2044,6 +2086,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             logger.warning("could not write story cache")
 
     _story_refresh = {"running": False, "again": False}   # coalesce a burst of lands → ≤1 extra rebuild
+    _full_graph_mem = {"graph": None}     # last built FULL graph (in-memory) — served without a rebuild
 
     async def _refresh_story_cache_and_broadcast() -> None:
         """Rebuild the Story graph off-loop, refresh the boot cache, and nudge open clients to
@@ -2062,6 +2105,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     loop = asyncio.get_event_loop()
                     graph = await loop.run_in_executor(None, _story_graph_full)
                     _cache_story(graph)
+                    _full_graph_mem["graph"] = graph     # serve future full requests from memory
                 await manager.broadcast({"type": "story_updated"})
                 if not _story_refresh["again"]:
                     break
@@ -2069,6 +2113,58 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             logger.debug("story cache refresh failed", exc_info=True)
         finally:
             _story_refresh["running"] = False
+
+    def _cache_rail_sync() -> None:
+        """Rebuild + persist the tiny rail boot cache (latest ~10 chips). Parses the store once,
+        off the request path — best-effort."""
+        try:
+            story_cache_mod.write_rail_cache(
+                persistence.openfde_dir, build_rail_payload(persistence, limit=10))
+        except OSError:
+            logger.warning("could not write rail cache")
+
+    _rail_refresh = {"running": False, "again": False, "mtime": 0.0}
+
+    async def _refresh_rail_cache() -> None:
+        """Rebuild the tiny rail boot cache off-loop — serialized + coalesced so a burst of captures
+        collapses to one trailing rebuild. The BUILD (parses the full store) runs on the DEFAULT
+        pool, NEVER on ``_boot_pool`` — that pool is reserved for tiny cache READS (story + rail
+        boot), so a rebuild can never queue behind / starve a first-paint read. Best-effort."""
+        if _rail_refresh["running"]:
+            _rail_refresh["again"] = True
+            return
+        _rail_refresh["running"] = True
+        try:
+            loop = asyncio.get_event_loop()
+            while True:
+                _rail_refresh["again"] = False
+                await loop.run_in_executor(None, _cache_rail_sync)   # heavy build off the boot pool
+                if not _rail_refresh["again"]:
+                    break
+        except Exception:  # noqa: BLE001 — cache refresh must never break capture / a land
+            logger.debug("rail cache refresh failed", exc_info=True)
+        finally:
+            _rail_refresh["running"] = False
+
+    async def _rail_cache_poller() -> None:
+        """Keep the rail boot cache RECENT through ALL mutation paths (capture, land, create): when
+        episodes.json changes, rebuild the tiny cache off-loop. Cheap — a stat each tick, a build only
+        on change — so the next first paint shows the latest ~10 without ever parsing the full store
+        on the request path. mtime-gated so an idle repo costs only a stat."""
+        while True:
+            try:
+                await asyncio.sleep(5)
+                try:
+                    mt = persistence.episodes_path.stat().st_mtime
+                except OSError:
+                    continue
+                if mt != _rail_refresh["mtime"]:
+                    _rail_refresh["mtime"] = mt
+                    await _refresh_rail_cache()
+            except asyncio.CancelledError:
+                break
+            except Exception:  # noqa: BLE001 — a poller tick must never crash the loop
+                logger.debug("rail cache poller tick failed", exc_info=True)
 
     async def get_story_boot(request: web.Request) -> web.Response:
         """CACHE-ONLY Story boot — the last-known-good recent Story (latest ~10 product episodes +
@@ -2082,22 +2178,28 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response(cached or story_cache_mod.empty_boot())
 
     async def get_prompt_story_graph(request: web.Request) -> web.Response:
-        """Prompt Story Graph — the FULL conceptual narrative built from prompt episodes, and the
-        **authoritative** Story source (/api/story/boot serves the cached recent slice for first
-        paint). Active concepts from episode titles, deferred/abandoned from strong signals, each
-        linked to its episodes/commits/files. Builds OFF the event loop, refreshes the boot cache,
-        and returns ``confirmed:true`` so the UI may show "No concepts yet" only on a truly empty
-        result.
+        """Prompt Story Graph — the FULL conceptual narrative, the **authoritative** Story source
+        (/api/story/boot serves the cached recent slice for first paint).
+
+        Served from the in-memory last-built graph (``confirmed:true``) so it NEVER rebuilds on a
+        request — the ~8s GIL-heavy build would otherwise run once per open tab and starve every
+        boot read. When no graph is built yet, this returns a NON-authoritative ``building`` result
+        (``confirmed:false`` → the UI keeps the boot cache, never "No concepts yet") and kicks the
+        coalesced background rebuild, which populates the memory + cache and broadcasts
+        ``story_updated`` so clients re-fetch the authoritative graph. So the heavy build happens
+        once per *change*, in the background, off the request/event-loop contention path.
 
         Returns:
             web.Response — {ok, confirmed, concepts[], episodes[], edges[], counts, storyMap,
             storyTimeline, storyNarrative}.
         """
-        async with _story_lock:
-            loop = asyncio.get_event_loop()
-            graph = await loop.run_in_executor(None, _story_graph_full)
-            _cache_story(graph)
-        return web.json_response({**graph, "confirmed": True})
+        if _full_graph_mem["graph"] is not None:
+            return web.json_response({**_full_graph_mem["graph"], "confirmed": True})
+        asyncio.create_task(_refresh_story_cache_and_broadcast())     # build off-request; broadcasts when ready
+        return web.json_response({"ok": True, "confirmed": False, "building": True,
+                                  "concepts": [], "episodes": [], "edges": [], "counts": {},
+                                  "lifecycleCounts": {}, "storyMap": {}, "storyTimeline": {},
+                                  "storyNarrative": {}})
 
 
     async def post_summarize_episodes(request: web.Request) -> web.Response:
@@ -2248,9 +2350,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         await manager.broadcast({"type": "event_appended", "event": ce})
         await manager.broadcast({"type": "episode_updated", "episode": ep})
         _write_warm_after_episode(ep)        # land = a trusted restore point → warm-cache it now
-        # A land changes the Story (new commits, lifecycle) — refresh the Story boot cache off-loop
-        # and broadcast story_updated so open clients re-hydrate without a manual refetch.
+        # A land changes the Story (new commits, lifecycle) — refresh the Story + rail boot caches
+        # off-loop and broadcast story_updated so open clients re-hydrate without a manual refetch.
         asyncio.create_task(_refresh_story_cache_and_broadcast())
+        asyncio.create_task(_refresh_rail_cache())
         # Explicit commit_created so any client can mirror the prompt→commit story
         # into OpenPM (a Done task under this prompt) without waiting on a poll.
         _dt, _ds = commit_display(ep.get("title"), ep.get("summary"), commit["summary"])
@@ -4576,6 +4679,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         except Exception:  # noqa: BLE001 — best-effort warm-up, never fatal
             logger.debug("background story warm failed", exc_info=True)
     warm_story_task = asyncio.create_task(_warm_story())
+    # Keep the tiny rail boot cache recent through capture/land/create, so first paint always reads
+    # ~5 KB instead of parsing the full store (which was clogging the boot pool + starving Story boot).
+    rail_cache_task = asyncio.create_task(_rail_cache_poller())
 
     # ── Watch Any Agent: glow the canvas live on ANY external edit (Cursor,
     # Claude Code, terminal, human) — suppressed while our own council run glows.
@@ -4641,7 +4747,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     finally:
         logger.info("Server stopping")
         for t in (watch_task, capture_task, summarizer_task, backfill_task, memory_task,
-                  warm_task, warm_story_task):
+                  warm_task, warm_story_task, rail_cache_task):
             t.cancel()
             try:
                 await t

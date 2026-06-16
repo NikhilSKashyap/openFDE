@@ -603,6 +603,13 @@ export const reassimilateReview = (files = [], reason = 'file_activity') =>
  * @returns {Promise<{ok, episodes:Array, outside:Object}|null>}
  */
 export const getReviewEpisodes = (opts = {}) => apiFetch('/api/review/episodes', opts)
+/**
+ * Rail BOOT — the latest ~10 prompt chips, newest-first, served on the dedicated boot pool so
+ * first paint renders ~10 chips instantly instead of all ~115. `confirmed:false` (boot is never
+ * the authoritative empty); the full cheap rail (getReviewEpisodes) carries `confirmed:true`.
+ */
+export const getRailBoot = (limit = 10) =>
+  apiFetch(`/api/review/episodes?mode=boot&limit=${limit}`, { _timeout: 9000 })
 /** Full enriched episodes (commits+files, PR readiness, Outside bucket). Heavy — fetch sparingly. */
 export const getReviewEpisodesFull = (opts = {}) => apiFetch('/api/review/episodes/full', { _timeout: 60_000, ...opts })
 

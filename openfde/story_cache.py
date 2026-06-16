@@ -24,10 +24,15 @@ from pathlib import Path
 # Bump when the boot payload SHAPE changes so a stale cache is ignored rather than mis-rendered.
 CACHE_VERSION = "1"
 _STORY = "story_graph.json"
+_RAIL = "rail_boot.json"
 
 
 def cache_path(openfde_dir) -> Path:
     return Path(openfde_dir) / "cache" / _STORY
+
+
+def rail_cache_path(openfde_dir) -> Path:
+    return Path(openfde_dir) / "cache" / _RAIL
 
 
 def recent_product_episodes(graph: dict, limit: int = 10) -> list:
@@ -125,3 +130,43 @@ def read_story_cache(openfde_dir) -> "dict | None":
     data["confirmed"] = False               # a cache read is never authoritative-empty
     data["building"] = False
     return data
+
+
+# ── Rail boot cache ─────────────────────────────────────────────────────────────
+# The rail boot (latest ~10 chips) is TINY (~5 KB), but building it parses the whole
+# episodes.json (~600 KB on a mature repo) — too heavy to do on every first-paint read,
+# where it clogs the shared boot pool and starves the Story boot. So persist the tiny
+# result and serve THAT: the boot read is ~5 KB, the parse is off the request path.
+
+def write_rail_cache(openfde_dir, rail_payload: dict) -> dict:
+    """Persist a built rail boot payload (latest ~10 chips). Stamps it cached + non-authoritative
+    (``confirmed: False``); best-effort caller. Returns the persisted payload."""
+    payload = {**(rail_payload or {}), "cacheVersion": CACHE_VERSION,
+               "cached": True, "confirmed": False}
+    _atomic_write(rail_cache_path(openfde_dir), payload)
+    return payload
+
+
+def read_rail_cache(openfde_dir) -> "dict | None":
+    """The cached rail boot payload, or None (no cache / unreadable / shape-stale). Re-stamps so a
+    cache read is never the authoritative empty (only the full rail confirms an empty rail)."""
+    try:
+        data = json.loads(rail_cache_path(openfde_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("cacheVersion") != CACHE_VERSION:
+        return None
+    data["ok"] = True
+    data["cached"] = True
+    data["confirmed"] = False
+    return data
+
+
+def empty_rail_boot() -> dict:
+    """No rail cache yet → a NON-authoritative empty (``building: True``): the UI keeps the rail
+    area quiet, never an empty rail. The full rail (/api/review/episodes) confirms an empty rail."""
+    return {"ok": True, "cached": False, "confirmed": False, "building": True,
+            "episodes": [], "totalCount": 0,
+            "outside": {"episodeId": "outside", "kind": "manual", "status": "landed",
+                        "prompt": "Outside OpenFDE", "summary": "", "commits": [],
+                        "commitCount": 0, "files": [], "fileCount": 0}}

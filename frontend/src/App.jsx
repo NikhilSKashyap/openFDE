@@ -54,6 +54,7 @@ import {
   getWorktreeImpact,
   reassimilateReview,
   getReviewEpisodes,
+  getRailBoot,
   getReviewEpisodesFull,
   landEpisode,
   askConcept,
@@ -656,6 +657,15 @@ export default function App() {
     }
     hydrateFirstPaint()
     getBoot().then(b => { if (!cancelled && b?.ok) setBoot(b) })  // tiny: restored-counts label
+    // Rail BOOT — the latest ~10 prompt chips immediately (NOT gated on canvasHydrated), so the
+    // prompt rail shows recent memory at first paint instead of waiting on the full cheap rail
+    // (all ~115) behind the post-paint idle callback. The full rail hydrates later and supersedes
+    // these; the guard never lets the boot-10 shrink an already-larger list (no backward jump).
+    getRailBoot().then(r => {
+      if (cancelled || !r?.ok) return
+      const eps = Array.isArray(r.episodes) ? r.episodes : []
+      if (eps.length) setEpisodes(prev => ((prev?.length || 0) > eps.length ? prev : eps))
+    })
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

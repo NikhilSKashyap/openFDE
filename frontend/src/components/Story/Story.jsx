@@ -65,9 +65,13 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
         if (!alive) return
         if (boot?.ok) setGraph(prev => prev ?? boot)
       }
-      const full = await getPromptGraph()        // authoritative; also refreshes the server cache
+      const full = await getPromptGraph()        // authoritative when confirmed; else a "building" stub
       if (!alive) return
-      if (full?.ok) { setGraph(full); setConfirmed(true) }
+      // Respect `confirmed`: only the authoritative graph replaces the boot cache + flips the empty
+      // gate. A `building` response (the server is rebuilding off-request) must NOT wipe the boot
+      // recent Story nor claim confirmed — we keep the boot and re-fetch on the story_updated nudge.
+      if (full?.ok && full.confirmed) { setGraph(full); setConfirmed(true) }
+      else if (full?.ok) setGraph(prev => prev ?? full)
     })()
     return () => { alive = false }
   }, [episodes.length, storyNonce])
