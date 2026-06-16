@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -464,6 +465,84 @@ def install_local(root, plugin_id: str) -> dict:
         "reason": f"enabled the local manifest at {_LOCAL_PLUGIN_DIR}/{pid}.json — "
                   "no external code was downloaded or executed",
     }
+
+
+# ── Curated INSTALL registry + plan (v1-I) ──────────────────────────────────────────────
+# A small, in-code allowlist of KNOWN packs and how OpenFDE would obtain each — the ONLY source of
+# installable ids + package specs. There is NO marketplace, NO search, and NO user-supplied package
+# name. v1-I is PLAN-ONLY: ``plugin_install_plan`` describes the proposed, approval-gated action as
+# STRUCTURED actions (argv lists / endpoints — never a shell string); it downloads/imports/runs NOTHING.
+#
+#   method "builtin-local" — the pack ships in core; "installing" it means ENABLE a local manifest
+#       (writes .openfde/plugins/{id}.json — a JSON file, no package, no code run). WebXR today.
+#   method "pip"           — a curated external package contributing entry points; the plan proposes a
+#       pinned argv (python -m pip install <spec>), approval-required, NEVER auto-run. (none yet)
+_CURATED_PLUGINS = {
+    "webxr": {
+        "id": "webxr",
+        "displayName": "WebXR / Immersive Web",
+        "kind": "domain_pack",
+        "method": "builtin-local",
+        "packageName": None,
+        "version": None,
+        "capabilities": ["domain_summary"],
+        "description": "WebXR architecture hints — entrypoints, assets, frameworks, markers. Built "
+                       "into OpenFDE today (demo / local-capable); enabling writes a local manifest, "
+                       "no package install.",
+        "status": "builtin-local",
+    },
+}
+
+
+def curated_plugins() -> list:
+    """The curated install registry (v1-I) as plain metadata dicts — the allowlist of KNOWN packs and
+    how each is obtained. Read-only; no marketplace, no search, no execution."""
+    return [dict(entry) for entry in _CURATED_PLUGINS.values()]
+
+
+def plugin_install_plan(plugin_id: str) -> dict:
+    """v1-I curated INSTALL plan for ``plugin_id`` — a PROPOSAL, never an execution.
+
+    Distinct from :func:`install_plan` (v1-D, the local-ENABLE verdict): this answers "how would
+    OpenFDE obtain this pack as a package?" purely from the curated allowlist. Returns ``ok``,
+    ``installable``, ``requiresApproval`` (always True), a human ``reason``, and STRUCTURED ``actions``
+    (argv lists / endpoints — NEVER shell strings, never a user-supplied package name). An id outside
+    the curated registry is refused. It downloads/imports/runs NOTHING; actual package install stays
+    approval-gated and deferred."""
+    pid = str(plugin_id or "").strip()
+    entry = _CURATED_PLUGINS.get(pid)
+    if entry is None:
+        return {"ok": False, "id": pid, "installable": False, "requiresApproval": True, "actions": [],
+                "reason": "unknown plugin id — install is limited to OpenFDE's curated registry "
+                          "(no marketplace, no arbitrary package names)"}
+    method = entry.get("method")
+    plan = {
+        "ok": True, "id": pid, "installable": True, "requiresApproval": True, "method": method,
+        "displayName": entry["displayName"], "kind": entry["kind"],
+        "capabilities": list(entry.get("capabilities") or []),
+        "description": entry.get("description", ""), "status": entry.get("status", ""),
+    }
+    if method == "builtin-local":
+        plan["actions"] = [{
+            "type": "enable-local",
+            "endpoint": f"POST /api/plugins/{pid}/install",
+            "writes": f"{_LOCAL_PLUGIN_DIR}/{pid}.json",
+        }]
+        plan["reason"] = (f"'{entry['displayName']}' is built into OpenFDE — enable it locally "
+                          f"(writes {_LOCAL_PLUGIN_DIR}/{pid}.json, a JSON file only; no package is "
+                          "downloaded or run)")
+    elif method == "pip" and entry.get("packageName"):
+        spec = entry["packageName"] + (entry.get("version") or "")
+        plan["actions"] = [{
+            "type": "pip-install",
+            "argv": [sys.executable, "-m", "pip", "install", spec],   # STRUCTURED argv — never shell=True
+        }]
+        plan["reason"] = (f"installs the curated package '{spec}' (approval required; a proposed argv "
+                          "only — OpenFDE never runs it automatically)")
+    else:
+        plan.update(installable=False, actions=[],
+                    reason="curated entry has no supported install method")
+    return plan
 
 
 _LOCAL_PLUGIN_DIR = ".openfde/plugins"

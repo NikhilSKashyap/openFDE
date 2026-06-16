@@ -835,5 +835,75 @@ class WebxrRuntimeMigrationTest(unittest.TestCase):
         self.assertIn("Three.js", summary["frameworks"])
 
 
+class CuratedInstallPlanTest(unittest.TestCase):
+    """v1-I: curated INSTALL planning — a proposal, never an execution. Known ids return a structured
+    plan (argv lists / endpoints, never shell strings); unknown ids are refused; planning runs nothing;
+    and the existing WebXR enable-local path is preserved."""
+
+    def test_known_id_returns_a_plan(self):
+        p = plugins.plugin_install_plan("webxr")
+        self.assertTrue(p["ok"] and p["installable"])
+        self.assertTrue(p["requiresApproval"])
+        self.assertEqual(p["method"], "builtin-local")
+        self.assertEqual(p["actions"][0]["type"], "enable-local")
+        self.assertIn("no package", p["reason"].lower())
+
+    def test_unknown_id_is_refused(self):
+        for bad in ("totally-made-up", "../etc/passwd", "openfde-malware", ""):
+            p = plugins.plugin_install_plan(bad)
+            self.assertFalse(p["ok"])
+            self.assertFalse(p["installable"])
+            self.assertEqual(p["actions"], [])
+            self.assertTrue(p["requiresApproval"])      # an unknown id is refused, still approval-gated
+
+    def test_curated_registry_lists_webxr_builtin_local(self):
+        by_id = {e["id"]: e for e in plugins.curated_plugins()}
+        self.assertIn("webxr", by_id)
+        self.assertEqual(by_id["webxr"]["method"], "builtin-local")  # honest: built-in / demo / local
+
+    def test_plan_actions_are_structured_never_shell_strings(self):
+        # the builtin-local action is a structured dict (an endpoint), not a shell command string
+        for action in plugins.plugin_install_plan("webxr")["actions"]:
+            self.assertIsInstance(action, dict)
+            self.assertNotIn("shell", action)
+            self.assertNotIn("cmd", action)
+        # a curated pip pack proposes a STRUCTURED argv LIST from the registry (never a shell string)
+        fake = {"id": "ext-pip", "displayName": "Ext Pip Pack", "kind": "domain_pack",
+                "method": "pip", "packageName": "openfde-ext-pip", "version": ">=1.0",
+                "capabilities": ["domain_summary"], "description": "x", "status": "external"}
+        with mock.patch.dict(plugins._CURATED_PLUGINS, {"ext-pip": fake}):
+            p = plugins.plugin_install_plan("ext-pip")
+            self.assertEqual(p["method"], "pip")
+            argv = p["actions"][0]["argv"]
+            self.assertIsInstance(argv, list)                        # argv list, NOT a shell string
+            self.assertEqual(argv[:4], [sys.executable, "-m", "pip", "install"])
+            self.assertEqual(argv[-1], "openfde-ext-pip>=1.0")       # pinned spec from the registry
+            self.assertTrue(p["requiresApproval"])
+
+    def test_planning_executes_nothing(self):
+        # Planning must NEVER touch subprocess — patch it to explode and confirm plans still return.
+        import subprocess
+        fake = {"id": "ext-pip", "displayName": "x", "kind": "domain_pack", "method": "pip",
+                "packageName": "openfde-ext-pip", "version": "", "capabilities": [],
+                "description": "", "status": "external"}
+
+        def boom(*a, **k):
+            raise AssertionError("planning must not execute a subprocess")
+
+        with mock.patch.object(subprocess, "run", boom), \
+             mock.patch.object(subprocess, "Popen", boom), \
+             mock.patch.dict(plugins._CURATED_PLUGINS, {"ext-pip": fake}):
+            self.assertTrue(plugins.plugin_install_plan("webxr")["ok"])
+            self.assertTrue(plugins.plugin_install_plan("ext-pip")["ok"])
+
+    def test_webxr_enable_local_still_works(self):
+        # v1-F preserved: enabling WebXR still writes a local manifest (a JSON file, no code run).
+        d, root = _repo({})
+        with d:
+            res = plugins.install_local(root, "webxr")
+            self.assertTrue(res["ok"] and res["installed"])
+            self.assertTrue((root / ".openfde" / "plugins" / "webxr.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

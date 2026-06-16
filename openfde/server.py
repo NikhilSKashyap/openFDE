@@ -1406,6 +1406,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             None, lambda: plugins_mod.install_local(path, request.match_info.get("id", "")))
         return web.json_response(result)
 
+    async def get_plugin_install_plan(request: web.Request) -> web.Response:
+        """v1-I: the CURATED install PLAN for a pack — a PROPOSAL, never an execution. Returns
+        {ok, id, installable, requiresApproval, method, actions[], reason, …} with STRUCTURED actions
+        (argv lists / endpoints, never a shell string), allowlisted to the curated registry (an unknown
+        id is refused). Downloads/installs NOTHING — actual package install stays approval-gated and
+        deferred. A cheap in-memory lookup, so it runs inline (no executor, no slowdown to listing)."""
+        return web.json_response(plugins_mod.plugin_install_plan(request.match_info.get("id", "")))
+
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.
 
@@ -4535,9 +4543,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get("/ws",                          ws_handler)
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
     app.router.add_get( "/api/session",               get_session)
-    app.router.add_get( "/api/plugins",               get_plugins)
-    app.router.add_get( "/api/plugins/webxr/summary", get_webxr_summary)
-    app.router.add_post("/api/plugins/{id}/install",  post_plugin_install)
+    app.router.add_get( "/api/plugins",                  get_plugins)
+    app.router.add_get( "/api/plugins/webxr/summary",    get_webxr_summary)
+    app.router.add_get( "/api/plugins/install-plan/{id}", get_plugin_install_plan)
+    app.router.add_post("/api/plugins/{id}/install",     post_plugin_install)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)
