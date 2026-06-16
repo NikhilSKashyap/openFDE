@@ -6,6 +6,11 @@ node_modules/
 dist/
 __pycache__/
 
+# Python build artifacts (wheel / sdist / editable-install metadata)
+build/
+*.egg-info/
+.eggs/
+
 # Keep local planning/context docs out of the public repo.
 *.md
 !README.md
