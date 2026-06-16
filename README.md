@@ -115,15 +115,19 @@ http://127.0.0.1:7420
 - **Raise an OpenFDE issue** from the top bar. Describe a bug, rough edge, or
   idea, and the Architect drafts it from your words plus light app context. Repo
   paths, tests, and code are scrubbed. You review the draft before anything posts.
-- **A capability registry you can see** (`⌘K → Plugins`). Built-in language packs
-  (Python, JS/TS), **suggested** domain packs, repo-local manifests
+- **A capability registry — and a real plugin runtime** (`⌘K → Plugins`). Built-in
+  language packs (Python, JS/TS), **suggested** domain packs, repo-local manifests
   (`.openfde/plugins/{id}.json` — a JSON file; **no code is downloaded or run**), and
   packs shipped **outside core** as pip-installed Python packages (entry points) all
-  appear through one contract. A pack's runtime loads **lazily** — only when a repo
-  matches and a capability is requested — so discovery stays cheap. The **WebXR pack**
-  tags XR **entrypoints** and **3D assets** on the canvas and Explorer tree and serves a
-  bounded architecture summary (hints only — no device or test lens). No marketplace
-  yet: OpenFDE never downloads or installs packs.
+  appear through one contract. Capabilities — `architecture`, `test_detector`,
+  `failure_parser`, `domain_summary` — are real runtime **hooks**: a pack's runtime loads
+  **lazily** (only when a repo matches and a capability is asked), and core **consumes
+  them by default** with a safe fallback. So JS/TS assimilation, test discovery, and
+  failure parsing run through the pack's trusted runtime — with optional **tree-sitter**
+  for precise JS/TS parsing, else the built-in regex. The **WebXR pack** tags XR
+  **entrypoints** and **3D assets** on the canvas + Explorer tree. Safety is fixed: a
+  repo-local manifest can **never** import code, and external packs are trusted only once
+  pip-installed. No marketplace yet — OpenFDE never downloads or installs packs.
 
 ## Fix a real issue, end to end
 
@@ -268,13 +272,13 @@ OpenFDE doesn't just run changes. It remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.5.9**, the architecture canvas, Watch,
+OpenFDE is early and moving fast. As of **0.5.10**, the architecture canvas, Watch,
 Review, and **failure lens** span **Python and JS/TS**. JS/TS support uses regex/AST
-assimilation, Vitest/Jest/Playwright failure parsing, and HTML/web-app entrypoint
-mapping for web and WebXR repos. A **capability registry** (`⌘K → Plugins`) shows
-built-in, suggested, repo-local, and external (entry-point) packs; a pack's runtime
-loads **lazily** — only when a repo matches and a capability is requested — and WebXR's
-architecture summary is the first to run through it. Repro-and-fix is still Python/pytest.
+assimilation (optional **tree-sitter** for precise parsing), Vitest/Jest/Playwright
+failure parsing, and HTML/web-app entrypoint mapping for web and WebXR repos. A
+**capability registry with a real plugin runtime** (`⌘K → Plugins`) lets built-in,
+repo-local, and pip-installed packs provide lazily-loaded capability hooks that core
+**consumes by default** (with a safe fallback). Repro-and-fix is still Python/pytest.
 
 The local-first council can run with **Codex local CLI for Architect/Verifier**
 and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
