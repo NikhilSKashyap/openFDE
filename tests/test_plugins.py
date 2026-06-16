@@ -4,11 +4,14 @@ The law: built-in capability providers are DESCRIBABLE as metadata, activation i
 probed from cheap repo markers (the language packs' own detection), and nothing
 heavy is imported or installed. The existing language-pack registry is untouched.
 """
+import importlib.metadata
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from openfde import plugins
 from openfde.language_packs import all_language_packs, get_language_packs
@@ -462,6 +465,147 @@ class InstallLocalTest(unittest.TestCase):
             for forbidden in ("import", "entryPoint", "entry_point", "command", "cmd",
                               "url", "package", "exec", "script", "module"):
                 self.assertNotIn(forbidden, data)
+
+
+class ExternalPluginDiscoveryTest(unittest.TestCase):
+    """v1-G: external plugins discovered via Python entry points. Discovery is metadata/probe
+    ONLY (``source='external'``), defensive (a bad plugin is logged + skipped, never crashes),
+    de-duped against built-ins / locals / suggestions, and never imports the pack's heavy
+    analyzer (activation/runtime loading stays lazy + deferred)."""
+
+    MODNAME = "_ofde_test_extpack"
+
+    def setUp(self):
+        # A real, lightweight provider module in sys.modules so EntryPoint.load() resolves it
+        # without disk. Importing it does NOT import the (separate) heavy analyzer module.
+        mod = types.ModuleType(self.MODNAME)
+        mod.good = lambda: {"id": "ext-xr", "kind": "domain_pack", "displayName": "External XR",
+                            "version": "9.9.9", "provides": ["xr-ext"],
+                            "detects": {"dependencies": ["three"]}}
+        mod.webxr_pkg = lambda: {"id": "webxr", "kind": "domain_pack",
+                                 "displayName": "WebXR (packaged)", "status": "available",
+                                 "provides": ["xr-entrypoints"]}
+        mod.two = lambda: [{"id": "ext-a", "kind": "integration"},
+                           {"id": "ext-b", "kind": "layout_engine"}]
+        def _boom():
+            raise RuntimeError("malformed external plugin")
+        mod.boom = _boom
+        mod.bad_kind = lambda: {"id": "ext-bad", "kind": "wizard", "status": "available"}
+        mod.empty = lambda: None
+        sys.modules[self.MODNAME] = mod
+
+    def tearDown(self):
+        sys.modules.pop(self.MODNAME, None)
+        sys.modules.pop(self.MODNAME + ".heavy", None)
+
+    def _ep(self, name, attr, group):
+        return importlib.metadata.EntryPoint(name, f"{self.MODNAME}:{attr}", group)
+
+    def _patch_eps(self, mapping):
+        """Patch importlib.metadata.entry_points to yield EntryPoints per group from
+        ``mapping`` = {group: [(ep_name, provider_attr), ...]}."""
+        def fake_entry_points(group=None):
+            return [self._ep(n, a, group) for (n, a) in mapping.get(group, [])]
+        return mock.patch("importlib.metadata.entry_points", fake_entry_points)
+
+    def test_external_plugin_is_discovered_via_entry_points(self):
+        with self._patch_eps({"openfde.domain_packs": [("xr", "good")]}):
+            by_id = {m["id"]: m for m in plugins.list_plugins()}
+        self.assertIn("ext-xr", by_id)
+        m = by_id["ext-xr"]
+        self.assertEqual(m["source"], "external")
+        self.assertEqual(m["kind"], "domain_pack")
+        self.assertEqual(m["version"], "9.9.9")
+        self.assertIn("xr-ext", m["provides"])
+        self.assertFalse(m["active"])             # discovered, never activated/loaded
+
+    def test_provider_may_return_several_manifests_across_groups(self):
+        with self._patch_eps({"openfde.plugins": [("multi", "two")]}):
+            by_id = {m["id"]: m for m in plugins.list_plugins()}
+        self.assertEqual(by_id["ext-a"]["source"], "external")
+        self.assertEqual(by_id["ext-b"]["kind"], "layout_engine")
+
+    def test_malformed_external_plugins_are_ignored_safely(self):
+        # load-fails / provider-raises / invalid-manifest / empty — none crash, none appear;
+        # a valid sibling still gets through, and each failure is reported as a diagnostic record.
+        mapping = {"openfde.domain_packs": [
+            ("boomer", "boom"),            # provider raises
+            ("bad", "bad_kind"),           # invalid kind
+            ("empty", "empty"),            # returns None
+            ("missing", "does_not_exist"), # attr missing → load() fails
+            ("good", "good"),              # a valid one still survives
+        ]}
+        diags = []
+        with self._patch_eps(mapping):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                specs = plugins._discover_external(diagnostics=diags)
+        self.assertEqual({s.id for s in specs}, {"ext-xr"})       # only the good one
+        self.assertEqual({d["name"] for d in diags}, {"boomer", "bad", "empty", "missing"})
+        # and the public listing never raises with bad plugins present
+        with self._patch_eps(mapping):
+            self.assertTrue(any(m["id"] == "ext-xr" for m in plugins.list_plugins()))
+
+    def test_builtin_local_external_merge_and_dedup(self):
+        # builtin (python/js_ts) + suggested webxr + external (webxr + ext-xr) + local webxr.
+        # Precedence: local webxr wins; external webxr & the suggestion drop; ext-xr stays.
+        manifest = {"id": "webxr", "kind": "domain_pack", "displayName": "WebXR (local)",
+                    "status": "available", "provides": ["xr-entrypoints"]}
+        d, root = _repo({".openfde/plugins/webxr.json": json.dumps(manifest)})
+        mapping = {"openfde.domain_packs": [("wx", "webxr_pkg"), ("xr", "good")]}
+        with d, self._patch_eps(mapping):
+            rows = plugins.list_plugins(root)
+        by_id = {}
+        for m in rows:
+            by_id.setdefault(m["id"], []).append(m)
+        self.assertEqual(len(by_id["webxr"]), 1)                 # exactly one WebXR row
+        self.assertEqual(by_id["webxr"][0]["source"], "local")   # local > external > suggested
+        self.assertEqual(by_id["ext-xr"][0]["source"], "external")
+        self.assertIn("python", by_id)                           # built-ins untouched
+        self.assertIn("js_ts", by_id)
+        ids = [m["id"] for m in rows]
+        self.assertEqual(len(ids), len(set(ids)), "no duplicate ids in the merged listing")
+
+    def test_external_supersedes_suggestion_when_no_local(self):
+        mapping = {"openfde.domain_packs": [("wx", "webxr_pkg")]}
+        d, root = _repo({"package.json": '{"dependencies":{"three":"^0.160.0"}}'})  # would suggest
+        with d, self._patch_eps(mapping):
+            rows = [m for m in plugins.list_plugins(root) if m["id"] == "webxr"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "external")          # external supersedes the suggestion
+
+    def test_external_cannot_shadow_a_builtin_id(self):
+        # An external declaring a core id (python) must NOT replace or duplicate the built-in.
+        plugins_mod_mod = sys.modules[self.MODNAME]
+        plugins_mod_mod.shadow = lambda: {"id": "python", "kind": "domain_pack",
+                                          "displayName": "evil", "status": "available"}
+        with self._patch_eps({"openfde.plugins": [("shadow", "shadow")]}):
+            rows = [m for m in plugins.list_plugins() if m["id"] == "python"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "builtin")
+
+    def test_discovery_does_not_import_the_heavy_analyzer(self):
+        # Discovery loads only the lightweight manifest provider; the pack's heavy analyzer
+        # (a separate module) must stay unimported until activation (which v1-G does not do).
+        heavy = self.MODNAME + ".heavy"
+        self.assertNotIn(heavy, sys.modules)
+        with self._patch_eps({"openfde.domain_packs": [("xr", "good")]}):
+            specs = plugins.external_specs()
+        self.assertTrue(any(s.id == "ext-xr" for s in specs))
+        self.assertNotIn(heavy, sys.modules)
+
+    def test_importing_plugins_and_discovery_stay_cheap(self):
+        # In a FRESH process: importing the registry must not pull in the heavy architect, and
+        # neither must external discovery (entry-point scanning reads metadata, imports no package).
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, openfde.plugins as p;"
+             "assert 'openfde.architect' not in sys.modules, 'import pulled architect';"
+             "p.external_specs();"
+             "print('openfde.architect' in sys.modules)"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.strip(), "False",
+                         f"external discovery pulled in architect:\n{out.stderr}")
 
 
 if __name__ == "__main__":

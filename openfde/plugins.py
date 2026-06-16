@@ -1,12 +1,12 @@
 """
-openfde/plugins.py — internal capability-provider registry (Plugin Registry v1-A/B/C).
+openfde/plugins.py — internal capability-provider registry (Plugin Registry v1-A/B/C/G).
 
 OpenFDE's capabilities — language packs, domain packs, verify adapters, agent
 providers, layout engines, integrations — should be DESCRIBABLE without importing
 their heavy code. This module is the manifest/probe layer: it lists every provider as
 lightweight METADATA and computes per-repo activation by probing cheap markers.
 
-Three sources, one ``PluginSpec`` contract (the ``source`` field):
+Four sources, one ``PluginSpec`` contract (the ``source`` field):
   • **builtin**   (v1-A) — the built-in language packs (Python, JS/TS), wired from the
     existing registry; their probe is each pack's own ``detects(root)``, so activation
     stays the single source of truth.
@@ -14,13 +14,18 @@ Three sources, one ``PluginSpec`` contract (the ``source`` field):
     when cheap repo markers match; never active, never loaded.
   • **local**     (v1-C) — read-only manifests from ``.openfde/plugins/*.json`` in the
     watched repo, so a provider can exist outside the hardcoded built-ins.
+  • **external**  (v1-G) — manifests contributed by INSTALLED packages via Python entry
+    points (``openfde.plugins`` / ``openfde.language_packs`` / ``openfde.domain_packs``),
+    so a language/domain pack can ship outside core. Discovery loads only the lightweight
+    manifest provider — never the heavy analyzer — and a bad external plugin is logged +
+    skipped, never crashing the listing.
 
 Honest boundary: **metadata + probe ONLY.** NO install/download, NO network, NO
-subprocess, NO external code loaded — a local manifest can only declare metadata + cheap
-marker probes (file / dependency / content), and a bad manifest is ignored with a
-warning, never crashing ``openfde watch``. Installing suggested packs (entry points /
-packages) is later (v1-D). The single contract means a local manifest slots in with no
-special case.
+subprocess. Discovery describes a provider; it does NOT activate or runtime-load it (that
+stays lazy + deferred), and an install/download MARKETPLACE is still deferred. A local OR
+external manifest can only declare metadata + cheap marker probes (file / dependency /
+content) — no import path, command, or download field is ever honored — so a manifest
+slots in through the exact same contract with no special case.
 """
 from __future__ import annotations
 
@@ -63,7 +68,7 @@ class PluginSpec:
     provides: tuple = ()
     status: str = "builtin"
     probe: object = field(default=None, repr=False)   # callable(root) -> bool | None
-    source: str = "builtin"            # builtin | suggested | local
+    source: str = "builtin"            # builtin | suggested | local | external
     version: str = ""                  # provider version ("" for built-ins)
     description: str = ""              # optional one-line description
     capabilities: tuple = ()           # optional richer capability list (alongside provides)
@@ -637,28 +642,27 @@ def _manifest_probe(detects: dict):
     return probe
 
 
-def _local_spec_from_manifest(path: Path):
-    """Read one repo-local manifest into a PluginSpec, or None when invalid.
+# Default "activatesOn" summary per manifest source (when the manifest omits one).
+_DEFAULT_ACTIVATES = {
+    "local": "declared in .openfde/plugins",
+    "external": "declared by an installed plugin package",
+}
 
-    A manifest can only DECLARE metadata + cheap markers: no import path, entry point, package
-    name, command, or download field is ever honored (v1-F enables a manifest by WRITING this same
-    JSON shape — still no code is imported or run). Strict validation; an invalid manifest is
-    ignored with a warning so a bad declaration never breaks ``openfde watch``.
-    """
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("local plugin manifest ignored (%s): %s", path.name, exc)
-        return None
+
+def _spec_from_manifest_dict(raw, *, source: str, id_fallback: str = ""):
+    """Normalize a manifest dict into a ``PluginSpec``, or ``None`` when invalid.
+
+    The ONE manifest contract, shared by repo-local JSON (``source='local'``) and external
+    entry-point providers (``source='external'``) so there is no special case. A manifest may
+    only DECLARE metadata + cheap markers: no import path, entry point, package name, command, or
+    download field is ever honored. Strict validation (id/kind/status); an invalid manifest
+    returns ``None`` and the CALLER logs (it knows the path / entry-point name)."""
     if not isinstance(raw, dict):
-        logger.warning("local plugin manifest ignored (%s): expected object", path.name)
         return None
-
-    pid = _as_short_text(raw.get("id") or path.stem)
+    pid = _as_short_text(raw.get("id") or id_fallback)
     kind = _as_short_text(raw.get("kind"))
     status = _as_short_text(raw.get("status") or "available")
     if not _LOCAL_ID_RE.match(pid) or kind not in PLUGIN_KINDS or status not in ("available", "disabled"):
-        logger.warning("local plugin manifest ignored (%s): invalid id/kind/status", path.name)
         return None
 
     detects = raw.get("detects") if isinstance(raw.get("detects"), dict) else {}
@@ -673,15 +677,33 @@ def _local_spec_from_manifest(path: Path):
         id=pid,
         kind=kind,
         displayName=_as_short_text(raw.get("displayName") or raw.get("name") or pid, pid),
-        activatesOn=_as_short_text(raw.get("activatesOn") or "declared in .openfde/plugins"),
+        activatesOn=_as_short_text(raw.get("activatesOn") or _DEFAULT_ACTIVATES.get(source, "")),
         provides=_as_string_tuple(raw.get("provides")),
         status=status,
-        source="local",
+        source=source,
         probe=probe,
         version=_as_short_text(raw.get("version")),
         description=_as_short_text(raw.get("description")),
         capabilities=_as_string_tuple(raw.get("capabilities")),
     )
+
+
+def _local_spec_from_manifest(path: Path):
+    """Read one repo-local manifest (``.openfde/plugins/*.json``) into a PluginSpec, or None when
+    invalid. Strict validation through the shared :func:`_spec_from_manifest_dict`; an invalid
+    manifest is ignored with a warning so a bad declaration never breaks ``openfde watch``."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("local plugin manifest ignored (%s): %s", path.name, exc)
+        return None
+    if not isinstance(raw, dict):
+        logger.warning("local plugin manifest ignored (%s): expected object", path.name)
+        return None
+    spec = _spec_from_manifest_dict(raw, source="local", id_fallback=path.stem)
+    if spec is None:
+        logger.warning("local plugin manifest ignored (%s): invalid id/kind/status", path.name)
+    return spec
 
 
 def local_specs(root=None) -> list:
@@ -706,21 +728,143 @@ def local_specs(root=None) -> list:
     return specs
 
 
+# ── External plugins via Python entry points (v1-G) ──────────────────────────────
+#
+# An installed package can contribute a pack OUTSIDE core by declaring an entry point in
+# one of these groups, pointing at a lightweight MANIFEST PROVIDER (a zero-arg callable
+# returning a manifest dict — or a list of dicts — or an object exposing ``manifest()`` /
+# ``to_manifest()``, or a manifest dict directly). DISCOVERY ONLY: OpenFDE loads the
+# provider and normalizes its manifest through the SAME ``_spec_from_manifest_dict`` contract
+# as a local manifest (``source='external'``). It does NOT activate or runtime-load the pack —
+# the heavy analyzer must live behind a separate import the provider does not pull in, so
+# discovery stays cheap. Install/download is still a separate, deferred concern.
+_ENTRY_POINT_GROUPS = ("openfde.plugins", "openfde.language_packs", "openfde.domain_packs")
+
+
+def _iter_entry_points(group: str) -> list:
+    """Entry points declared for ``group`` — robust across importlib.metadata versions and
+    never raising (discovery must not break the listing)."""
+    import importlib.metadata as importlib_metadata
+    try:
+        eps = importlib_metadata.entry_points(group=group)        # Python 3.10+
+    except TypeError:
+        try:
+            eps = importlib_metadata.entry_points().get(group, [])  # Python 3.9 dict API
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("entry-point discovery unavailable: %s", exc)
+            return []
+    except Exception as exc:  # noqa: BLE001 — a metadata read must never crash the listing
+        logger.warning("entry-point discovery failed for %s: %s", group, exc)
+        return []
+    return list(eps or [])
+
+
+def _coerce_manifests(loaded) -> list:
+    """Normalize a loaded entry-point target into a list of manifest dicts. Accepts a zero-arg
+    callable (called once), an object exposing ``manifest()`` / ``to_manifest()``, a manifest
+    dict, or a list/tuple of dicts. Anything else → ``[]``."""
+    obj = loaded() if callable(loaded) else loaded
+    fn = getattr(obj, "to_manifest", None) or getattr(obj, "manifest", None)
+    if callable(fn):
+        obj = fn()
+    if isinstance(obj, dict):
+        return [obj]
+    if isinstance(obj, (list, tuple)):
+        return [m for m in obj if isinstance(m, dict)]
+    return []
+
+
+def _note_external_problem(diagnostics, group, name, msg) -> None:
+    """A bad/malformed external plugin is LOGGED and skipped (never crashes discovery); when a
+    ``diagnostics`` list is supplied, a structured record is appended for callers/tests."""
+    logger.warning("external plugin ignored (%s:%s): %s", group, name, msg)
+    if diagnostics is not None:
+        diagnostics.append({"group": group, "name": name, "error": str(msg)})
+
+
+def _external_spec_from_entry_point(ep, group, diagnostics) -> list:
+    """Load one entry point's manifest provider and normalize it into PluginSpec(s). Every step is
+    guarded — a load failure, a throwing provider, a non-manifest return, or an invalid manifest is
+    reported and skipped, never raised."""
+    name = getattr(ep, "name", "?")
+    try:
+        loaded = ep.load()
+    except Exception as exc:  # noqa: BLE001 — a third-party import must not crash OpenFDE
+        _note_external_problem(diagnostics, group, name, f"load failed: {exc}")
+        return []
+    try:
+        manifests = _coerce_manifests(loaded)
+    except Exception as exc:  # noqa: BLE001 — a throwing provider must not crash OpenFDE
+        _note_external_problem(diagnostics, group, name, f"manifest provider failed: {exc}")
+        return []
+    if not manifests:
+        _note_external_problem(diagnostics, group, name, "no manifest returned")
+        return []
+    specs = []
+    for raw in manifests:
+        spec = _spec_from_manifest_dict(raw, source="external", id_fallback=name)
+        if spec is None:
+            _note_external_problem(diagnostics, group, name, "invalid manifest (id/kind/status/shape)")
+            continue
+        specs.append(spec)
+    return specs
+
+
+def _discover_external(diagnostics=None) -> list:
+    """Discover external plugins across the entry-point groups, de-duped by id (first wins). Pass a
+    list as ``diagnostics`` to also collect per-plugin failure records."""
+    specs, seen = [], set()
+    for group in _ENTRY_POINT_GROUPS:
+        for ep in _iter_entry_points(group):
+            for spec in _external_spec_from_entry_point(ep, group, diagnostics):
+                if spec.id in seen:
+                    continue                       # same id across groups/eps → first wins
+                seen.add(spec.id)
+                specs.append(spec)
+    return specs
+
+
+def external_specs() -> list:
+    """External plugins discovered via Python entry points (v1-G). DISCOVERY ONLY — lightweight
+    manifest/probe metadata with ``source='external'``; nothing is activated or runtime-loaded, and
+    a bad/malformed external plugin is logged + skipped, never crashing the listing."""
+    return _discover_external()
+
+
 def all_specs() -> list:
-    """Every provider the registry can describe: built-ins + deterministic
-    suggestions. Built-ins and suggestions share the one ``PluginSpec`` contract."""
-    return builtin_specs() + _suggested_specs()
+    """Every provider the registry can describe (repo-independent): built-ins, deterministic
+    suggestions, and external entry-point plugins (v1-G). All four sources share the one
+    ``PluginSpec`` contract, so built-ins, suggestions, and externals flow through with no
+    special case."""
+    return builtin_specs() + _suggested_specs() + external_specs()
 
 
 def list_plugins(root=None) -> list:
     """Plugin metadata + per-repo activation for ``root`` (the watched repo): built-in providers,
-    matched suggestions, and validated repo-local manifests. ``root`` None → metadata only (``active``
-    False everywhere; suggestions resolve to 'missing'; no local manifests).
+    matched suggestions, external entry-point plugins, and validated repo-local manifests. ``root``
+    None → metadata only (``active`` False everywhere; suggestions resolve to 'missing'; no local
+    manifests; externals still listed since they are repo-independent).
 
-    A local manifest **supersedes a same-id suggestion** — once a local ``webxr`` manifest exists it
-    replaces the suggested/missing ``webxr`` row, so there is exactly ONE WebXR provider (no
-    duplicates). Built-ins keep their own id space and are never superseded."""
+    Precedence — MOST SPECIFIC wins, so every id appears exactly once (no duplicates):
+      • built-ins keep their own id space and are never superseded;
+      • an **external** package never shadows a built-in id, and a repo-**local** manifest of the
+        same id takes precedence over an external package;
+      • a **suggestion** is superseded by a same-id local manifest OR external package — so e.g.
+        WebXR shows once, whether it's the suggestion, an enabled local manifest, or a packaged
+        external pack."""
+    builtins_ = builtin_specs()
+    suggested_ = _suggested_specs()
+    externals = external_specs()
     locals_ = local_specs(root)
+
+    builtin_ids = {s.id for s in builtins_}
     local_ids = {s.id for s in locals_}
-    kept = [s for s in all_specs() if not (s.source == "suggested" and s.id in local_ids)]
-    return [spec.manifest(root) for spec in kept + locals_]
+    # External never shadows a core built-in id; a same-id local manifest wins over an external.
+    externals = [s for s in externals if s.id not in builtin_ids and s.id not in local_ids]
+    external_ids = {s.id for s in externals}
+    # A suggestion drops out once a same-id local manifest OR external package exists.
+    superseded = local_ids | external_ids
+    suggested_ = [s for s in suggested_ if s.id not in superseded]
+
+    ordered = builtins_ + suggested_ + externals + locals_
+    return [spec.manifest(root) for spec in ordered]
