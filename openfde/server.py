@@ -1351,17 +1351,21 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response(persistence.load_project())
 
     async def get_plugins(request: web.Request) -> web.Response:
-        """Built-in capability providers + their activation for the watched repo
-        (Plugin Registry v1-A). Metadata/probe only — no manifest loading, no
-        install, no external code loaded; built-ins (Python, JS/TS) are surfaced
-        through the same shape a future external plugin will use.
+        """Capability providers + their activation for the watched repo (Plugin Registry
+        v1-A/B/C). Metadata/probe only — no install, no network, no external code loaded.
+        Three sources, one shape: built-ins (Python, JS/TS), deterministic suggestions
+        (WebXR), and read-only repo-local manifests from ``.openfde/plugins/*.json``.
 
         Returns:
-            web.Response — {ok, kinds, plugins:[{id, kind, displayName, status,
-            activatesOn, provides, active}]}.
+            web.Response — {ok, kinds, plugins:[{id, kind, displayName, status, source,
+            activatesOn, provides, active, detected}]}.
         """
+        # list_plugins runs bounded marker scans (suggestions + local manifests) — keep that
+        # file-walk OFF the event loop. On-demand (opened from the palette), never polled.
+        loop = asyncio.get_event_loop()
+        listed = await loop.run_in_executor(None, lambda: plugins_mod.list_plugins(path))
         return web.json_response({"ok": True, "kinds": list(plugins_mod.PLUGIN_KINDS),
-                                  "plugins": plugins_mod.list_plugins(path)})
+                                  "plugins": listed})
 
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.

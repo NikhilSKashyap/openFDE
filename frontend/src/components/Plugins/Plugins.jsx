@@ -3,14 +3,15 @@ import { getPlugins } from '../../api/backend'
 
 /**
  * Plugins — a read-only window onto OpenFDE's capability registry
- * (Plugin Registry v1-B Lite). It calls GET /api/plugins and shows each provider
- * as a card grouped by kind: displayName, kind, status, whether it's active for the
+ * (Plugin Registry v1-A/B/C). It calls GET /api/plugins and shows each provider as a
+ * card grouped by kind: displayName, kind, status, source, whether it's active for the
  * watched repo, the markers that activate it, and the capabilities it provides.
  *
  * Visibility only — there is no install/enable/load action here (and the backend
- * exposes none). Built-ins (Python, JS/TS) show as `builtin`; deterministic
- * domain-pack suggestions (e.g. WebXR) show as `suggested` when the repo's markers
- * match, else `missing`.
+ * exposes none). Three sources, one shape: built-ins (Python, JS/TS) show as `builtin`;
+ * deterministic suggestions (e.g. WebXR) show as `suggested` when the repo's markers
+ * match, else `missing`; and repo-local manifests (`.openfde/plugins/*.json`) carry a
+ * `local` tag and show as `available` or `disabled` — metadata only, nothing loaded.
  *
  * @param {object}   props
  * @param {Function} props.onClose
@@ -42,7 +43,7 @@ export default function Plugins({ onClose }) {
           <div>
             <div className="plugins-title">Plugins</div>
             <div className="plugins-sub">
-              Capability providers · activation reflects the watched repo
+              Capability providers · built-in, suggested &amp; repo-local · activation reflects the watched repo
             </div>
           </div>
           <button className="plugins-x" onClick={onClose} aria-label="Close">✕</button>
@@ -82,6 +83,9 @@ function PluginCard({ p }) {
     <div className={`plugin-card${p.active ? ' is-active' : ''}`}>
       <div className="plugin-card-top">
         <span className="plugin-name">{p.displayName}</span>
+        {p.source === 'local' && (
+          <span className="plugin-source" title="Declared in .openfde/plugins">local</span>
+        )}
         <span className={`plugin-status ${tone}`}>{p.status}</span>
         <span className={`plugin-state ${stateTone}`}>{stateLabel}</span>
       </div>

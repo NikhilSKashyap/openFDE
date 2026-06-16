@@ -2845,6 +2845,11 @@
 .plugin-card.is-active { border-color: color-mix(in srgb, var(--accent-orange, var(--accent)) 55%, transparent); }
 .plugin-card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plugin-name { font-weight: 600; color: var(--text); }
+/* `local` source tag — calm, compact: declared in .openfde/plugins (v1-C). */
+.plugin-source {
+  font-size: 9px; letter-spacing: 0.04em; padding: 1px 5px; border-radius: 10px;
+  color: var(--text-muted); border: 1px solid var(--border); opacity: 0.85;
+}
 .plugin-status {
   font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
   padding: 1px 6px; border-radius: 10px; background: var(--border); color: var(--text-muted);

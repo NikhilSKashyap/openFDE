@@ -4,6 +4,7 @@ The law: built-in capability providers are DESCRIBABLE as metadata, activation i
 probed from cheap repo markers (the language packs' own detection), and nothing
 heavy is imported or installed. The existing language-pack registry is untouched.
 """
+import json
 import sys
 import tempfile
 import unittest
@@ -167,6 +168,99 @@ class WebXrSuggestionTest(unittest.TestCase):
             for m in plugins.list_plugins(root):
                 self.assertIn("detected", m)
                 self.assertIsInstance(m["detected"], bool)
+
+
+class LocalManifestProvidersTest(unittest.TestCase):
+    """v1-C: repo-local manifests are read-only provider declarations. They prove
+    plugins can exist outside hardcoded built-ins without installing or executing code."""
+
+    def _manifest_repo(self, manifest: dict, extra=None, name="webxr-local.json"):
+        files = {f".openfde/plugins/{name}": json.dumps(manifest)}
+        files.update(extra or {})
+        return _repo(files)
+
+    def _by_id(self, root):
+        return {m["id"]: m for m in plugins.list_plugins(root)}
+
+    def test_local_manifest_is_listed_as_available_metadata(self):
+        manifest = {
+            "id": "webxr-local",
+            "kind": "domain_pack",
+            "displayName": "WebXR Local Lens",
+            "status": "available",
+            "activatesOn": "navigator.xr or Three.js",
+            "provides": ["xr-scene-tags", "asset-hints"],
+        }
+        d, root = self._manifest_repo(manifest)
+        with d:
+            p = self._by_id(root)["webxr-local"]
+            self.assertEqual(p["source"], "local")
+            self.assertEqual(p["status"], "available")
+            self.assertEqual(p["kind"], "domain_pack")
+            self.assertTrue(p["detected"])        # no detects block = declared for this repo
+            self.assertFalse(p["active"])         # v1-C is metadata only, no code loaded
+            self.assertIn("xr-scene-tags", p["provides"])
+
+    def test_local_manifest_marker_probe_can_detect_repo(self):
+        manifest = {
+            "id": "react-pack",
+            "kind": "domain_pack",
+            "displayName": "React",
+            "detects": {"dependencies": ["react"], "files": ["src/**/*.tsx"]},
+            "provides": ["react-components"],
+        }
+        d, root = self._manifest_repo(
+            manifest,
+            {"package.json": '{"dependencies":{"react":"latest"}}',
+             "src/App.tsx": "export function App(){ return <div/> }\n"})
+        with d:
+            p = self._by_id(root)["react-pack"]
+            self.assertTrue(p["detected"])
+            self.assertEqual(p["status"], "available")
+
+    def test_local_manifest_disabled_stays_disabled_and_inactive(self):
+        manifest = {"id": "semgrep-local", "kind": "verify_adapter",
+                    "status": "disabled", "provides": ["security-scan"]}
+        d, root = self._manifest_repo(manifest)
+        with d:
+            p = self._by_id(root)["semgrep-local"]
+            self.assertEqual(p["status"], "disabled")
+            self.assertFalse(p["active"])
+
+    def test_invalid_local_manifest_is_ignored(self):
+        manifest = {"id": "../bad", "kind": "domain_pack", "status": "available"}
+        d, root = self._manifest_repo(manifest)
+        with d:
+            self.assertNotIn("../bad", self._by_id(root))
+
+    def test_no_root_does_not_read_local_manifests(self):
+        self.assertNotIn("webxr-local", self._by_id(None))
+
+    def test_local_manifest_content_marker_detects_repo(self):
+        manifest = {"id": "xr-content", "kind": "domain_pack",
+                    "detects": {"content": ["navigator.xr", "XRFrame"]},
+                    "provides": ["xr-hints"]}
+        d, root = self._manifest_repo(manifest, {"main.js": "if (navigator.xr) start()\n"})
+        with d:
+            p = self._by_id(root)["xr-content"]
+            self.assertTrue(p["detected"])              # a content marker matched a repo file
+            self.assertEqual(p["status"], "available")
+
+    def test_unknown_kind_and_status_are_rejected(self):
+        for bad in ({"id": "x1", "kind": "wizard", "status": "available"},      # bad kind
+                    {"id": "x2", "kind": "domain_pack", "status": "enabled"}):   # bad status
+            d, root = self._manifest_repo(bad, name=f"{bad['id']}.json")
+            with d:
+                self.assertNotIn(bad["id"], self._by_id(root))
+
+    def test_source_tags_separate_local_from_builtin_and_suggested(self):
+        d, root = self._manifest_repo(
+            {"id": "intg-x", "kind": "integration", "status": "available"})
+        with d:
+            by = self._by_id(root)
+            self.assertEqual(by["intg-x"]["source"], "local")
+            self.assertEqual(by["python"]["source"], "builtin")
+            self.assertEqual(by["webxr"]["source"], "suggested")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+{
+  "id": "webxr-local",
+  "kind": "domain_pack",
+  "displayName": "WebXR / Immersive Web (local)",
+  "status": "available",
+  "activatesOn": "Three / @react-three/fiber deps, .glb/.gltf assets, or navigator.xr / requestSession / XRFrame in source",
+  "provides": ["xr-scene-tags", "asset-hints", "device-frame-lens"],
+  "detects": {
+    "dependencies": ["three", "@react-three/fiber", "@react-three/drei", "babylonjs", "aframe"],
+    "files": ["**/*.glb", "**/*.gltf"],
+    "content": ["navigator.xr", "requestSession", "XRFrame"]
+  }
+}

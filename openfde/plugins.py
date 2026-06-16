@@ -1,25 +1,34 @@
 """
-openfde/plugins.py — internal capability-provider registry (Plugin Registry v1-A).
+openfde/plugins.py — internal capability-provider registry (Plugin Registry v1-A/B/C).
 
 OpenFDE's capabilities — language packs, domain packs, verify adapters, agent
 providers, layout engines, integrations — should be DESCRIBABLE without importing
-their heavy code. This module is the manifest/probe layer: it lists every built-in
-provider as lightweight METADATA, and computes per-repo activation by probing cheap
-markers (a language pack's ``detects(root)``).
+their heavy code. This module is the manifest/probe layer: it lists every provider as
+lightweight METADATA and computes per-repo activation by probing cheap markers.
 
-Honest boundary (v1-A): **metadata + probe ONLY.** Built-ins only — nothing here
-changes pack behavior, the existing ``get_language_packs(root)`` is untouched and
-still owns activation. There is NO manifest loading from disk, NO install/download,
-and NO external code loaded from arbitrary paths. Those are later:
-  • **v1-B** — load local plugin manifests (still no install).
-  • **v1-C** — install suggested plugins (entry points / packages).
-The shape here is manifest/probe so an external plugin can slot into the same
-contract without a special case.
+Three sources, one ``PluginSpec`` contract (the ``source`` field):
+  • **builtin**   (v1-A) — the built-in language packs (Python, JS/TS), wired from the
+    existing registry; their probe is each pack's own ``detects(root)``, so activation
+    stays the single source of truth.
+  • **suggested** (v1-B Lite) — deterministic domain-pack SUGGESTIONS (WebXR) surfaced
+    when cheap repo markers match; never active, never loaded.
+  • **local**     (v1-C) — read-only manifests from ``.openfde/plugins/*.json`` in the
+    watched repo, so a provider can exist outside the hardcoded built-ins.
+
+Honest boundary: **metadata + probe ONLY.** NO install/download, NO network, NO
+subprocess, NO external code loaded — a local manifest can only declare metadata + cheap
+marker probes (file / dependency / content), and a bad manifest is ignored with a
+warning, never crashing ``openfde watch``. Installing suggested packs (entry points /
+packages) is later (v1-D). The single contract means a local manifest slots in with no
+special case.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+import re
 
 logger = logging.getLogger("openfde.plugins")
 
@@ -54,6 +63,7 @@ class PluginSpec:
     provides: tuple = ()
     status: str = "builtin"
     probe: object = field(default=None, repr=False)   # callable(root) -> bool | None
+    source: str = "builtin"            # builtin | suggested | local
 
     def detect(self, root) -> bool:
         """Raw activation probe for ``root`` — does the repo show this provider's
@@ -86,6 +96,7 @@ class PluginSpec:
             "kind": self.kind,
             "displayName": self.displayName,
             "status": status,
+            "source": self.source,
             "activatesOn": self.activatesOn,
             "provides": list(self.provides),
             "active": active,
@@ -127,6 +138,7 @@ def _language_pack_specs() -> list:
             activatesOn=meta.get("activatesOn", ", ".join(pack.file_globs)),
             provides=tuple(meta.get("provides", ())),
             status="builtin",
+            source="builtin",
             probe=pack.detects,
         ))
     return specs
@@ -229,8 +241,198 @@ def _suggested_specs() -> list:
                     "requestSession, .glb/.gltf assets, or Three / Babylon / A-Frame",
         provides=("xr-entrypoints", "scene-graph-hints", "device-frame-lens"),
         status="suggested",
+        source="suggested",
         probe=_detect_webxr,
     )]
+
+
+_LOCAL_PLUGIN_DIR = ".openfde/plugins"
+_LOCAL_PLUGIN_MAX = 50
+_LOCAL_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,80}$")
+_LOCAL_SKIP_DIRS = {".git", ".openfde", "node_modules", "dist", "build", ".next", "out",
+                    "coverage", ".nuxt", ".svelte-kit", ".turbo", ".cache", ".parcel-cache",
+                    ".vercel", ".output", "__pycache__"}
+_LOCAL_TEXT_EXTS = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts",
+                    ".html", ".htm", ".css", ".json", ".md", ".toml", ".yaml", ".yml")
+_LOCAL_SCAN_MAX_FILES = 250
+_LOCAL_SCAN_MAX_BYTES = 160_000
+_LOCAL_WALK_MAX = 20_000
+
+
+def _as_short_text(v, fallback="") -> str:
+    s = str(v or fallback).strip()
+    return s[:180]
+
+
+def _as_string_tuple(v) -> tuple:
+    if isinstance(v, str):
+        return (v[:80],) if v.strip() else ()
+    if not isinstance(v, list):
+        return ()
+    out = []
+    for item in v[:40]:
+        text = str(item or "").strip()
+        if text:
+            out.append(text[:80])
+    return tuple(out)
+
+
+def _safe_rel_path(p: str) -> str:
+    """Repo-local path/glob only. No absolute paths, no parent traversal."""
+    s = str(p or "").replace("\\", "/").strip().lstrip("/")
+    parts = [x for x in s.split("/") if x]
+    if not s or any(part == ".." for part in parts) or s.startswith("~"):
+        return ""
+    return s
+
+
+def _package_has_dep(root: Path, names: tuple) -> bool:
+    if not names:
+        return False
+    try:
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+    return any(n in deps for n in names)
+
+
+def _file_marker_detects(root: Path, patterns: tuple) -> bool:
+    for raw in patterns:
+        pat = _safe_rel_path(raw)
+        if not pat:
+            continue
+        if any(ch in pat for ch in "*?["):
+            try:
+                if next(root.glob(pat), None) is not None:
+                    return True
+            except (OSError, ValueError):
+                continue
+        elif (root / pat).exists():
+            return True
+    return False
+
+
+def _content_marker_detects(root: Path, markers: tuple) -> bool:
+    if not markers:
+        return False
+    lows = tuple(m.lower() for m in markers if m)
+    walked = scanned = 0
+    try:
+        for dirpath, dirnames, filenames in __import__("os").walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _LOCAL_SKIP_DIRS and not d.startswith(".")]
+            for fn in filenames:
+                walked += 1
+                if walked > _LOCAL_WALK_MAX:
+                    return False
+                if scanned >= _LOCAL_SCAN_MAX_FILES or not fn.lower().endswith(_LOCAL_TEXT_EXTS):
+                    continue
+                p = Path(dirpath) / fn
+                try:
+                    if p.stat().st_size > _LOCAL_SCAN_MAX_BYTES:
+                        continue
+                    scanned += 1
+                    text = p.read_text(encoding="utf-8", errors="ignore").lower()
+                    if any(m in text for m in lows):
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def _const_probe(value: bool):
+    """A marker-free probe — a local manifest with no ``detects`` block is simply DECLARED
+    present for the repo (or explicitly opted out via ``"detected": false``)."""
+    def probe(_root) -> bool:
+        return value
+    return probe
+
+
+def _manifest_probe(detects: dict):
+    """A local manifest's cheap marker probe. Metadata only; never imports plugin code."""
+    if not isinstance(detects, dict):
+        return None
+    files = _as_string_tuple(detects.get("files") or detects.get("paths"))
+    deps = _as_string_tuple(detects.get("dependencies") or detects.get("deps"))
+    markers = _as_string_tuple(detects.get("content") or detects.get("markers"))
+    if not (files or deps or markers):
+        return None
+
+    def probe(repo_root) -> bool:
+        r = Path(repo_root)
+        hits = [
+            _file_marker_detects(r, files),
+            _package_has_dep(r, deps),
+            _content_marker_detects(r, markers),
+        ]
+        return all(hits) if detects.get("all") is True else any(hits)
+    return probe
+
+
+def _local_spec_from_manifest(path: Path):
+    """Read one repo-local manifest into a PluginSpec, or None when invalid.
+
+    v1-C is deliberately read-only: no import path, entry point, package name, command,
+    or download field is honored. A manifest can only describe metadata + cheap markers.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("local plugin manifest ignored (%s): %s", path.name, exc)
+        return None
+    if not isinstance(raw, dict):
+        logger.warning("local plugin manifest ignored (%s): expected object", path.name)
+        return None
+
+    pid = _as_short_text(raw.get("id") or path.stem)
+    kind = _as_short_text(raw.get("kind"))
+    status = _as_short_text(raw.get("status") or "available")
+    if not _LOCAL_ID_RE.match(pid) or kind not in PLUGIN_KINDS or status not in ("available", "disabled"):
+        logger.warning("local plugin manifest ignored (%s): invalid id/kind/status", path.name)
+        return None
+
+    detects = raw.get("detects") if isinstance(raw.get("detects"), dict) else {}
+    probe = _manifest_probe(detects)
+    if probe is None:
+        # No marker probe → the manifest is simply DECLARED for this repo. An explicit
+        # ``"detected": false`` opts out; the default is True ("present because declared").
+        declared = raw.get("detected") if isinstance(raw.get("detected"), bool) else True
+        probe = _const_probe(declared)
+
+    return PluginSpec(
+        id=pid,
+        kind=kind,
+        displayName=_as_short_text(raw.get("displayName") or raw.get("name") or pid, pid),
+        activatesOn=_as_short_text(raw.get("activatesOn") or "declared in .openfde/plugins"),
+        provides=_as_string_tuple(raw.get("provides")),
+        status=status,
+        source="local",
+        probe=probe,
+    )
+
+
+def local_specs(root=None) -> list:
+    """Repo-local plugin manifests from ``.openfde/plugins/*.json``.
+
+    Read-only v1-C: manifests are metadata/probes only, not executable plugins.
+    Invalid manifests are ignored with a warning so a bad declaration never breaks
+    ``openfde watch``.
+    """
+    if root is None:
+        return []
+    d = Path(root) / _LOCAL_PLUGIN_DIR
+    try:
+        files = sorted(p for p in d.glob("*.json") if p.is_file())[:_LOCAL_PLUGIN_MAX]
+    except OSError:
+        return []
+    specs = []
+    for p in files:
+        spec = _local_spec_from_manifest(p)
+        if spec is not None:
+            specs.append(spec)
+    return specs
 
 
 def all_specs() -> list:
@@ -243,4 +445,5 @@ def list_plugins(root=None) -> list:
     """Plugin metadata + per-repo activation for ``root`` (the watched repo):
     built-in providers plus any matched suggestions. ``root`` None → metadata only
     (``active`` False everywhere; suggestions resolve to 'missing')."""
-    return [spec.manifest(root) for spec in all_specs()]
+    specs = all_specs() + local_specs(root)
+    return [spec.manifest(root) for spec in specs]
