@@ -113,6 +113,13 @@ http://127.0.0.1:7420
 - **Raise an OpenFDE issue** from the top bar. Describe a bug, rough edge, or
   idea, and the Architect drafts it from your words plus light app context. Repo
   paths, tests, and code are scrubbed. You review the draft before anything posts.
+- **A capability registry you can see** (`⌘K → Plugins`). Language packs (Python,
+  JS/TS) are built in; **domain packs** show up as *suggested* when a repo's
+  markers match and **enable** to a repo-local manifest
+  (`.openfde/plugins/{id}.json` — a JSON file; **no code is downloaded or run**).
+  The **WebXR pack** reads architecture hints — frameworks, XR **entrypoints**,
+  and **3D assets** — and tags the matching files right on the canvas and in the
+  Explorer tree. Read-only metadata: no runtime, device, or test lens.
 
 ## Fix a real issue, end to end
 
@@ -257,10 +264,13 @@ OpenFDE doesn't just run changes. It remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.5.6**, the architecture canvas, Watch,
+OpenFDE is early and moving fast. As of **0.5.8**, the architecture canvas, Watch,
 Review, and **failure lens** span **Python and JS/TS**. JS/TS support uses regex/AST
 assimilation, Vitest/Jest/Playwright failure parsing, and HTML/web-app entrypoint
-mapping for web and WebXR repos. Repro-and-fix is still Python/pytest.
+mapping for web and WebXR repos. A **capability registry** (`⌘K → Plugins`) shows
+the language and domain packs active for the watched repo; the WebXR domain pack
+tags XR entrypoints and 3D assets on the canvas as read-only architecture metadata.
+Repro-and-fix is still Python/pytest.
 
 The local-first council can run with **Codex local CLI for Architect/Verifier**
 and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
