@@ -6,6 +6,8 @@
 
 **The orange box for coding with agents.**
 
+[Watch the demo](https://x.com/nikhilskashyap/status/2064387404807680007?s=20)
+
 Flight recorders are painted orange so they can be found later. OpenFDE brings
 that idea to software work. It records how a codebase got built: prompts, file
 changes, tasks, commits, checks, PRs, decisions, and the story they add up to
@@ -113,13 +115,15 @@ http://127.0.0.1:7420
 - **Raise an OpenFDE issue** from the top bar. Describe a bug, rough edge, or
   idea, and the Architect drafts it from your words plus light app context. Repo
   paths, tests, and code are scrubbed. You review the draft before anything posts.
-- **A capability registry you can see** (`⌘K → Plugins`). Language packs (Python,
-  JS/TS) are built in; **domain packs** show up as *suggested* when a repo's
-  markers match and **enable** to a repo-local manifest
-  (`.openfde/plugins/{id}.json` — a JSON file; **no code is downloaded or run**).
-  The **WebXR pack** reads architecture hints — frameworks, XR **entrypoints**,
-  and **3D assets** — and tags the matching files right on the canvas and in the
-  Explorer tree. Read-only metadata: no runtime, device, or test lens.
+- **A capability registry you can see** (`⌘K → Plugins`). Built-in language packs
+  (Python, JS/TS), **suggested** domain packs, repo-local manifests
+  (`.openfde/plugins/{id}.json` — a JSON file; **no code is downloaded or run**), and
+  packs shipped **outside core** as pip-installed Python packages (entry points) all
+  appear through one contract. A pack's runtime loads **lazily** — only when a repo
+  matches and a capability is requested — so discovery stays cheap. The **WebXR pack**
+  tags XR **entrypoints** and **3D assets** on the canvas and Explorer tree and serves a
+  bounded architecture summary (hints only — no device or test lens). No marketplace
+  yet: OpenFDE never downloads or installs packs.
 
 ## Fix a real issue, end to end
 
@@ -264,13 +268,13 @@ OpenFDE doesn't just run changes. It remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.5.8**, the architecture canvas, Watch,
+OpenFDE is early and moving fast. As of **0.5.9**, the architecture canvas, Watch,
 Review, and **failure lens** span **Python and JS/TS**. JS/TS support uses regex/AST
 assimilation, Vitest/Jest/Playwright failure parsing, and HTML/web-app entrypoint
 mapping for web and WebXR repos. A **capability registry** (`⌘K → Plugins`) shows
-the language and domain packs active for the watched repo; the WebXR domain pack
-tags XR entrypoints and 3D assets on the canvas as read-only architecture metadata.
-Repro-and-fix is still Python/pytest.
+built-in, suggested, repo-local, and external (entry-point) packs; a pack's runtime
+loads **lazily** — only when a repo matches and a capability is requested — and WebXR's
+architecture summary is the first to run through it. Repro-and-fix is still Python/pytest.
 
 The local-first council can run with **Codex local CLI for Architect/Verifier**
 and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
