@@ -448,21 +448,45 @@ def run_verification(root, *, checks=None, runner=None, timeout: int = _CHECK_TI
 # (config-only / frontend-only). Imports are lazy to keep verify ↔ language_packs
 # free of an import cycle.
 
+def _pack_checks(pack, root) -> list:
+    """One pack's checks as ``[as_dict]`` — PREFERRING its plugin ``test_detector`` runtime hook (v1-K),
+    else the pack's in-core discovery. A missing/failing hook falls back (see ``run_capability_hook``).
+    Scoped by ``provider_id=pack.name`` so only THIS pack's hook is preferred, preserving pack order."""
+    from openfde import plugins
+    r = plugins.run_capability_hook(root, "test_detector", lambda h: h(root), provider_id=pack.name)
+    if r is not plugins.NO_HOOK:
+        return r                                   # hook returns the standard check dicts (as_dict)
+    return [spec.as_dict() for spec in pack.discover_checks(root)]
+
+
 def _discover_via_packs(root) -> list:
-    """discover_checks() through the language packs (dedup by check id)."""
+    """discover_checks() through the language packs (dedup by check id), preferring each pack's plugin
+    ``test_detector`` runtime hook (v1-K) with fallback to its in-core discovery."""
     from openfde.language_packs import get_language_packs
     packs = get_language_packs(root)
     if not packs:
         return discover_checks(root)
     out, seen = [], set()
     for pack in packs:
-        for spec in pack.discover_checks(root):
-            d = spec.as_dict()
+        for d in _pack_checks(pack, root):
             if d["id"] in seen:
                 continue
             seen.add(d["id"])
             out.append(d)
     return out
+
+
+def _pack_failures(pack, output: str, root) -> list:
+    """One pack's failure locations as ``[as_dict]`` — PREFERRING its plugin ``failure_parser`` runtime
+    hook (v1-K), else the pack's in-core parser. A missing/failing hook falls back. Scoped by
+    ``provider_id=pack.name`` so only THIS pack's hook is preferred, preserving the cross-pack order
+    (first non-empty wins)."""
+    from openfde import plugins
+    r = plugins.run_capability_hook(root, "failure_parser", lambda h: h(output, root),
+                                    provider_id=pack.name)
+    if r is not plugins.NO_HOOK:
+        return r                                   # hook returns the standard failure dicts (as_dict)
+    return [loc.as_dict() for loc in pack.parse_failures(output, root)]
 
 
 def _parse_via_packs(output: str, root) -> list:
@@ -480,7 +504,7 @@ def _parse_via_packs(output: str, root) -> list:
     if not packs:
         return parse_failure_locations(output, root)
     for pack in packs:
-        locs = [loc.as_dict() for loc in pack.parse_failures(output, root)]
+        locs = _pack_failures(pack, output, root)
         if locs:
             return locs
     # Nobody matched. PythonPack's parser IS parse_failure_locations, so if Python

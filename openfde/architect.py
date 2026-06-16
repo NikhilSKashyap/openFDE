@@ -197,7 +197,23 @@ class _Edge:
 # ─── Public API ───────────────────────────────────────────────────────────── #
 
 def analyze_repo(root: Path) -> dict:
-    """Analyze a repository and return an ArchGraph.
+    """The repo's ArchGraph — the canvas's source of truth (v1-K dispatcher).
+
+    PREFERS an active plugin ``architecture`` runtime hook for the repo (JS/TS → the trusted built-in
+    pack runtime), else the in-core analyzer :func:`_analyze_repo_core`. The ArchGraph shape is
+    identical either way; a missing or failing hook falls back. The hook delegates to
+    ``_analyze_repo_core`` (NOT this dispatcher), so there is no recursion. Python repos have no
+    ``architecture`` provider, so they always take the in-core path — unchanged."""
+    from openfde import plugins   # lazy — keep importing architect free of the plugin layer
+    result = plugins.run_capability_hook(root, "architecture", lambda hook: hook(root))
+    if result is not plugins.NO_HOOK and isinstance(result, dict) and "modules" in result:
+        return result
+    return _analyze_repo_core(root)
+
+
+def _analyze_repo_core(root: Path) -> dict:
+    """Analyze a repository and return an ArchGraph (the IN-CORE implementation; the architecture
+    runtime hook delegates here, and this never re-enters the plugin dispatcher).
 
     Detects top-level modules, collects file metadata, extracts
     function / class definitions, and resolves import-level dependencies

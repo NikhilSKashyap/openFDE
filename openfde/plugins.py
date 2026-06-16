@@ -1189,6 +1189,33 @@ def runtime_for_capability(root, capability):
     return out
 
 
+# Sentinel: no plugin hook ran → the product call site uses its in-core fallback.
+NO_HOOK = object()
+
+
+def run_capability_hook(root, capability, invoke, *, provider_id=None):
+    """v1-K consume seam: run the FIRST active plugin runtime hook for ``capability`` (optionally only
+    the provider whose id is ``provider_id``) via ``invoke(hook)`` and return its result; return
+    :data:`NO_HOOK` when no provider/hook is available, OR it raises (logged). The product call site
+    then falls back to its in-core implementation.
+
+    NEVER raises — a bad/throwing runtime hook must not crash the product path; it logs and falls back.
+    Listing stays metadata-only (this never touches it); runtime loads lazily inside
+    :func:`runtime_for_capability`, only for a repo that matches the provider's probe."""
+    if root is None or not capability:
+        return NO_HOOK
+    try:
+        for prov in runtime_for_capability(root, capability):
+            if provider_id is not None and prov.get("id") != provider_id:
+                continue
+            hook = runtime_hook(prov.get("runtime"), capability)
+            if callable(hook):
+                return invoke(hook)
+    except Exception as exc:  # noqa: BLE001 — a bad hook falls back, never crashes the product path
+        logger.warning("plugin '%s' runtime hook failed; using core fallback: %s", capability, exc)
+    return NO_HOOK
+
+
 def resolve_webxr_summary(root) -> dict:
     """WebXR architecture summary via the plugin RUNTIME system first (v1-H), with a guaranteed
     fallback to the core :func:`webxr_summary`. This is the first real capability migrated onto the

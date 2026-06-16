@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from openfde import plugins
+from openfde import architect, plugins, verify
 from openfde.language_packs import all_language_packs, get_language_packs
 
 
@@ -1098,6 +1098,100 @@ class JsTsRuntimeHookTest(unittest.TestCase):
                 self.assertIsNone(plugins.load_plugin_runtime("js_ts", root))
             rows = {r["id"] for r in plugins.list_plugins(root)}          # listing never crashes
             self.assertIn("js_ts", rows)
+
+
+class JsTsConsumptionTest(unittest.TestCase):
+    """v1-K: core product paths PREFER the JS/TS plugin runtime hooks (architecture / test_detector /
+    failure_parser) with safe fallback to the in-core impl. Python paths are unchanged; bad hooks log +
+    fall back; no recursion (the architecture hook delegates to ``_analyze_repo_core``)."""
+
+    def setUp(self):
+        plugins._RUNTIME_CACHE.clear()
+
+    def tearDown(self):
+        plugins._RUNTIME_CACHE.clear()
+
+    def _js_repo(self):
+        return _repo({"package.json": json.dumps({"name": "x", "scripts": {"test": "vitest"}}),
+                      "src/app.ts": "export function f() { return 1 }\n"})
+
+    def _py_repo(self):
+        return _repo({"pkg/calc.py": "def add(a, b):\n    return a + b\n",
+                      "tests/test_calc.py": "def test_add():\n    assert add(1, 2) == 3\n"})
+
+    def test_architecture_product_path_uses_runtime_hook(self):
+        d, root = self._js_repo()
+        sentinel = {"modules": ["S"], "files": [], "functions": [], "edges": [],
+                    "flows": [], "fileEdges": [], "warnings": []}
+        with d, mock.patch.object(plugins, "run_capability_hook", return_value=sentinel) as m:
+            g = architect.analyze_repo(root)
+        self.assertIs(g, sentinel)                              # used the hook's result
+        self.assertEqual(m.call_args.args[1], "architecture")   # consulted the architecture capability
+
+    def test_architecture_falls_back_to_core_when_no_hook(self):
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "run_capability_hook", return_value=plugins.NO_HOOK):
+            g = architect.analyze_repo(root)
+        self.assertIn("f", {fn["name"] for fn in g["functions"]})   # in-core analysis ran
+        self.assertTrue({"modules", "files", "functions", "edges",
+                         "flows", "fileEdges", "warnings"} <= set(g))
+
+    def test_no_recursion_in_architecture_runtime(self):
+        # On a real JS/TS repo the dispatcher → hook → _analyze_repo_core path must call the in-core
+        # analyzer EXACTLY once (a recursion would re-enter the dispatcher and blow the count / stack).
+        d, root = self._js_repo()
+        with d, mock.patch("openfde.architect._analyze_repo_core",
+                           wraps=architect._analyze_repo_core) as core:
+            g = architect.analyze_repo(root)
+        self.assertEqual(core.call_count, 1)
+        self.assertIn("f", {fn["name"] for fn in g["functions"]})
+
+    def test_test_detection_product_path_uses_hook(self):
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "run_capability_hook",
+                                  wraps=plugins.run_capability_hook) as m:
+            checks = verify._discover_via_packs(root)
+        self.assertIn("test_detector", [c.args[1] for c in m.call_args_list])
+        self.assertTrue(any("test" in " ".join(c["command"]) for c in checks))
+
+    def test_failure_parsing_product_path_uses_hook(self):
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "run_capability_hook",
+                                  wraps=plugins.run_capability_hook) as m:
+            locs = verify._parse_via_packs(_VITEST_OUTPUT, root)
+        self.assertIn("failure_parser", [c.args[1] for c in m.call_args_list])
+        self.assertEqual(locs[0]["file"], "src/math.test.ts")
+        self.assertEqual(locs[0]["line"], 8)
+
+    def test_bad_architecture_hook_logs_and_falls_back(self):
+        d, root = self._js_repo()
+        rt = {"architecture": lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))}
+        prov = [{"id": "js_ts", "capability": "architecture", "runtime": rt}]
+        with d, mock.patch.object(plugins, "runtime_for_capability", return_value=prov):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                g = architect.analyze_repo(root)
+        self.assertIn("f", {fn["name"] for fn in g["functions"]})   # fell back to in-core, no crash
+
+    def test_python_architecture_unchanged(self):
+        d, root = self._py_repo()
+        with d:
+            dispatched = {fn["name"] for fn in architect.analyze_repo(root)["functions"]}
+            core = {fn["name"] for fn in architect._analyze_repo_core(root)["functions"]}
+        self.assertEqual(dispatched, core)            # no architecture provider for Python → in-core
+        self.assertIn("add", dispatched)
+
+    def test_python_test_and_failure_paths_unchanged(self):
+        # Python has no test_detector/failure_parser provider, so the per-pack seam is a PASSTHROUGH
+        # to the pack's own impl — byte-identical to pre-v1-K behavior.
+        d, root = self._py_repo()
+        with d:
+            self.assertTrue(verify._discover_via_packs(root))       # python check discovered (in-core)
+            py = get_language_packs(root)[0]
+            self.assertEqual(verify._pack_checks(py, root),
+                             [s.as_dict() for s in py.discover_checks(root)])
+            out = "tests/test_calc.py:3: in test_add\n    assert add(1, 2) == 3\nE   AssertionError\n"
+            self.assertEqual(verify._pack_failures(py, out, root),
+                             [loc.as_dict() for loc in py.parse_failures(out, root)])
 
 
 class PackagingTest(unittest.TestCase):
