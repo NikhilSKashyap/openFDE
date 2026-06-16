@@ -1392,11 +1392,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response({"ok": True, **summary})
 
     async def post_plugin_install(request: web.Request) -> web.Response:
-        """v1-D install SCAFFOLDING — allowlist-gated, a strict no-op. Returns a confirmation of what
-        installing a KNOWN OpenFDE pack WOULD add; it does NOT download, install, or execute anything,
-        and an unknown/foreign id is refused (``installable: False``). No network, no subprocess — a
-        real install path must be explicitly wired + tested before this does anything."""
-        return web.json_response(plugins_mod.install_plan(request.match_info.get("id", "")))
+        """v1-F: ENABLE a known optional pack by writing its LOCAL MANIFEST into
+        ``.openfde/plugins/{id}.json`` — a JSON file only. **Nothing is downloaded, imported, or
+        executed; no network, no subprocess.** Allowlist-gated (an unknown id is refused) and
+        idempotent. Off the event loop (a tiny file write). The next GET /api/plugins shows the pack
+        as an ``available`` local manifest (superseding its suggestion — no duplicate row)."""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: plugins_mod.install_local(path, request.match_info.get("id", "")))
+        return web.json_response(result)
 
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.

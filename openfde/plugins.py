@@ -64,6 +64,9 @@ class PluginSpec:
     status: str = "builtin"
     probe: object = field(default=None, repr=False)   # callable(root) -> bool | None
     source: str = "builtin"            # builtin | suggested | local
+    version: str = ""                  # provider version ("" for built-ins)
+    description: str = ""              # optional one-line description
+    capabilities: tuple = ()           # optional richer capability list (alongside provides)
 
     def detect(self, root) -> bool:
         """Raw activation probe for ``root`` — does the repo show this provider's
@@ -97,8 +100,11 @@ class PluginSpec:
             "displayName": self.displayName,
             "status": status,
             "source": self.source,
+            "version": self.version,
+            "description": self.description,
             "activatesOn": self.activatesOn,
             "provides": list(self.provides),
+            "capabilities": list(self.capabilities),
             "active": active,
             "detected": detected,
         }
@@ -341,22 +347,42 @@ def _suggested_specs() -> list:
     )]
 
 
-# ── v1-D install SCAFFOLDING (allowlist + confirmation shape only — a strict NO-OP) ──────
-# Known OpenFDE optional packs an install could target later. Install itself is NOT wired: nothing
-# is downloaded, installed, or executed here. This is the allowlist + confirmation payload so a
-# future v1-D slots in, and so a UI "Install" affordance has an HONEST response. NO arbitrary
-# package names / paths / commands — an id outside this set is refused.
+# ── Install = ENABLE A LOCAL MANIFEST (allowlist-gated; writes JSON, runs NO code) ──────
+# "Install" here writes a known pack's LOCAL MANIFEST into .openfde/plugins/{id}.json — a JSON file,
+# never a package/download/import/exec. Allowlisted ids only; an id outside this set is refused, so
+# there is no arbitrary package name / path / command. The manifest the install writes is the same
+# shape a hand-authored local manifest uses, so it flows through the exact validated read path.
 _INSTALLABLE_IDS = frozenset({"webxr"})
+
+# The local manifest each allowlisted pack writes on install. Pure metadata + cheap marker probes —
+# it MUST validate through ``_local_spec_from_manifest`` (id/kind/status), and it carries id=="webxr"
+# so it SUPERSEDES the suggested WebXR row (one provider, no duplicate).
+_INSTALL_MANIFESTS = {
+    "webxr": {
+        "id": "webxr",
+        "kind": "domain_pack",
+        "displayName": "WebXR / Immersive Web",
+        "version": "1.0.0-local",
+        "status": "available",
+        "activatesOn": "Three / @react-three/fiber deps, .glb/.gltf assets, or navigator.xr / "
+                       "requestSession / XRFrame in source",
+        "provides": ["xr-entrypoints", "scene-graph-hints", "device-frame-lens"],
+        "capabilities": ["webxr-summary"],
+        "description": "WebXR architecture hints — entrypoints, assets, frameworks, markers. "
+                       "Read-only; no runtime or test lens.",
+        "detects": {
+            "dependencies": ["three", "@react-three/fiber", "@react-three/drei", "babylonjs", "aframe"],
+            "files": ["**/*.glb", "**/*.gltf"],
+            "content": ["navigator.xr", "requestSession", "XRFrame"],
+        },
+    },
+}
 
 
 def install_plan(plugin_id: str) -> dict:
-    """The confirmation payload for a (future) plugin install — ALLOWLIST-GATED and a strict no-op.
-
-    v1-D scaffolding: it neither downloads, installs, nor executes anything; it only reports whether
-    ``plugin_id`` is a known/allowlisted OpenFDE pack and what installing it WOULD add. An unknown id
-    is refused (``installable: False``) — no arbitrary package names, paths, or commands. ``installed``
-    is always False until a real install path is explicitly wired and tested.
-    """
+    """The allowlist verdict for an install — ALLOWLIST-GATED, NO write/download/exec. Reports whether
+    ``plugin_id`` is a known OpenFDE pack and what enabling it would add. An unknown id is refused
+    (``installable: False``). The actual enable (writing the local manifest) is :func:`install_local`."""
     pid = str(plugin_id or "").strip()
     if pid not in _INSTALLABLE_IDS:
         return {"ok": False, "id": pid, "installable": False, "installed": False,
@@ -366,7 +392,48 @@ def install_plan(plugin_id: str) -> dict:
         "ok": True, "id": pid, "installable": True, "installed": False,
         "displayName": meta.displayName if meta else pid,
         "provides": list(meta.provides) if meta else [],
-        "reason": "install is not wired yet (v1-D scaffolding) — nothing was downloaded or executed",
+        "reason": "installable — enabling writes a local manifest (.openfde/plugins/{}.json); "
+                  "no external code is downloaded or executed".format(pid),
+    }
+
+
+def install_local(root, plugin_id: str) -> dict:
+    """ENABLE a known optional pack by WRITING its local manifest into ``.openfde/plugins/{id}.json``.
+
+    This is the safe "install": a JSON FILE is written — **nothing is downloaded, imported, or
+    executed**, no network, no subprocess. Allowlist-gated (an unknown id is refused, reusing
+    :func:`install_plan`), and IDEMPOTENT — a valid same-id manifest already present is left as-is.
+    The written manifest validates through the same ``_local_spec_from_manifest`` read path and carries
+    ``id == plugin_id``, so it supersedes a same-id suggestion (no duplicate row).
+    """
+    plan = install_plan(plugin_id)
+    if not plan.get("installable"):
+        return {**plan, "installed": False}                  # unknown id → refused, no write
+    pid = plan["id"]
+    template = _INSTALL_MANIFESTS.get(pid)
+    if root is None or template is None:
+        return {**plan, "installed": False,
+                "reason": "cannot enable — no watched repo / no manifest for this pack"}
+
+    dest = Path(root) / _LOCAL_PLUGIN_DIR / f"{pid}.json"
+    existing = _local_spec_from_manifest(dest) if dest.exists() else None
+    already = existing is not None and existing.id == pid    # idempotent: same-id manifest present
+    if not already:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.parent / (dest.name + ".tmp")
+            tmp.write_text(json.dumps(template, indent=2), encoding="utf-8")
+            tmp.replace(dest)                                # atomic; .tmp never matches *.json glob
+        except OSError as exc:
+            return {"ok": False, "id": pid, "installed": False,
+                    "reason": f"could not write the local manifest: {exc}"}
+    return {
+        "ok": True, "id": pid, "installed": True, "alreadyEnabled": already,
+        "source": "local", "kind": template["kind"], "displayName": template["displayName"],
+        "version": template.get("version", ""), "provides": list(template.get("provides") or []),
+        "path": f"{_LOCAL_PLUGIN_DIR}/{pid}.json",
+        "reason": f"enabled the local manifest at {_LOCAL_PLUGIN_DIR}/{pid}.json — "
+                  "no external code was downloaded or executed",
     }
 
 
@@ -567,8 +634,10 @@ def _manifest_probe(detects: dict):
 def _local_spec_from_manifest(path: Path):
     """Read one repo-local manifest into a PluginSpec, or None when invalid.
 
-    v1-C is deliberately read-only: no import path, entry point, package name, command,
-    or download field is honored. A manifest can only describe metadata + cheap markers.
+    A manifest can only DECLARE metadata + cheap markers: no import path, entry point, package
+    name, command, or download field is ever honored (v1-F enables a manifest by WRITING this same
+    JSON shape — still no code is imported or run). Strict validation; an invalid manifest is
+    ignored with a warning so a bad declaration never breaks ``openfde watch``.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -603,6 +672,9 @@ def _local_spec_from_manifest(path: Path):
         status=status,
         source="local",
         probe=probe,
+        version=_as_short_text(raw.get("version")),
+        description=_as_short_text(raw.get("description")),
+        capabilities=_as_string_tuple(raw.get("capabilities")),
     )
 
 
@@ -635,8 +707,14 @@ def all_specs() -> list:
 
 
 def list_plugins(root=None) -> list:
-    """Plugin metadata + per-repo activation for ``root`` (the watched repo):
-    built-in providers plus any matched suggestions. ``root`` None → metadata only
-    (``active`` False everywhere; suggestions resolve to 'missing')."""
-    specs = all_specs() + local_specs(root)
-    return [spec.manifest(root) for spec in specs]
+    """Plugin metadata + per-repo activation for ``root`` (the watched repo): built-in providers,
+    matched suggestions, and validated repo-local manifests. ``root`` None → metadata only (``active``
+    False everywhere; suggestions resolve to 'missing'; no local manifests).
+
+    A local manifest **supersedes a same-id suggestion** — once a local ``webxr`` manifest exists it
+    replaces the suggested/missing ``webxr`` row, so there is exactly ONE WebXR provider (no
+    duplicates). Built-ins keep their own id space and are never superseded."""
+    locals_ = local_specs(root)
+    local_ids = {s.id for s in locals_}
+    kept = [s for s in all_specs() if not (s.source == "suggested" and s.id in local_ids)]
+    return [spec.manifest(root) for spec in kept + locals_]

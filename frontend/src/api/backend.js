@@ -292,6 +292,14 @@ export const getPlugins = () => apiFetch('/api/plugins')
 export const getWebxrSummary = () => apiFetch('/api/plugins/webxr/summary', { _timeout: 9000 })
 
 /**
+ * v1-F: ENABLE a known optional pack by writing its local manifest into `.openfde/plugins/{id}.json`
+ * (allowlisted, idempotent). NOT a package install — no code is downloaded, imported, or executed.
+ * @returns {Promise<{ok, id, installed, path, reason}|null>}
+ */
+export const installPlugin = (id) =>
+  apiFetch(`/api/plugins/${encodeURIComponent(id)}/install`, { method: 'POST', _timeout: 9000 })
+
+/**
  * Persist project metadata (also regenerates PROJECT.md on the server).
  *
  * @param {Object} data - { name, description, entries }

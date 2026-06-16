@@ -349,16 +349,17 @@ class WebxrSummaryTest(unittest.TestCase):
 
 
 class InstallScaffoldingTest(unittest.TestCase):
-    """v1-D scaffolding: install is ALLOWLIST-GATED and a strict no-op — a confirmation shape only,
-    never a download/install/exec. A known pack reports installable (but not installed); an unknown
-    or foreign id is refused."""
+    """install_plan is the ALLOWLIST VERDICT — no write, no download, no exec (the actual enable is
+    install_local). A known pack reports installable (not yet installed); an unknown/foreign id is
+    refused."""
 
     def test_allowlisted_pack_reports_installable_but_not_installed(self):
         plan = plugins.install_plan("webxr")
         self.assertTrue(plan["ok"] and plan["installable"])
-        self.assertFalse(plan["installed"])             # nothing is ever installed in v1-D
+        self.assertFalse(plan["installed"])             # the verdict itself writes nothing
         self.assertTrue(plan["provides"])               # describes what it WOULD add
-        self.assertIn("not wired", plan["reason"].lower())
+        self.assertIn("local manifest", plan["reason"].lower())
+        self.assertIn("no external code", plan["reason"].lower())
 
     def test_unknown_id_is_refused(self):
         for bad in ("totally-made-up", "../etc/passwd", "openfde-malware", ""):
@@ -373,6 +374,82 @@ class InstallScaffoldingTest(unittest.TestCase):
         for _ in range(5):
             self.assertEqual(plugins.install_plan("webxr"), before)
         self.assertFalse(before["installed"])
+
+
+class LocalManifestV1FTest(unittest.TestCase):
+    """v1-F additions to the local-manifest layer: version/description/capabilities surface, and a
+    local manifest SUPERSEDES a same-id suggestion (one WebXR row, no duplicate)."""
+
+    def test_manifest_carries_version_description_capabilities(self):
+        d, root = _repo({".openfde/plugins/vp.json": json.dumps({
+            "id": "vp", "kind": "domain_pack", "status": "available", "version": "2.1.0",
+            "description": "a pack", "capabilities": ["cap-a", "cap-b"], "provides": ["p1"]})})
+        with d:
+            m = next(x for x in plugins.list_plugins(root) if x["id"] == "vp")
+            self.assertEqual(m["version"], "2.1.0")
+            self.assertEqual(m["description"], "a pack")
+            self.assertEqual(m["capabilities"], ["cap-a", "cap-b"])
+
+    def test_local_webxr_supersedes_suggested_no_duplicate(self):
+        d, root = _repo({".openfde/plugins/webxr.json": json.dumps({
+            "id": "webxr", "kind": "domain_pack", "displayName": "WebXR (local)",
+            "status": "available", "provides": ["xr-entrypoints"]})})
+        with d:
+            rows = [m for m in plugins.list_plugins(root) if m["id"] == "webxr"]
+            self.assertEqual(len(rows), 1)                  # exactly one WebXR — no duplicate
+            self.assertEqual(rows[0]["source"], "local")    # local supersedes the suggestion
+            self.assertEqual(rows[0]["status"], "available")
+
+
+class InstallLocalTest(unittest.TestCase):
+    """v1-F: install ENABLES a pack by WRITING its local manifest — a JSON file only, never a
+    download/import/exec. Allowlisted + idempotent; the written manifest validates + supersedes the
+    suggestion."""
+
+    def _plugins_dir(self, root):
+        return root / ".openfde" / "plugins"
+
+    def test_install_webxr_writes_a_valid_local_manifest(self):
+        d, root = _repo({})
+        with d:
+            res = plugins.install_local(root, "webxr")
+            self.assertTrue(res["ok"] and res["installed"])
+            self.assertIn("no external code", res["reason"].lower())
+            dest = self._plugins_dir(root) / "webxr.json"
+            self.assertTrue(dest.exists())
+            data = json.loads(dest.read_text())
+            self.assertEqual(data["id"], "webxr")
+            self.assertEqual(data["status"], "available")
+            # now an available LOCAL provider, superseding the suggestion (one row)
+            rows = [m for m in plugins.list_plugins(root) if m["id"] == "webxr"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]["source"], rows[0]["status"]), ("local", "available"))
+
+    def test_install_is_idempotent(self):
+        d, root = _repo({})
+        with d:
+            plugins.install_local(root, "webxr")
+            again = plugins.install_local(root, "webxr")
+            self.assertTrue(again["installed"] and again["alreadyEnabled"])
+            self.assertEqual(len(list(self._plugins_dir(root).glob("*.json"))), 1)
+
+    def test_unknown_id_refused_and_writes_nothing(self):
+        d, root = _repo({})
+        with d:
+            res = plugins.install_local(root, "openfde-malware")
+            self.assertFalse(res["ok"] or res["installed"])
+            self.assertFalse(self._plugins_dir(root).exists())   # nothing written
+
+    def test_written_manifest_has_no_code_paths(self):
+        # The written file is pure data; it declares NO import/entrypoint/command/url — and the read
+        # path never honors such fields. There is no code path.
+        d, root = _repo({})
+        with d:
+            plugins.install_local(root, "webxr")
+            data = json.loads((self._plugins_dir(root) / "webxr.json").read_text())
+            for forbidden in ("import", "entryPoint", "entry_point", "command", "cmd",
+                              "url", "package", "exec", "script", "module"):
+                self.assertNotIn(forbidden, data)
 
 
 if __name__ == "__main__":

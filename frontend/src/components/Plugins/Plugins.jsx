@@ -1,5 +1,8 @@
-import { useState, useEffect } from 'react'
-import { getPlugins, getWebxrSummary } from '../../api/backend'
+import { useState, useEffect, useCallback } from 'react'
+import { getPlugins, getWebxrSummary, installPlugin } from '../../api/backend'
+
+// Ids the UI may offer to enable (the backend re-checks this allowlist on the write path).
+const INSTALLABLE = new Set(['webxr'])
 
 /**
  * Plugins — a read-only window onto OpenFDE's capability registry
@@ -20,6 +23,15 @@ export default function Plugins({ onClose }) {
   const [data, setData]       = useState(null)   // { kinds:[], plugins:[] } | null
   const [error, setError]     = useState('')
   const [loading, setLoading] = useState(true)
+  const [installingId, setInstallingId] = useState(null)
+  const [note, setNote]       = useState('')
+
+  const reload = useCallback(async () => {
+    const res = await getPlugins()
+    if (!res?.ok) { setError('Could not load the plugin registry.'); return }
+    setError('')
+    setData({ kinds: res.kinds ?? [], plugins: res.plugins ?? [] })
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -31,6 +43,20 @@ export default function Plugins({ onClose }) {
     })
     return () => { alive = false }
   }, [])
+
+  // v1-F: ENABLE a known optional pack — writes its local manifest (a JSON file; no code is
+  // downloaded or executed), then refresh so the row flips to an `available` local manifest.
+  async function onInstall(id) {
+    setInstallingId(id); setNote('')
+    const res = await installPlugin(id)
+    setInstallingId(null)
+    if (res?.installed) {
+      setNote(`${res.displayName || id} enabled — wrote ${res.path}; no external code was downloaded or executed.`)
+      await reload()
+    } else {
+      setNote(res?.reason || `Could not enable ${id}.`)
+    }
+  }
 
   const groups = groupByKind(data)
   const activeCount = (data?.plugins ?? []).filter(p => p.active).length
@@ -58,14 +84,18 @@ export default function Plugins({ onClose }) {
           {!loading && !error && groups.map(g => (
             <section key={g.kind} className="plugins-group">
               <div className="plugins-group-label">{KIND_LABELS[g.kind] ?? g.kind}</div>
-              {g.items.map(p => <PluginCard key={p.id} p={p} />)}
+              {g.items.map(p => (
+                <PluginCard key={p.id} p={p}
+                            installing={installingId === p.id}
+                            onInstall={INSTALLABLE.has(p.id) ? onInstall : null} />
+              ))}
             </section>
           ))}
         </div>
 
         <footer className="plugins-foot">
           <span className="plugins-note">
-            {activeCount} active for this repo · read-only — metadata only, nothing installed
+            {note || `${activeCount} active for this repo · enabling a pack writes a local manifest — no code is downloaded or run`}
           </span>
         </footer>
       </div>
@@ -73,30 +103,34 @@ export default function Plugins({ onClose }) {
   )
 }
 
-function PluginCard({ p }) {
+function PluginCard({ p, installing = false, onInstall = null }) {
   const tone = STATUS_TONE[p.status] ?? 'muted'
   // Active means "providing capabilities for this repo now" (built-in + matched).
-  // A suggested pack is `detected` but never active (nothing is installed in Lite).
+  // A suggested pack is `detected` but never active (nothing is loaded).
   const stateLabel = p.active ? '● active' : (p.detected ? 'detected' : 'inactive')
   const stateTone  = p.active ? 'on'       : (p.detected ? 'det'      : 'off')
+  // v1-F: enable only when allowlisted (onInstall present) AND the pack isn't enabled yet.
+  const canInstall = onInstall && (p.status === 'suggested' || p.status === 'missing')
   return (
     <div className={`plugin-card${p.active ? ' is-active' : ''}`}>
       <div className="plugin-card-top">
         <span className="plugin-name">{p.displayName}</span>
+        {p.version && <span className="plugin-version">v{p.version}</span>}
         {p.source === 'local' && (
-          <span className="plugin-source" title="Declared in .openfde/plugins">local</span>
+          <span className="plugin-source" title="Local manifest in .openfde/plugins">local</span>
         )}
         <span className={`plugin-status ${tone}`}>{p.status}</span>
         <span className={`plugin-state ${stateTone}`}>{stateLabel}</span>
-        {p.source === 'suggested' && (
-          // v1-D scaffolding: the affordance is visible but GUARDED/disabled — there is no wired,
-          // allowlisted install path yet, so nothing can be downloaded or run from here.
-          <button className="plugin-install" disabled
-                  title="Install isn't available yet — metadata only (v1-D scaffolding)">
-            Install
+        {canInstall && (
+          // Enables the pack by writing a LOCAL MANIFEST (a JSON file) — no download/import/exec.
+          <button className="plugin-install enabled" disabled={installing}
+                  onClick={() => onInstall(p.id)}
+                  title="Enable as a local manifest — writes a JSON file; no code is downloaded or run">
+            {installing ? 'Enabling…' : 'Install'}
           </button>
         )}
       </div>
+      {p.description && <div className="plugin-desc">{p.description}</div>}
       {p.activatesOn && (
         <div className="plugin-activates">
           <span className="plugin-activates-lbl">Activates on</span> {p.activatesOn}
