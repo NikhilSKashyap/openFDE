@@ -608,5 +608,147 @@ class ExternalPluginDiscoveryTest(unittest.TestCase):
                          f"external discovery pulled in architect:\n{out.stderr}")
 
 
+class RuntimeActivationTest(unittest.TestCase):
+    """v1-H: lazy runtime activation. Discovery stays metadata-only (no runtime import); a plugin's
+    runtime module is imported ONLY when its probe matches the repo AND a caller asks for a
+    capability. Bad imports/factories are logged + skipped, never raised; results cache per repo;
+    repo-local manifests may not declare a runtime (security)."""
+
+    PROV = "_ofde_test_rtprov"        # manifest-provider module (sys.modules, lightweight)
+    RT = "_ofde_test_runtime"         # runtime module (ON DISK, imported lazily — never pre-loaded)
+    RT_BAD = "_ofde_test_runtime_bad"
+
+    def setUp(self):
+        prov = types.ModuleType(self.PROV)
+        prov.summary_pack = lambda: {
+            "id": "ext-rt", "kind": "domain_pack", "displayName": "Ext Runtime", "version": "1.0.0",
+            "capabilities": ["domain_summary"], "detects": {"dependencies": ["three"]},
+            "runtime": {"module": self.RT, "factory": "make"}}
+        prov.arch_pack = lambda: {
+            "id": "ext-arch", "kind": "domain_pack", "capabilities": ["architecture"],
+            "detects": {"dependencies": ["three"]},
+            "runtime": {"module": self.RT, "factory": "make"}}
+        prov.badimport_pack = lambda: {
+            "id": "ext-badimp", "kind": "domain_pack", "capabilities": ["domain_summary"],
+            "detects": {"dependencies": ["three"]},
+            "runtime": {"module": self.RT_BAD, "factory": "make"}}
+        prov.badfactory_pack = lambda: {
+            "id": "ext-badfac", "kind": "domain_pack", "capabilities": ["domain_summary"],
+            "detects": {"dependencies": ["three"]},
+            "runtime": {"module": self.RT, "factory": "boom"}}
+        sys.modules[self.PROV] = prov
+
+        # Runtime modules on DISK (temp dir on sys.path) so they are imported lazily, not pre-loaded.
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        (d / f"{self.RT}.py").write_text(
+            "def make():\n"
+            "    return {'domain_summary': lambda root=None: {'ok': True},\n"
+            "            'architecture': lambda root=None: {'nodes': []}}\n"
+            "def boom():\n"
+            "    raise RuntimeError('factory exploded')\n")
+        (d / f"{self.RT_BAD}.py").write_text("raise ImportError('runtime import blew up')\n")
+        sys.path.insert(0, str(d))
+        plugins._RUNTIME_CACHE.clear()
+
+    def tearDown(self):
+        sys.modules.pop(self.PROV, None)
+        for m in (self.RT, self.RT_BAD):
+            sys.modules.pop(m, None)
+        try:
+            sys.path.remove(str(Path(self._tmp.name)))
+        except ValueError:
+            pass
+        self._tmp.cleanup()
+        plugins._RUNTIME_CACHE.clear()
+
+    def _patch_eps(self, attrs):
+        def fake_entry_points(group=None):
+            if group != "openfde.domain_packs":
+                return []
+            return [importlib.metadata.EntryPoint(a, f"{self.PROV}:{a}", group) for a in attrs]
+        return mock.patch("importlib.metadata.entry_points", fake_entry_points)
+
+    def _match_repo(self):
+        return _repo({"package.json": '{"dependencies":{"three":"^0.160.0"}}'})
+
+    def test_list_plugins_does_not_import_runtime(self):
+        self.assertNotIn(self.RT, sys.modules)
+        d, root = self._match_repo()
+        with d, self._patch_eps(["summary_pack"]):
+            rows = {r["id"]: r for r in plugins.list_plugins(root)}
+        self.assertIn("ext-rt", rows)
+        self.assertTrue(rows["ext-rt"]["hasRuntime"])               # metadata says it HAS a runtime…
+        self.assertNotIn(self.RT, sys.modules, "listing must NOT import the runtime module")
+
+    def test_runtime_loads_only_on_request(self):
+        d, root = self._match_repo()
+        with d, self._patch_eps(["summary_pack"]):
+            self.assertNotIn(self.RT, sys.modules)                  # …but it is not loaded yet
+            providers = plugins.runtime_for_capability(root, "domain_summary")
+            self.assertIn(self.RT, sys.modules)                     # imported NOW, on request
+            self.assertEqual([p["id"] for p in providers], ["ext-rt"])
+            hook = plugins.runtime_hook(providers[0]["runtime"], "domain_summary")
+            self.assertTrue(callable(hook))
+            self.assertEqual(hook(root), {"ok": True})
+
+    def test_runtime_not_loaded_when_repo_does_not_match(self):
+        d, root = _repo({"app.py": "x = 1\n"})                       # no `three` dep → probe fails
+        with d, self._patch_eps(["summary_pack"]):
+            self.assertEqual(plugins.runtime_for_capability(root, "domain_summary"), [])
+            self.assertIsNone(plugins.load_plugin_runtime("ext-rt", root))
+        self.assertNotIn(self.RT, sys.modules)                       # never imported
+
+    def test_bad_runtime_import_is_logged_not_raised(self):
+        d, root = self._match_repo()
+        with d, self._patch_eps(["badimport_pack"]):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                self.assertIsNone(plugins.load_plugin_runtime("ext-badimp", root))
+
+    def test_bad_runtime_factory_is_logged_not_raised(self):
+        d, root = self._match_repo()
+        with d, self._patch_eps(["badfactory_pack"]):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                self.assertIsNone(plugins.load_plugin_runtime("ext-badfac", root))
+
+    def test_runtime_for_capability_filters_by_capability(self):
+        d, root = self._match_repo()
+        with d, self._patch_eps(["summary_pack", "arch_pack"]):
+            summ = plugins.runtime_for_capability(root, "domain_summary")
+            arch = plugins.runtime_for_capability(root, "architecture")
+        self.assertEqual({p["id"] for p in summ}, {"ext-rt"})
+        self.assertEqual({p["id"] for p in arch}, {"ext-arch"})
+
+    def test_runtime_is_cached_no_reimport(self):
+        d, root = self._match_repo()
+        with d, self._patch_eps(["summary_pack"]):
+            rt1 = plugins.load_plugin_runtime("ext-rt", root)
+            rt2 = plugins.load_plugin_runtime("ext-rt", root)
+        self.assertIsNotNone(rt1)
+        self.assertIs(rt1, rt2)                                      # same object — cached, not re-imported
+
+    def test_active_plugins_filters_by_repo_and_capability(self):
+        d, root = self._match_repo()
+        with d, self._patch_eps(["summary_pack", "arch_pack"]):
+            active_ids = {p["id"] for p in plugins.active_plugins(root)}
+            ds_ids = {p["id"] for p in plugins.active_plugins(root, capability="domain_summary")}
+        self.assertTrue({"ext-rt", "ext-arch", "js_ts"} <= active_ids)  # all match the repo
+        self.assertEqual(ds_ids, {"ext-rt"})                            # capability narrows it
+
+    def test_local_manifest_runtime_is_ignored(self):
+        # SECURITY: a repo-local manifest is untrusted, so its runtime block is dropped — it lists as
+        # metadata but provides NO runtime and never triggers a code import.
+        manifest = {"id": "local-rt", "kind": "domain_pack", "status": "available",
+                    "capabilities": ["domain_summary"],
+                    "runtime": {"module": self.RT, "factory": "make"}}
+        d, root = _repo({".openfde/plugins/local-rt.json": json.dumps(manifest)})
+        with d:
+            rows = {r["id"]: r for r in plugins.list_plugins(root)}
+            self.assertIn("local-rt", rows)                           # still listed as metadata
+            self.assertFalse(rows["local-rt"]["hasRuntime"])          # runtime dropped
+            self.assertIsNone(plugins.load_plugin_runtime("local-rt", root))
+        self.assertNotIn(self.RT, sys.modules)                        # never imported
+
+
 if __name__ == "__main__":
     unittest.main()

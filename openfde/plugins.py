@@ -1,5 +1,5 @@
 """
-openfde/plugins.py — internal capability-provider registry (Plugin Registry v1-A/B/C/G).
+openfde/plugins.py — internal capability-provider registry (Plugin Registry v1-A/B/C/G/H).
 
 OpenFDE's capabilities — language packs, domain packs, verify adapters, agent
 providers, layout engines, integrations — should be DESCRIBABLE without importing
@@ -20,12 +20,19 @@ Four sources, one ``PluginSpec`` contract (the ``source`` field):
     manifest provider — never the heavy analyzer — and a bad external plugin is logged +
     skipped, never crashing the listing.
 
-Honest boundary: **metadata + probe ONLY.** NO install/download, NO network, NO
-subprocess. Discovery describes a provider; it does NOT activate or runtime-load it (that
-stays lazy + deferred), and an install/download MARKETPLACE is still deferred. A local OR
-external manifest can only declare metadata + cheap marker probes (file / dependency /
-content) — no import path, command, or download field is ever honored — so a manifest
-slots in through the exact same contract with no special case.
+Two phases. **Discovery** (``list_plugins`` / ``/api/plugins``) is **metadata + probe ONLY** — it
+lists providers and probes cheap markers, importing NO plugin code. **Activation** (v1-H,
+``active_plugins`` / ``load_plugin_runtime`` / ``runtime_for_capability``) answers "what code can I
+use for THIS repo right now?" — it imports a plugin's runtime LAZILY, only when the plugin's probe
+matches the repo AND a caller asks for a capability. A runtime factory returns hooks
+(:data:`RUNTIME_HOOKS`: architecture / test_detector / failure_parser / repro_drafter /
+domain_summary); a bad import/factory is logged + skipped, never raised, and results cache per repo.
+
+Honest boundary: NO install/download, NO network, NO subprocess. Only an **external** (pip-installed,
+already-trusted) plugin may declare a ``runtime`` — a repo-local manifest is untrusted, so its runtime
+is dropped (opening a repo never imports code). Built-in language packs are **not** migrated onto the
+runtime contract yet (their analysis still lives in core), and an install/download MARKETPLACE is still
+deferred. Every source flows through the one ``PluginSpec`` contract with no special case.
 """
 from __future__ import annotations
 
@@ -72,6 +79,9 @@ class PluginSpec:
     version: str = ""                  # provider version ("" for built-ins)
     description: str = ""              # optional one-line description
     capabilities: tuple = ()           # optional richer capability list (alongside provides)
+    runtime: object = field(default=None, repr=False)  # {module, factory} | None — LAZY (v1-H);
+    #   a metadata pointer to runtime code, NEVER imported during listing. Only external
+    #   (entry-point) plugins may carry one; repo-local manifests never load code.
 
     def detect(self, root) -> bool:
         """Raw activation probe for ``root`` — does the repo show this provider's
@@ -112,6 +122,7 @@ class PluginSpec:
             "capabilities": list(self.capabilities),
             "active": active,
             "detected": detected,
+            "hasRuntime": bool(self.runtime),   # declares a lazy runtime (v1-H); still NOT loaded here
         }
 
 
@@ -649,6 +660,33 @@ _DEFAULT_ACTIVATES = {
 }
 
 
+# ── Lazy runtime contract (v1-H) ──────────────────────────────────────────────
+# The optional hooks a plugin's runtime factory may expose. Metadata discovery never touches any
+# of this; a hook is resolved only when the activation API loads a repo-matching plugin's runtime.
+RUNTIME_HOOKS = ("architecture", "test_detector", "failure_parser", "repro_drafter", "domain_summary")
+
+_RUNTIME_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_RUNTIME_ATTR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _runtime_descriptor(raw_runtime):
+    """Validate a manifest's optional ``runtime`` block into ``{module, factory}`` — STRINGS parsed as
+    metadata, NEVER imported here. A dotted ``module`` path + an identifier ``factory``; anything else
+    (or a missing field) → ``None`` (with a warning when malformed). The activation API (v1-H) is the
+    only place that imports ``module`` and calls ``factory`` — and only for a repo-matching ACTIVE
+    plugin, on request."""
+    if not isinstance(raw_runtime, dict):
+        return None
+    module = _as_short_text(raw_runtime.get("module"))
+    factory = _as_short_text(raw_runtime.get("factory"))
+    if not module and not factory:
+        return None
+    if not _RUNTIME_MODULE_RE.match(module) or not _RUNTIME_ATTR_RE.match(factory):
+        logger.warning("plugin runtime descriptor ignored: invalid module/factory (%r:%r)", module, factory)
+        return None
+    return {"module": module, "factory": factory}
+
+
 def _spec_from_manifest_dict(raw, *, source: str, id_fallback: str = ""):
     """Normalize a manifest dict into a ``PluginSpec``, or ``None`` when invalid.
 
@@ -656,7 +694,12 @@ def _spec_from_manifest_dict(raw, *, source: str, id_fallback: str = ""):
     entry-point providers (``source='external'``) so there is no special case. A manifest may
     only DECLARE metadata + cheap markers: no import path, entry point, package name, command, or
     download field is ever honored. Strict validation (id/kind/status); an invalid manifest
-    returns ``None`` and the CALLER logs (it knows the path / entry-point name)."""
+    returns ``None`` and the CALLER logs (it knows the path / entry-point name).
+
+    The optional ``runtime`` block (v1-H) is parsed as metadata — module/factory STRINGS, never
+    imported here. SECURITY: only an **external** (pip-installed, already-trusted) plugin may declare
+    a runtime; a repo-local manifest is untrusted (opening a repo must never trigger a code import),
+    so its ``runtime`` is silently dropped — exactly like the import/command fields v1-C never honors."""
     if not isinstance(raw, dict):
         return None
     pid = _as_short_text(raw.get("id") or id_fallback)
@@ -673,6 +716,8 @@ def _spec_from_manifest_dict(raw, *, source: str, id_fallback: str = ""):
         declared = raw.get("detected") if isinstance(raw.get("detected"), bool) else True
         probe = _const_probe(declared)
 
+    runtime = _runtime_descriptor(raw.get("runtime")) if source == "external" else None
+
     return PluginSpec(
         id=pid,
         kind=kind,
@@ -685,6 +730,7 @@ def _spec_from_manifest_dict(raw, *, source: str, id_fallback: str = ""):
         version=_as_short_text(raw.get("version")),
         description=_as_short_text(raw.get("description")),
         capabilities=_as_string_tuple(raw.get("capabilities")),
+        runtime=runtime,
     )
 
 
@@ -839,11 +885,10 @@ def all_specs() -> list:
     return builtin_specs() + _suggested_specs() + external_specs()
 
 
-def list_plugins(root=None) -> list:
-    """Plugin metadata + per-repo activation for ``root`` (the watched repo): built-in providers,
-    matched suggestions, external entry-point plugins, and validated repo-local manifests. ``root``
-    None → metadata only (``active`` False everywhere; suggestions resolve to 'missing'; no local
-    manifests; externals still listed since they are repo-independent).
+def _merged_specs(root=None) -> list:
+    """The de-duped provider set for ``root`` as ``PluginSpec`` objects (NO manifest serialization,
+    NO runtime import). The single dedup/precedence point shared by ``list_plugins`` (metadata) and
+    the activation API (runtime).
 
     Precedence — MOST SPECIFIC wins, so every id appears exactly once (no duplicates):
       • built-ins keep their own id space and are never superseded;
@@ -866,5 +911,133 @@ def list_plugins(root=None) -> list:
     superseded = local_ids | external_ids
     suggested_ = [s for s in suggested_ if s.id not in superseded]
 
-    ordered = builtins_ + suggested_ + externals + locals_
-    return [spec.manifest(root) for spec in ordered]
+    return builtins_ + suggested_ + externals + locals_
+
+
+def list_plugins(root=None) -> list:
+    """Plugin METADATA + per-repo activation for ``root`` (the watched repo): built-in providers,
+    matched suggestions, external entry-point plugins, and validated repo-local manifests. ``root``
+    None → metadata only (``active`` False everywhere; suggestions resolve to 'missing'; no local
+    manifests; externals still listed since they are repo-independent).
+
+    Metadata/probe ONLY — this NEVER imports a plugin's runtime module (that is the activation API's
+    job, on request). One row per id (see :func:`_merged_specs` for the precedence)."""
+    return [spec.manifest(root) for spec in _merged_specs(root)]
+
+
+# ── Plugin activation / runtime loading (v1-H) ────────────────────────────────────
+#
+# Discovery (above) answers "what exists?" — cheap metadata/probe, no code imported. Activation
+# answers "what code can I use for THIS repo right now?" It is LAZY: a plugin's runtime module is
+# imported only when (a) the plugin is in the merged set, (b) its probe matches ``root``, and (c) a
+# caller asks — via ``runtime_for_capability`` / ``load_plugin_runtime``. Listing never triggers it.
+#
+# Honest boundary: this is the lazy runtime CONTRACT only. Built-in language packs are NOT migrated
+# onto it (their analysis still lives in core); a builtin/suggested spec carries no ``runtime``, so
+# the activation API simply skips it. Install/download marketplace remains deferred.
+_RUNTIME_FAILED = object()          # cache sentinel: this (plugin, root) tried to load and failed
+_RUNTIME_CACHE: dict = {}           # (plugin_id, resolved_root) -> runtime object | _RUNTIME_FAILED
+
+
+def _runtime_cache_key(plugin_id, root):
+    try:
+        return (plugin_id, str(Path(root).resolve()))
+    except Exception:  # noqa: BLE001 — a weird root must not break activation
+        return (plugin_id, str(root))
+
+
+def runtime_hook(runtime, name):
+    """Resolve a named hook (one of :data:`RUNTIME_HOOKS`) from a runtime dict or object, or None.
+    Uniform access so callers don't care whether a factory returned a dict or an object."""
+    if runtime is None:
+        return None
+    if isinstance(runtime, dict):
+        return runtime.get(name)
+    return getattr(runtime, name, None)
+
+
+def _instantiate_runtime(spec, root):
+    """Import ``spec.runtime['module']``, call its ``factory`` (passing ``root`` if it accepts an
+    argument), and return the runtime object/dict — or None on any failure (logged, never raised).
+    This is the ONLY place plugin runtime code is imported."""
+    rt = spec.runtime or {}
+    module_path, factory_name = rt.get("module"), rt.get("factory")
+    if not module_path or not factory_name:
+        return None
+    try:
+        import importlib
+        module = importlib.import_module(module_path)
+        factory = getattr(module, factory_name)
+    except Exception as exc:  # noqa: BLE001 — a third-party import must never crash OpenFDE
+        logger.warning("plugin runtime import failed for %s (%s:%s): %s",
+                       spec.id, module_path, factory_name, exc)
+        return None
+    try:
+        import inspect
+        try:
+            wants_arg = len(inspect.signature(factory).parameters) >= 1
+        except (TypeError, ValueError):
+            wants_arg = False
+        runtime = factory(root) if wants_arg else factory()
+    except Exception as exc:  # noqa: BLE001 — a throwing factory must never crash OpenFDE
+        logger.warning("plugin runtime factory failed for %s: %s", spec.id, exc)
+        return None
+    if runtime is None:
+        logger.warning("plugin runtime factory for %s returned None", spec.id)
+        return None
+    return runtime
+
+
+def load_plugin_runtime(plugin_id, root):
+    """Lazily load ONE plugin's runtime for ``root``, or ``None``.
+
+    Loads only when the plugin is in the merged set for ``root``, declares a ``runtime``, AND its
+    probe matches the repo — so a non-matching or runtime-less plugin never imports anything. The
+    result is cached per ``(plugin_id, resolved root)`` (successes and failures) to avoid repeat
+    imports. A bad import/factory is logged and yields ``None``; it never raises."""
+    if root is None or not plugin_id:
+        return None
+    key = _runtime_cache_key(plugin_id, root)
+    if key in _RUNTIME_CACHE:
+        cached = _RUNTIME_CACHE[key]
+        return None if cached is _RUNTIME_FAILED else cached
+    spec = next((s for s in _merged_specs(root) if s.id == plugin_id), None)
+    if spec is None or not spec.runtime or not spec.detect(root):
+        return None                                   # unknown / no runtime / repo doesn't match
+    runtime = _instantiate_runtime(spec, root)
+    _RUNTIME_CACHE[key] = runtime if runtime is not None else _RUNTIME_FAILED
+    return runtime
+
+
+def active_plugins(root, capability=None):
+    """Provider MANIFESTS whose probe matches ``root`` (active for this repo), optionally filtered to
+    those declaring ``capability``. Metadata only — does NOT import any runtime. ``root`` None → []."""
+    if root is None:
+        return []
+    out = []
+    for spec in _merged_specs(root):
+        if not spec.detect(root):
+            continue
+        if capability and capability not in (spec.capabilities or ()):
+            continue
+        out.append(spec.manifest(root))
+    return out
+
+
+def runtime_for_capability(root, capability):
+    """Loaded runtimes of every ACTIVE plugin that declares ``capability``, as
+    ``[{"id", "capability", "runtime"}]``. Loads each matching plugin's runtime lazily (cached);
+    plugins that don't declare the capability, don't match the repo, or fail to load are skipped.
+    The one entry point a caller uses to ask "what code provides X for this repo right now?\""""
+    if root is None or not capability:
+        return []
+    out = []
+    for spec in _merged_specs(root):
+        if capability not in (spec.capabilities or ()):
+            continue
+        if not spec.runtime or not spec.detect(root):
+            continue
+        runtime = load_plugin_runtime(spec.id, root)
+        if runtime is not None:
+            out.append({"id": spec.id, "capability": capability, "runtime": runtime})
+    return out
