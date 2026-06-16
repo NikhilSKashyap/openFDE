@@ -278,10 +278,14 @@ def _as_string_tuple(v) -> tuple:
 
 
 def _safe_rel_path(p: str) -> str:
-    """Repo-local path/glob only. No absolute paths, no parent traversal."""
-    s = str(p or "").replace("\\", "/").strip().lstrip("/")
-    parts = [x for x in s.split("/") if x]
-    if not s or any(part == ".." for part in parts) or s.startswith("~"):
+    """A repo-relative path/glob, or ``''`` to REJECT it. An absolute path (POSIX ``/…``,
+    Windows ``C:\\…``, UNC ``//…``), a home ref (``~``), parent traversal (``..``), or empty
+    is rejected — NEVER normalized into a relative path. (Stripping a leading ``/`` would turn
+    ``/etc/passwd`` into a relative scan; an absolute marker must simply not match.)"""
+    s = str(p or "").replace("\\", "/").strip()
+    if not s or s[0] in "/~" or (len(s) > 1 and s[1] == ":"):     # absolute / home → reject
+        return ""
+    if any(part == ".." for part in s.split("/")):               # parent traversal → reject
         return ""
     return s
 
@@ -297,19 +301,84 @@ def _package_has_dep(root: Path, names: tuple) -> bool:
     return any(n in deps for n in names)
 
 
+def _glob_to_regex(pattern: str) -> str:
+    """Anchored regex for a repo-relative glob. ``**`` matches across path separators (and an
+    optional trailing ``/`` so it can also match zero directories); ``*`` / ``?`` do NOT cross
+    ``/``; ``[...]`` is a character class (``[!`` → negation). Used to match a glob against a
+    BOUNDED walk instead of an unbounded ``Path.glob``."""
+    out, i, n = [], 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            if i + 1 < n and pattern[i + 1] == "*":
+                out.append(".*")
+                i += 2
+                if i < n and pattern[i] == "/":            # "**/": also match zero dirs
+                    i += 1
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        elif c == "[":
+            j = i + 1
+            if j < n and pattern[j] in "!^":
+                j += 1
+            if j < n and pattern[j] == "]":
+                j += 1
+            while j < n and pattern[j] != "]":
+                j += 1
+            if j >= n:                                     # unterminated class → literal '['
+                out.append(re.escape("["))
+                i += 1
+            else:
+                inner = pattern[i + 1:j]
+                inner = ("^" + inner[1:]) if inner[:1] in "!^" else inner
+                out.append("[" + inner.replace("\\", "\\\\") + "]")
+                i = j + 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return "^" + "".join(out) + "$"
+
+
 def _file_marker_detects(root: Path, patterns: tuple) -> bool:
+    """True when a cleaned (repo-relative, non-traversing) pattern matches a file under ``root``.
+
+    A literal path is a direct existence check; a glob is matched against a BOUNDED, vendor-pruned
+    walk — the SAME ``_LOCAL_SKIP_DIRS`` and ``_LOCAL_WALK_MAX`` as content markers — so a broad
+    ``**/*.x`` never scans node_modules/dist or runs away. No imports/subprocess/network."""
+    import os
+    literals, regexes = [], []
     for raw in patterns:
         pat = _safe_rel_path(raw)
-        if not pat:
+        if not pat:                                        # absolute / .. / ~ / empty → dropped
             continue
         if any(ch in pat for ch in "*?["):
-            try:
-                if next(root.glob(pat), None) is not None:
-                    return True
-            except (OSError, ValueError):
-                continue
-        elif (root / pat).exists():
+            regexes.append(re.compile(_glob_to_regex(pat)))
+        else:
+            literals.append(pat)
+    for lit in literals:
+        if (root / lit).exists():
             return True
+    if not regexes:
+        return False
+    walked = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in _LOCAL_SKIP_DIRS and not d.startswith(".")]
+            rel_dir = os.path.relpath(dirpath, root)
+            prefix = "" if rel_dir == "." else rel_dir.replace(os.sep, "/") + "/"
+            for fn in filenames:
+                walked += 1
+                if walked > _LOCAL_WALK_MAX:
+                    return False
+                if any(rx.match(prefix + fn) for rx in regexes):
+                    return True
+    except OSError:
+        return False
     return False
 
 

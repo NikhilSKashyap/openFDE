@@ -262,6 +262,36 @@ class LocalManifestProvidersTest(unittest.TestCase):
             self.assertEqual(by["python"]["source"], "builtin")
             self.assertEqual(by["webxr"]["source"], "suggested")
 
+    # ── file-marker hardening: markers stay repo-relative and bounded ─────────
+    def _detected(self, manifest, files, pid):
+        d, root = self._manifest_repo(manifest, files)
+        with d:
+            return self._by_id(root)[pid]["detected"]
+
+    def test_absolute_file_marker_does_not_detect(self):
+        # An absolute marker is REJECTED, not normalized into a relative scan — even though
+        # the same file exists relative to the repo root (the old lstrip('/') matched it).
+        m = {"id": "abs-pack", "kind": "domain_pack", "detects": {"files": ["/package.json"]}}
+        self.assertFalse(self._detected(m, {"package.json": "{}"}, "abs-pack"))
+
+    def test_parent_traversal_file_marker_does_not_detect(self):
+        m = {"id": "trav-pack", "kind": "domain_pack",
+             "detects": {"files": ["../package.json", "../**/*.json"]}}
+        self.assertFalse(self._detected(m, {"package.json": "{}"}, "trav-pack"))
+
+    def test_broad_glob_prunes_vendor_dirs(self):
+        # **/*.glb must NOT match a file buried in node_modules — the bounded walk prunes
+        # vendor dirs (the old unbounded root.glob('**/...') would have found it).
+        m = {"id": "glb-pack", "kind": "domain_pack", "detects": {"files": ["**/*.glb"]}}
+        self.assertFalse(self._detected(m, {"node_modules/three/model.glb": "GLB"}, "glb-pack"))
+
+    def test_relative_glob_still_detects(self):
+        m = {"id": "tsx-pack", "kind": "domain_pack", "detects": {"files": ["src/**/*.tsx"]}}
+        self.assertTrue(self._detected(m, {"src/components/App.tsx": "export const x = 1\n"}, "tsx-pack"))
+        # and a top-level glob still detects a top-level file
+        m2 = {"id": "glb2", "kind": "domain_pack", "detects": {"files": ["**/*.glb"]}}
+        self.assertTrue(self._detected(m2, {"assets/duck.glb": "GLB"}, "glb2"))
+
 
 if __name__ == "__main__":
     unittest.main()
