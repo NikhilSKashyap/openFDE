@@ -13,9 +13,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from openfde import architect, failure_flow
 from openfde.language_packs import JsTsPack
+from openfde.language_packs import js_ts_treesitter as _ts_adapter
 
 
 def _repo(files: dict, pkg=None):
@@ -275,6 +277,105 @@ class HtmlEntryTest(unittest.TestCase):
         d, root = _repo({"src/a.ts": "export function f() { return 1 }\n"})
         with d:
             self.assertEqual(self._entry_edges(architect.analyze_repo(root)), [])
+
+
+# ── 6. L1-D tree-sitter adapter (optional, behind the regex fallback) ─────────
+
+@unittest.skipUnless(_ts_adapter.available(), "tree-sitter grammars not installed")
+class TreeSitterAdapterTest(unittest.TestCase):
+    """L1-D: when tree-sitter is installed, analyze_repo extracts JS/TS symbols + imports from a real
+    AST; output shape is unchanged and the warning names the parser path. The regex path remains the
+    fallback (covered by the rest of this file, which now runs with tree-sitter active)."""
+
+    def _analyze(self, files):
+        d, root = _repo(files)
+        with d:
+            g = architect.analyze_repo(root)
+        return {f["name"] for f in g["functions"]}, g
+
+    def test_extracts_core_symbol_forms(self):
+        src = ("export function decl() { return 1 }\n"
+               "const arrowConst = (x) => x * 2\n"
+               "export const expr = function () { return 3 }\n"
+               "export default function main() {}\n"
+               "class Box {\n  constructor() {}\n  draw() { return 1 }\n  onClick = () => 2\n}\n"
+               "export const store = { load() { return 1 }, save: () => 2 }\n")
+        names, g = self._analyze({"src/app.ts": src})
+        for want in ("decl", "arrowConst", "expr", "main",            # decl / arrow / func-expr / default
+                     "Box", "Box.draw", "Box.onClick",                # class + method + field-arrow
+                     "store.load", "store.save"):                     # named-object methods
+            self.assertIn(want, names)
+        self.assertNotIn("Box.constructor", names)                    # constructor skipped (parity)
+        self.assertTrue(any("tree-sitter" in w for w in g["warnings"]))
+
+    def test_react_component_tsx(self):
+        # a React component is a function / arrow returning JSX — extracted via the tsx grammar
+        src = ("export function Hello({ name }) { return <div>{name}</div> }\n"
+               "export const Card = ({ x }) => <section>{x}</section>\n")
+        names, _ = self._analyze({"src/Hello.tsx": src})
+        self.assertIn("Hello", names)
+        self.assertIn("Card", names)
+
+    def test_import_specifier_feeds_edge_resolution(self):
+        names, g = self._analyze({
+            "lib/util.ts": "export function help() { return 1 }\n",
+            "src/app.ts": ("import { help } from '../lib/util'\n"
+                           "export async function go() { await import('../lib/util'); return help() }\n"),
+        })
+        self.assertTrue({"go", "help"} <= names)
+        # the tree-sitter-extracted specifier ('../lib/util') resolved to a real module edge
+        # (import → upgraded to dataflow once the help() call resolves cross-module)
+        self.assertIn(("module:src", "module:lib"), {(e["from"], e["to"]) for e in g["edges"]})
+
+    def test_shape_is_unchanged(self):
+        _, g = self._analyze({"src/app.ts": "export function f() { return 1 }\n"})
+        for key in ("modules", "files", "functions", "edges", "flows", "fileEdges", "warnings"):
+            self.assertIn(key, g)
+
+    def test_html_entrypoint_mapping_still_works_with_treesitter(self):
+        # L1-D-A must remain intact while tree-sitter drives symbol/import extraction.
+        d, root = _repo({
+            "js/app.js": "export function start() { return 1 }\n",
+            "index.html": ('<!doctype html><html><head>\n'
+                           '<script type="module" src="./js/app.js"></script>\n'
+                           '</head></html>\n'),
+        })
+        with d:
+            g = architect.analyze_repo(root)
+        self.assertTrue(any(e.get("type") == "entry" and e["toFile"] == "js/app.js"
+                            for e in g["fileEdges"]))
+
+    def test_warning_names_regex_when_adapter_unavailable(self):
+        # Force the adapter unavailable → regex path + an honest warning; object methods still found.
+        with mock.patch.object(_ts_adapter, "available", return_value=False):
+            names, g = self._analyze({"src/app.js": ("export function add(a, b) { return a + b }\n"
+                                                     "export const api = { total() { return 1 } }\n")})
+        self.assertEqual({"add", "api.total"}, names)
+        self.assertTrue(any("regex fallback" in w for w in g["warnings"]))
+
+    def test_parse_failure_falls_back_to_regex(self):
+        # Adapter returns None per file (simulated parse failure) → regex path used, no crash.
+        with mock.patch.object(_ts_adapter, "extract", return_value=None):
+            names, g = self._analyze({"src/ok.ts": "export function ok() { return 1 }\n"})
+        self.assertIn("ok", names)                       # the forgiving regex path caught it
+        self.assertTrue(any("regex fallback" in w for w in g["warnings"]))
+
+
+class TreeSitterLazyImportTest(unittest.TestCase):
+    """tree-sitter is OPTIONAL and lazy: importing the JS/TS pack, the architect, or the adapter
+    module must not import tree-sitter — it loads only when a JS/TS repo is actually analyzed."""
+
+    def test_imports_do_not_eagerly_load_tree_sitter(self):
+        import subprocess
+        import sys as _sys
+        for mod in ("openfde.language_packs.js_ts_pack", "openfde.architect",
+                    "openfde.language_packs.js_ts_treesitter"):
+            out = subprocess.run(
+                [_sys.executable, "-c",
+                 f"import sys, {mod}; print('tree_sitter' in sys.modules)"],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.stdout.strip(), "False",
+                             f"{mod} eagerly imported tree_sitter:\n{out.stderr}")
 
 
 if __name__ == "__main__":

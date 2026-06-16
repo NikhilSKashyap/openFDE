@@ -481,6 +481,7 @@ def _extract_functions(root: Path, files: list) -> tuple:
     """
     functions: list = []
     warnings:  list = []
+    js_parsers: set = set()
 
     for f in files:
         abs_path = root / f.path
@@ -491,9 +492,13 @@ def _extract_functions(root: Path, files: list) -> tuple:
         elif f.language in ("JavaScript", "TypeScript"):
             if is_js_noise_file(f.path):       # config / *.d.ts / stories → file only
                 continue
-            fns = _extract_js_functions(abs_path, f.path, f.module_id)
+            fns = _extract_js_functions_ts(abs_path, f.path, f.module_id)   # precise AST (L1-D) …
+            js_parsers.add("tree-sitter" if fns is not None else "regex")   # … else the regex path
+            if fns is None:
+                fns = _extract_js_functions(abs_path, f.path, f.module_id)
             functions.extend(fns)
 
+    warnings.extend(_js_parser_warnings(js_parsers))
     return functions, warnings
 
 
@@ -919,6 +924,37 @@ def _extract_js_functions(abs_path: Path, rel_path: str, module_id: str) -> list
     return functions
 
 
+def _extract_js_functions_ts(abs_path: Path, rel_path: str, module_id: str):
+    """OPTIONAL tree-sitter symbol extraction for one JS/TS file → list[_FunctionNode], or ``None``
+    to signal the regex fallback (:func:`_extract_js_functions`). Lazy: imports tree-sitter only when
+    the optional grammars are installed; a missing package or any parse error returns ``None``."""
+    from openfde.language_packs import js_ts_treesitter as ts_adapter
+    if not ts_adapter.available():
+        return None
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    facts = ts_adapter.extract(source, rel_path)
+    if facts is None:
+        return None
+    return [_FunctionNode(id=f"function:{rel_path}:{q}", name=q, path=rel_path,
+                          module_id=module_id, line=ln, args=[], returns=None,
+                          purpose="", warnings=[]) for q, ln in facts["functions"]]
+
+
+def _js_parser_warnings(parsers: set) -> list:
+    """One honest line naming the JS/TS symbol parser path used — tree-sitter when the optional
+    grammars are installed, the regex fallback otherwise (or on a per-file parse error)."""
+    if not parsers:
+        return []
+    if parsers == {"tree-sitter"}:
+        return ["JS/TS symbols parsed with tree-sitter (precise AST)."]
+    if parsers == {"regex"}:
+        return ["JS/TS symbols parsed with the regex fallback (tree-sitter unavailable or a parse error)."]
+    return ["JS/TS symbols parsed with tree-sitter where parseable, else the regex fallback."]
+
+
 # ─── Import / dependency edges ────────────────────────────────────────────── #
 
 def _detect_edges(
@@ -964,7 +1000,10 @@ def _detect_edges(
                         pair_conf[key] = "high"
 
         elif f.language in ("JavaScript", "TypeScript"):
-            for spec in _parse_js_imports(abs_path):
+            specs = _parse_js_imports_ts(abs_path)          # tree-sitter (L1-D) …
+            if specs is None:
+                specs = _parse_js_imports(abs_path)         # … else the regex path
+            for spec in specs:
                 to_mod = _resolve_js_import(spec, f.path, module_by_path, name_to_mod_id)
                 if to_mod and to_mod != from_mod:
                     key = (from_mod, to_mod)
@@ -1048,6 +1087,20 @@ def _parse_js_imports(abs_path: Path) -> list:
             imports.append(m.group(1))
 
     return imports
+
+
+def _parse_js_imports_ts(abs_path: Path):
+    """OPTIONAL tree-sitter import specifiers for one JS/TS file → list[str], or ``None`` for the
+    regex fallback (:func:`_parse_js_imports`). Lazy + safe, like the symbol path."""
+    from openfde.language_packs import js_ts_treesitter as ts_adapter
+    if not ts_adapter.available():
+        return None
+    try:
+        source = abs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    facts = ts_adapter.extract(source, abs_path.name)
+    return facts["imports"] if facts is not None else None
 
 
 def _resolve_js_import(
