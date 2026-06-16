@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { getPlugins } from '../../api/backend'
+import { getPlugins, getWebxrSummary } from '../../api/backend'
 
 /**
  * Plugins — a read-only window onto OpenFDE's capability registry
@@ -99,6 +99,65 @@ function PluginCard({ p }) {
           {p.provides.map(c => <span key={c} className="plugin-chip">{c}</span>)}
         </div>
       )}
+      {p.id === 'webxr' && p.detected && <WebxrDetails />}
+    </div>
+  )
+}
+
+// WebXR domain-pack details (v1-E): a compact, lazy-loaded affordance on the detected WebXR card.
+// Architecture hints ONLY — frameworks / assets / entrypoints / markers — with the honest boundary
+// from the backend's `warnings` ("no test lens installed"). No install/run action.
+function WebxrDetails() {
+  const [open, setOpen]       = useState(false)
+  const [data, setData]       = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  function toggle() {
+    const next = !open
+    setOpen(next)
+    if (next && !data && !loading) {
+      setLoading(true)
+      getWebxrSummary().then(r => { setLoading(false); if (r?.ok) setData(r) })
+    }
+  }
+
+  return (
+    <div className="plugin-webxr">
+      <button className="plugin-webxr-toggle" onClick={toggle} aria-expanded={open}>
+        {open ? '▾' : '▸'} WebXR details
+      </button>
+      {open && (
+        <div className="plugin-webxr-body">
+          {loading && <div className="plugin-webxr-loading">Scanning the repo…</div>}
+          {data && (
+            <>
+              <WebxrRow label="Frameworks" items={data.frameworks} />
+              <WebxrRow label="Entrypoints" items={data.entrypoints} mono />
+              <WebxrRow label="Assets" items={data.assets} mono />
+              <WebxrRow label="Markers" items={data.markers} mono />
+              {(data.warnings || []).map(w => (
+                <div key={w} className="plugin-webxr-warn">{w}</div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WebxrRow({ label, items, mono = false }) {
+  if (!items?.length) return null
+  const shown = items.slice(0, 8)
+  return (
+    <div className="plugin-webxr-row">
+      <span className="plugin-webxr-lbl">{label}</span>
+      <span className="plugin-webxr-vals">
+        {shown.map(x => <span key={x} className={`plugin-chip${mono ? ' mono' : ''}`}>{x}</span>)}
+        {items.length > shown.length && (
+          <span className="plugin-webxr-more">+{items.length - shown.length}</span>
+        )}
+      </span>
     </div>
   )
 }

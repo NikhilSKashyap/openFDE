@@ -229,6 +229,101 @@ def _detect_webxr(root) -> bool:
     return False
 
 
+# Framework deps → friendly labels for the WebXR detail summary (v1-E).
+_XR_FRAMEWORK_LABELS = {
+    "three": "Three.js",
+    "@react-three/fiber": "React Three Fiber",
+    "@react-three/drei": "React Three Fiber (drei)",
+    "@babylonjs/core": "Babylon.js",
+    "babylonjs": "Babylon.js",
+    "aframe": "A-Frame",
+    "webxr-polyfill": "WebXR Polyfill",
+}
+_WEBXR_SUMMARY_CAP = 20         # cap each list so the detail payload stays small
+
+
+def webxr_summary(root) -> dict:
+    """Bounded, READ-ONLY WebXR architecture hints for ``/api/plugins/webxr/summary`` (v1-E):
+    ``{detected, entrypoints, assets, frameworks, markers, warnings}``.
+
+    Metadata + architecture enrichment ONLY — there is NO WebXR runtime/test lens, and no imports,
+    subprocess, or network. One bounded walk (vendor/build dirs pruned, capped files + bytes), each
+    list capped at ``_WEBXR_SUMMARY_CAP``; ``warnings`` ALWAYS carries the honest boundary so the UI
+    can never imply a test lens.
+
+      • frameworks  — Three / R3F / Babylon / A-Frame hints from package.json deps.
+      • assets      — ``.glb`` / ``.gltf`` 3D assets (repo-relative paths).
+      • entrypoints — HTML / JS / TS files that call an XR API (``navigator.xr`` / ``requestSession``
+                      / ``XRFrame`` / ``immersive-*``) — the likely XR starters.
+      • markers     — the distinct XR API markers actually found.
+    """
+    import os
+    try:
+        from openfde.language_packs.js_ts_pack import _read_package_json, _SKIP_DIRS
+    except Exception:  # noqa: BLE001 — never let a scan failure break the endpoint
+        return {"detected": False, "entrypoints": [], "assets": [], "frameworks": [],
+                "markers": [], "warnings": ["WebXR scan unavailable."]}
+
+    root = Path(root)
+    frameworks, assets, entrypoints = [], [], []
+    seen_markers: set = set()
+    truncated = False
+
+    pkg = _read_package_json(root)
+    deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+    for dep, label in _XR_FRAMEWORK_LABELS.items():
+        if dep in deps and label not in frameworks:
+            frameworks.append(label)
+
+    walked = scanned = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+            if walked > _XR_WALK_MAX:
+                truncated = True
+                break
+            rel_dir = os.path.relpath(dirpath, root)
+            for fn in filenames:
+                walked += 1
+                low = fn.lower()
+                rel = fn if rel_dir == "." else f"{rel_dir}/{fn}".replace(os.sep, "/")
+                if low.endswith(_XR_ASSET_EXTS):
+                    if len(assets) < _WEBXR_SUMMARY_CAP:
+                        assets.append(rel)
+                    else:
+                        truncated = True
+                    continue
+                if low.endswith(_XR_TEXT_EXTS) and scanned < _XR_SCAN_MAX_FILES:
+                    p = Path(dirpath) / fn
+                    try:
+                        if p.stat().st_size <= _XR_SCAN_MAX_BYTES:
+                            scanned += 1
+                            text = p.read_text(encoding="utf-8", errors="ignore").lower()
+                            hits = [m for m in _XR_API_MARKERS if m in text]
+                            if hits:
+                                seen_markers.update(hits)
+                                if rel not in entrypoints and len(entrypoints) < _WEBXR_SUMMARY_CAP:
+                                    entrypoints.append(rel)
+                                elif len(entrypoints) >= _WEBXR_SUMMARY_CAP:
+                                    truncated = True
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+
+    warnings = ["Architecture hints only — no WebXR runtime or test lens is installed."]
+    if truncated:
+        warnings.append("Scan bounded — results may be partial on a large repo.")
+    return {
+        "detected": bool(frameworks or assets or seen_markers),
+        "entrypoints": entrypoints,
+        "assets": assets,
+        "frameworks": frameworks,
+        "markers": sorted(seen_markers),
+        "warnings": warnings,
+    }
+
+
 def _suggested_specs() -> list:
     """Deterministic domain-pack SUGGESTIONS (v1-B Lite): metadata only, surfaced
     when the repo shows cheap markers. NEVER active, NEVER loaded — each manifest's

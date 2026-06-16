@@ -1367,6 +1367,20 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response({"ok": True, "kinds": list(plugins_mod.PLUGIN_KINDS),
                                   "plugins": listed})
 
+    async def get_webxr_summary(request: web.Request) -> web.Response:
+        """WebXR domain-pack architecture hints for the watched repo (v1-E): frameworks (Three /
+        R3F / Babylon / A-Frame), ``.glb``/``.gltf`` assets, XR entrypoints, and the markers found.
+        Bounded scan, OFF the event loop. **Metadata + architecture hints only — no runtime/test
+        lens, no install, no network;** the honest boundary rides in ``warnings``.
+
+        Returns:
+            web.Response — {ok, detected, entrypoints[], assets[], frameworks[], markers[],
+            warnings[]} — each list bounded.
+        """
+        loop = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(None, lambda: plugins_mod.webxr_summary(path))
+        return web.json_response({"ok": True, **summary})
+
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.
 
@@ -4492,6 +4506,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
     app.router.add_get( "/api/session",               get_session)
     app.router.add_get( "/api/plugins",               get_plugins)
+    app.router.add_get( "/api/plugins/webxr/summary", get_webxr_summary)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)

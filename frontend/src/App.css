@@ -2869,6 +2869,21 @@
   background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
   font-family: ui-monospace, monospace;
 }
+/* WebXR domain-pack details (v1-E) — compact, lazy affordance on the detected card. */
+.plugin-webxr { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.plugin-webxr-toggle {
+  background: none; border: none; color: var(--text-muted); font-size: 11px; cursor: pointer;
+  padding: 0; font-weight: 600; letter-spacing: 0.02em;
+}
+.plugin-webxr-toggle:hover { color: var(--text); }
+.plugin-webxr-body { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.plugin-webxr-loading { font-size: 11px; color: var(--text-muted); }
+.plugin-webxr-row { display: flex; gap: 8px; align-items: flex-start; font-size: 11px; }
+.plugin-webxr-lbl { color: var(--text-muted); min-width: 76px; flex-shrink: 0; padding-top: 2px; }
+.plugin-webxr-vals { display: flex; flex-wrap: wrap; gap: 4px; }
+.plugin-chip.mono { font-size: 10px; }
+.plugin-webxr-more { color: var(--text-muted); font-size: 10px; align-self: center; }
+.plugin-webxr-warn { font-size: 10px; font-style: italic; color: var(--text-muted); opacity: 0.85; }
 .plugins-foot {
   padding: 9px 14px; border-top: 1px solid var(--border);
   font-size: 11px; color: var(--text-muted);

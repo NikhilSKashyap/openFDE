@@ -283,6 +283,13 @@ export const getProject = () => apiFetch('/api/project')
  * @returns {Promise<{ok: boolean, kinds: string[], plugins: Array}|null>}
  */
 export const getPlugins = () => apiFetch('/api/plugins')
+/**
+ * WebXR domain-pack architecture hints (v1-E): frameworks, .glb/.gltf assets, XR entrypoints,
+ * and the markers found in the watched repo. Read-only, bounded — `warnings` carries the honest
+ * "architecture hints only, no test lens" boundary.
+ * @returns {Promise<{ok, detected, entrypoints, assets, frameworks, markers, warnings}|null>}
+ */
+export const getWebxrSummary = () => apiFetch('/api/plugins/webxr/summary', { _timeout: 9000 })
 
 /**
  * Persist project metadata (also regenerates PROJECT.md on the server).

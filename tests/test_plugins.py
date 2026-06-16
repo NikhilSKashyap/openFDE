@@ -293,5 +293,60 @@ class LocalManifestProvidersTest(unittest.TestCase):
         self.assertTrue(self._detected(m2, {"assets/duck.glb": "GLB"}, "glb2"))
 
 
+class WebxrSummaryTest(unittest.TestCase):
+    """v1-E: webxr_summary() returns bounded, read-only WebXR architecture hints — frameworks,
+    .glb/.gltf assets, XR entrypoints, the markers found — and ALWAYS the honest no-test-lens
+    boundary. Metadata only: no install, no imports, no subprocess, no network."""
+
+    def _summary(self, files):
+        d, root = _repo(files)
+        with d:
+            return plugins.webxr_summary(root)
+
+    def test_detects_three_and_r3f_dependency(self):
+        s = self._summary({"package.json":
+                           '{"dependencies":{"three":"^0.160.0","@react-three/fiber":"^8.15.0"}}'})
+        self.assertTrue(s["detected"])
+        self.assertIn("Three.js", s["frameworks"])
+        self.assertIn("React Three Fiber", s["frameworks"])
+
+    def test_detects_xr_api_in_source(self):
+        s = self._summary({"src/xr.js":
+                           "if (navigator.xr) s = await navigator.xr.requestSession('immersive-vr')\n"})
+        self.assertTrue(s["detected"])
+        self.assertIn("navigator.xr", s["markers"])
+        self.assertIn("requestsession", s["markers"])
+        self.assertTrue(any("src/xr.js" in e for e in s["entrypoints"]))
+
+    def test_detects_glb_gltf_assets(self):
+        s = self._summary({"models/duck.glb": "GLB", "scene/room.gltf": "{}"})
+        self.assertTrue(s["detected"])
+        self.assertEqual(sorted(s["assets"]), ["models/duck.glb", "scene/room.gltf"])
+
+    def test_prunes_vendor_and_build_dirs(self):
+        # XR markers buried in node_modules/dist must NOT be scanned; only the real .glb counts.
+        s = self._summary({"node_modules/three/build/three.module.js": "navigator.xr",
+                           "dist/bundle.js": "navigator.xr.requestSession()", "models/x.glb": "GLB"})
+        self.assertEqual(s["markers"], [])              # vendor/build pruned
+        self.assertEqual(s["entrypoints"], [])
+        self.assertEqual(s["assets"], ["models/x.glb"])
+        self.assertTrue(s["detected"])                  # via the asset only
+
+    def test_summary_is_bounded_and_carries_honest_warning(self):
+        s = self._summary({"package.json": '{"dependencies":{"three":"^0.160.0"}}'})
+        self.assertTrue(any("test lens" in w.lower() or "no webxr runtime" in w.lower()
+                            for w in s["warnings"]))
+        for key in ("entrypoints", "assets", "frameworks", "markers"):
+            self.assertLessEqual(len(s[key]), 20)
+
+    def test_no_webxr_markers_returns_not_detected(self):
+        s = self._summary({"app.py": "def f():\n    return 1\n", "README.md": "# hi\n"})
+        self.assertFalse(s["detected"])
+        self.assertEqual(s["frameworks"], [])
+        self.assertEqual(s["assets"], [])
+        self.assertEqual(s["markers"], [])
+        self.assertTrue(s["warnings"])                  # the boundary line is always present
+
+
 if __name__ == "__main__":
     unittest.main()
