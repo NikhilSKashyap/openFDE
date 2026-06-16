@@ -491,6 +491,22 @@ _CURATED_PLUGINS = {
                        "no package install.",
         "status": "builtin-local",
     },
+    "treesitter-js-ts": {
+        "id": "treesitter-js-ts",
+        "displayName": "Tree-sitter JS/TS parser",
+        "kind": "language_pack",
+        "method": "pip",
+        # EXPLICIT allowlisted packages (not the `openfde[treesitter]` extra, which is unreliable for a
+        # source/editable install). These match pyproject's optional `treesitter` extra.
+        "packages": ["tree-sitter>=0.22", "tree-sitter-javascript>=0.21", "tree-sitter-typescript>=0.21"],
+        "packageName": None,
+        "version": None,
+        "capabilities": ["architecture"],
+        "description": "Precise JS/TS architecture parsing (tree-sitter AST). Optional — OpenFDE uses "
+                       "its built-in regex parser without it; install to make the precise path the "
+                       "default for JS/TS repos.",
+        "status": "recommended",
+    },
 }
 
 
@@ -531,18 +547,54 @@ def plugin_install_plan(plugin_id: str) -> dict:
         plan["reason"] = (f"'{entry['displayName']}' is built into OpenFDE — enable it locally "
                           f"(writes {_LOCAL_PLUGIN_DIR}/{pid}.json, a JSON file only; no package is "
                           "downloaded or run)")
-    elif method == "pip" and entry.get("packageName"):
-        spec = entry["packageName"] + (entry.get("version") or "")
-        plan["actions"] = [{
-            "type": "pip-install",
-            "argv": [sys.executable, "-m", "pip", "install", spec],   # STRUCTURED argv — never shell=True
-        }]
-        plan["reason"] = (f"installs the curated package '{spec}' (approval required; a proposed argv "
-                          "only — OpenFDE never runs it automatically)")
+    elif method == "pip":
+        specs = list(entry.get("packages") or [])
+        if not specs and entry.get("packageName"):
+            specs = [entry["packageName"] + (entry.get("version") or "")]
+        if specs:
+            plan["actions"] = [{
+                "type": "pip-install",
+                # STRUCTURED argv from the curated allowlist — never a shell string, never shell=True,
+                # never a user-supplied package name.
+                "argv": [sys.executable, "-m", "pip", "install", *specs],
+            }]
+            plan["reason"] = ("installs the curated package(s) {} (approval required; a proposed argv "
+                              "only — OpenFDE never runs it automatically)".format(", ".join(specs)))
+        else:
+            plan.update(installable=False, actions=[], reason="curated entry has no install spec")
     else:
         plan.update(installable=False, actions=[],
                     reason="curated entry has no supported install method")
     return plan
+
+
+def treesitter_recommendation(root) -> dict:
+    """Recommend the tree-sitter JS/TS parser when ``root`` is a JS/TS repo and the optional grammars
+    are NOT installed — so the precise AST path becomes the default experience, gated by approval.
+
+    Returns ``{recommended: bool, id, reason, plan?}``. NOTHING is installed here; ``plan`` (present
+    only when recommended) is the approval-gated v1-I curated install plan (a PROPOSAL — structured
+    argv, ``requiresApproval: true``). The regex path remains the fallback regardless."""
+    out = {"recommended": False, "id": "treesitter-js-ts"}
+    if root is None:
+        return out
+    try:
+        from openfde.language_packs import js_ts_treesitter
+        from openfde.language_packs.registry import get_language_packs
+    except Exception:  # noqa: BLE001 — an optional-path probe must never break
+        return out
+    is_js_ts = any(getattr(p, "name", "") == "js_ts" for p in (get_language_packs(root) or []))
+    if not is_js_ts:
+        return {**out, "reason": "not a JS/TS repo — tree-sitter parsing is not applicable"}
+    if js_ts_treesitter.available():
+        return {**out, "reason": "tree-sitter already installed — precise JS/TS parsing is active"}
+    return {
+        "recommended": True,
+        "id": "treesitter-js-ts",
+        "reason": "JS/TS repo detected without tree-sitter — installing it enables precise architecture "
+                  "parsing (OpenFDE keeps working with the regex fallback until then)",
+        "plan": plugin_install_plan("treesitter-js-ts"),
+    }
 
 
 _LOCAL_PLUGIN_DIR = ".openfde/plugins"

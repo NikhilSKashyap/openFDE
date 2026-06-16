@@ -905,5 +905,82 @@ class CuratedInstallPlanTest(unittest.TestCase):
             self.assertTrue((root / ".openfde" / "plugins" / "webxr.json").exists())
 
 
+class TreeSitterInstallTest(unittest.TestCase):
+    """L1-D default-path nudge: a JS/TS repo without tree-sitter gets an approval-gated, STRUCTURED
+    install plan (proposal only — nothing runs); non-JS repos and already-installed repos get none."""
+
+    _TS = "openfde.language_packs.js_ts_treesitter.available"
+
+    def test_curated_registry_includes_treesitter(self):
+        by_id = {e["id"]: e for e in plugins.curated_plugins()}
+        self.assertIn("treesitter-js-ts", by_id)
+        self.assertEqual(by_id["treesitter-js-ts"]["method"], "pip")
+
+    def test_plan_is_structured_argv_allowlisted(self):
+        p = plugins.plugin_install_plan("treesitter-js-ts")
+        self.assertTrue(p["ok"] and p["installable"] and p["requiresApproval"])
+        self.assertEqual(p["method"], "pip")
+        argv = p["actions"][0]["argv"]
+        self.assertIsInstance(argv, list)                            # argv list, NEVER a shell string
+        self.assertTrue(all(isinstance(a, str) for a in argv))
+        self.assertEqual(argv[:4], [sys.executable, "-m", "pip", "install"])
+        self.assertTrue(any("tree-sitter" in a for a in argv[4:]))   # allowlisted grammar packages
+        self.assertNotIn("shell", p["actions"][0])
+
+    def test_unknown_install_id_refused(self):
+        p = plugins.plugin_install_plan("treesitter-evil; rm -rf /")
+        self.assertFalse(p["ok"])
+        self.assertFalse(p["installable"])
+        self.assertEqual(p["actions"], [])
+
+    def test_recommended_for_js_ts_repo_without_treesitter(self):
+        d, root = _repo({"package.json": '{"name":"x"}', "src/app.ts": "export const x = 1\n"})
+        with d, mock.patch(self._TS, return_value=False):
+            rec = plugins.treesitter_recommendation(root)
+        self.assertTrue(rec["recommended"])
+        self.assertEqual(rec["id"], "treesitter-js-ts")
+        self.assertEqual(rec["plan"]["actions"][0]["argv"][:4], [sys.executable, "-m", "pip", "install"])
+
+    def test_not_recommended_when_treesitter_present(self):
+        d, root = _repo({"package.json": '{"name":"x"}', "src/app.ts": "export const x = 1\n"})
+        with d, mock.patch(self._TS, return_value=True):
+            self.assertFalse(plugins.treesitter_recommendation(root)["recommended"])
+
+    def test_not_recommended_for_non_js_repo(self):
+        d, root = _repo({"main.py": "def f():\n    return 1\n"})
+        with d, mock.patch(self._TS, return_value=False):
+            self.assertFalse(plugins.treesitter_recommendation(root)["recommended"])
+
+    def test_planning_runs_no_subprocess(self):
+        import subprocess
+
+        def boom(*a, **k):
+            raise AssertionError("planning must not execute a subprocess")
+
+        d, root = _repo({"package.json": '{"name":"x"}', "src/app.ts": "export const x = 1\n"})
+        with d, mock.patch.object(subprocess, "run", boom), \
+             mock.patch.object(subprocess, "Popen", boom), \
+             mock.patch(self._TS, return_value=False):
+            self.assertTrue(plugins.plugin_install_plan("treesitter-js-ts")["ok"])
+            self.assertTrue(plugins.treesitter_recommendation(root)["recommended"])
+
+
+class PackagingTest(unittest.TestCase):
+    """Release-readiness: version metadata aligned, and wheel package discovery includes subpackages."""
+
+    _ROOT = Path(__file__).resolve().parent.parent
+
+    def test_version_metadata_aligned(self):
+        import openfde
+        self.assertEqual(openfde.__version__, "0.5.9")
+        self.assertIn(f'version = "{openfde.__version__}"', (self._ROOT / "pyproject.toml").read_text())
+        self.assertIn(f'version="{openfde.__version__}"', (self._ROOT / "setup.py").read_text())
+
+    def test_package_discovery_includes_subpackages(self):
+        text = (self._ROOT / "pyproject.toml").read_text()
+        self.assertIn("[tool.setuptools.packages.find]", text)
+        self.assertIn('"openfde*"', text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1414,6 +1414,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         deferred. A cheap in-memory lookup, so it runs inline (no executor, no slowdown to listing)."""
         return web.json_response(plugins_mod.plugin_install_plan(request.match_info.get("id", "")))
 
+    async def get_treesitter_recommendation(request: web.Request) -> web.Response:
+        """L1-D: should OpenFDE recommend the tree-sitter JS/TS parser for THIS repo? Returns
+        {recommended, id, reason, plan?} — a JS/TS repo without tree-sitter yields a recommendation
+        carrying the approval-gated curated install plan (a PROPOSAL; nothing is installed, regex stays
+        the fallback). Off the event loop (a bounded repo-language probe)."""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: plugins_mod.treesitter_recommendation(path))
+        return web.json_response(result)
+
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.
 
@@ -4546,6 +4555,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/plugins",                  get_plugins)
     app.router.add_get( "/api/plugins/webxr/summary",    get_webxr_summary)
     app.router.add_get( "/api/plugins/install-plan/{id}", get_plugin_install_plan)
+    app.router.add_get( "/api/plugins/treesitter-recommendation", get_treesitter_recommendation)
     app.router.add_post("/api/plugins/{id}/install",     post_plugin_install)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)

@@ -22,12 +22,18 @@ The assimilation + verify + repro SEAMS for Node repos. This pack can:
     guessing — and feed the **failure-flow lens** (L1-C): a failing JS/TS test maps
     to its connected implementation (``architect.js_call_context``).
 
-Honest boundary (recorded in ROADMAP as L1-D / Next): the parser is REGEX-based, not
-tree-sitter — it covers the forms common real repos use, and the flows it emits carry
-confidence that reflects the heuristic (the ArchGraph warnings name it). Still NOT
-here: tree-sitter assimilation, Node test-impact analysis, and AUTOMATIC JS/TS repro
-drafting (issue_repro's drafter stays pytest-only — a non-Python target stops cleanly
-instead of getting a fabricated Python test). No new dependencies, no ``npm install``.
+Parser (L1-D): tree-sitter is the PREFERRED precise path for ArchGraph symbol + import
+extraction. When the optional ``tree-sitter`` + JS/TS grammars are installed
+(``pip install "openfde[treesitter]"``), ``analyze_repo`` parses from a real AST; without
+them it falls back to the built-in REGEX path (still dependency-free, covering the forms
+common real repos use), and the ArchGraph warnings name which path ran. OpenFDE surfaces a
+recommendation to install the grammars when a JS/TS repo lacks them (approval-gated; see
+``plugins.treesitter_recommendation``) — but tree-sitter is OPTIONAL, never a hard dependency.
+UNCHANGED by L1-D: the function-level flows, the failure-flow resolver
+(``architect.js_call_context``), and repro drafting all stay regex/heuristic, and issue_repro's
+drafter stays pytest-only (a non-Python target stops cleanly instead of getting a fabricated
+Python test). Still NOT here: deep TS type graph, Node test-impact analysis, big-repo scoped
+assimilation. No ``npm install``.
 
 Imports of the wrapped modules are LAZY (inside methods) so the language_packs
 package has no import cycle with verify/issue_repro/server/architect.

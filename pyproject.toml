@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openfde"
-version = "0.5.4"
+version = "0.5.9"
 description = "AI-native IDE where you draw architecture and the agent builds it"
 requires-python = ">=3.9"
 dependencies = ["aiohttp>=3.9"]
@@ -19,5 +19,7 @@ treesitter = ["tree-sitter>=0.22", "tree-sitter-javascript>=0.21", "tree-sitter-
 [project.scripts]
 openfde = "openfde.cli:main"
 
-[tool.setuptools]
-packages = ["openfde"]
+# Discover openfde + ALL its subpackages (language_packs, plugins_runtime, …) into the wheel,
+# so a non-editable install isn't missing them.
+[tool.setuptools.packages.find]
+include = ["openfde*"]
