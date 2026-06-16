@@ -388,6 +388,15 @@ def _rail_chip(e: dict) -> dict:
     }
 
 
+def _rail_order_key(e: dict):
+    """Deterministic prompt-rail order — by ``sequence`` (assigned monotonically per repo), falling
+    back to ``createdAt`` ONLY when sequence is missing. Use with ``reverse=True`` → newest first.
+    NEVER ``updatedAt`` (the summarizer / hydration / reconciliation rewrite it) and NEVER the
+    persisted file order (a reconciliation upsert reorders the store). The single source of rail
+    order so the boot rail and the full rail always agree."""
+    return (e.get("sequence") or 0, e.get("createdAt") or "")
+
+
 def build_rail_payload(persistence, *, limit=None) -> dict:
     """CHEAP prompt-rail payload — the default /api/review/episodes, safe to poll often.
 
@@ -405,12 +414,13 @@ def build_rail_payload(persistence, *, limit=None) -> dict:
     an empty rail only after that. ``totalCount`` lets the UI know more chips are hydrating.
     """
     persistence.backfill_episode_meta()                    # tag/title/seq — deterministic, no git
-    eps = persistence.load_episodes()                      # newest-first
+    # Deterministic order (sequence desc) for BOTH boot and full — never the store's file order,
+    # which a reconciliation upsert reorders. Boot then takes the latest N off the top.
+    eps = sorted(persistence.load_episodes(), key=_rail_order_key, reverse=True)
     total = len(eps)
     boot = limit is not None
     if boot:
-        # latest N by sequence, newest-first — sort explicitly so boot doesn't depend on store order
-        eps = sorted(eps, key=lambda e: e.get("sequence") or 0, reverse=True)[:max(0, int(limit))]
+        eps = eps[:max(0, int(limit))]
     return {
         "ok": True,
         "episodes": [_rail_chip(e) for e in eps],
@@ -2025,6 +2035,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     attached_shas.add(c.get("sha"))
             return picked
 
+        # Deterministic rail order (sequence desc) AFTER reconciliation's upserts — never the
+        # store's file order, which an upsert reorders (the P122 → P83 → P121 jumble). The
+        # readiness cap below then applies to the genuinely-newest episodes, and the boot rail
+        # (build_rail_payload) uses the SAME key so the two agree.
+        episodes = sorted(episodes, key=_rail_order_key, reverse=True)
         # PR readiness runs git merge-base per landed episode; on a large history that is the
         # dominant per-poll cost. Compute it only for the most recent episodes (the ones a user
         # acts on); older episodes get null here and fetch readiness on demand when spotlighted

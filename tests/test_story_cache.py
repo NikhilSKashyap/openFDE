@@ -173,5 +173,66 @@ class RailBootTest(unittest.TestCase):
         self.assertEqual(empty["episodes"], [])
 
 
+class RailOrderingTest(unittest.TestCase):
+    """Rail order is deterministic — by sequence desc (newest first), createdAt only as a fallback —
+    NOT the persisted file order (a reconciliation upsert reorders it) and NOT updatedAt. Boot and
+    full rail use the SAME key, so they agree."""
+
+    def _persistence(self, eps):
+        from openfde.persistence import Persistence
+        d = tempfile.TemporaryDirectory()
+        od = Path(d.name) / ".openfde"
+        od.mkdir(parents=True)
+        (od / "episodes.json").write_text(json.dumps(eps))
+        return d, Persistence(od)
+
+    def test_full_rail_is_sequence_desc_despite_jumbled_store(self):
+        from openfde.server import build_rail_payload
+        # Stored in the jumbled file order an upsert leaves behind (the P122 → P83 → P121 bug).
+        eps = [_episode(s) for s in (122, 83, 121, 94, 120)]
+        d, p = self._persistence(eps)
+        with d:
+            tags = [c["tag"] for c in build_rail_payload(p)["episodes"]]
+        self.assertEqual(tags, ["P122", "P121", "P120", "P94", "P83"])   # sequence desc, not file order
+
+    def test_boot_and_full_agree_on_overlap(self):
+        from openfde.server import build_rail_payload
+        eps = [_episode(s) for s in (122, 83, 121, 94, 120, 119, 118)]
+        d, p = self._persistence(eps)
+        with d:
+            full = [c["tag"] for c in build_rail_payload(p)["episodes"]]
+            boot = [c["tag"] for c in build_rail_payload(p, limit=4)["episodes"]]
+        self.assertEqual(boot, full[:4])                                 # boot = top of the full order
+        self.assertEqual(boot, ["P122", "P121", "P120", "P119"])
+
+    def test_operational_episode_stays_in_rail_sorted_by_sequence(self):
+        from openfde.server import build_rail_payload
+        eps = [_episode(10), _episode(11, operational=True), _episode(12)]
+        d, p = self._persistence(eps)
+        with d:
+            chips = build_rail_payload(p)["episodes"]
+        self.assertEqual([c["tag"] for c in chips], ["P12", "P11", "P10"])  # operational not removed
+        self.assertTrue(next(c for c in chips if c["tag"] == "P11")["storyFacts"]["operational"])
+
+    def test_order_key_falls_back_to_createdAt_only_when_sequence_missing(self):
+        from openfde.server import _rail_order_key
+        seqd = {"sequence": 5, "createdAt": "2020-01-01T00:00:00Z"}        # old createdAt, has sequence
+        new = {"createdAt": "2026-06-16T10:00:00Z"}                        # no sequence
+        old = {"createdAt": "2026-06-15T10:00:00Z"}                        # no sequence, older
+        self.assertEqual(sorted([old, new, seqd], key=_rail_order_key, reverse=True),
+                         [seqd, new, old])                                 # seq first, then createdAt desc
+
+    def test_multi_commit_episode_shows_both_commits_under_one_prompt(self):
+        from openfde.server import build_rail_payload
+        e = _episode(7)
+        e["commitShas"] = ["sha_a", "sha_b"]
+        e["commitMeta"] = {"sha_a": {"title": "A"}, "sha_b": {"title": "B"}}
+        d, p = self._persistence([e])
+        with d:
+            chip = build_rail_payload(p)["episodes"][0]
+        self.assertEqual(chip["commitCount"], 2)
+        self.assertEqual([c["sha"] for c in chip["commits"]], ["sha_a", "sha_b"])
+
+
 if __name__ == "__main__":
     unittest.main()
