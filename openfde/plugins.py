@@ -140,6 +140,12 @@ _LANGUAGE_PACK_META = {
         "activatesOn": "package.json, or *.ts/*.tsx/*.js/*.jsx/*.mjs/*.cjs/*.mts/*.cts",
         "provides": ("architecture", "html-entrypoints", "verify:vitest",
                      "verify:jest", "verify:playwright", "failure-lens"),
+        # v1-J: the JS/TS pack proves the runtime contract — its EXISTING assimilation, test
+        # detection, and failure parsing are exposed as TRUSTED built-in runtime hooks, loaded
+        # lazily only when a JS/TS repo asks for a capability. No new intelligence; regex fallback
+        # and all current behavior are preserved.
+        "capabilities": ("architecture", "test_detector", "failure_parser", "repro_drafter"),
+        "runtime": {"module": "openfde.plugins_runtime.js_ts", "factory": "make_runtime"},
     },
 }
 
@@ -163,6 +169,8 @@ def _language_pack_specs() -> list:
             status="builtin",
             source="builtin",
             probe=pack.detects,
+            capabilities=tuple(meta.get("capabilities", ())),   # v1-J: runtime hooks (js_ts)
+            runtime=meta.get("runtime"),                        # trusted built-in pointer | None
         ))
     return specs
 

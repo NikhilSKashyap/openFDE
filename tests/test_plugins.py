@@ -617,28 +617,28 @@ class RuntimeActivationTest(unittest.TestCase):
     PROV = "_ofde_test_rtprov"        # manifest-provider module (sys.modules, lightweight)
     RT = "_ofde_test_runtime"         # runtime module (ON DISK, imported lazily — never pre-loaded)
     RT_BAD = "_ofde_test_runtime_bad"
-    DEP = "fake-runtime-marker"       # a NON-WebXR dep marker — keeps this suite off the real WebXR pack
 
     def setUp(self):
         prov = types.ModuleType(self.PROV)
-        # Detect on a NON-WebXR marker so this suite isolates external-runtime behavior from the
-        # real built-in WebXR domain_summary provider (WebXR activates on three / .glb / navigator.xr,
-        # and now also provides "domain_summary" — using "three" here would conflate the two).
+        # Detect on a synthetic FILE marker (no package.json / .py / .ts) so NO built-in language
+        # pack or suggestion activates — this suite isolates EXTERNAL runtime mechanics from the real
+        # providers (js_ts now exposes architecture/test/failure/repro hooks; webxr exposes
+        # domain_summary). A dependency/source marker would conflate them.
         prov.summary_pack = lambda: {
             "id": "ext-rt", "kind": "domain_pack", "displayName": "Ext Runtime", "version": "1.0.0",
-            "capabilities": ["domain_summary"], "detects": {"dependencies": [self.DEP]},
+            "capabilities": ["domain_summary"], "detects": {"files": ["**/*.ofdetest"]},
             "runtime": {"module": self.RT, "factory": "make"}}
         prov.arch_pack = lambda: {
             "id": "ext-arch", "kind": "domain_pack", "capabilities": ["architecture"],
-            "detects": {"dependencies": [self.DEP]},
+            "detects": {"files": ["**/*.ofdetest"]},
             "runtime": {"module": self.RT, "factory": "make"}}
         prov.badimport_pack = lambda: {
             "id": "ext-badimp", "kind": "domain_pack", "capabilities": ["domain_summary"],
-            "detects": {"dependencies": [self.DEP]},
+            "detects": {"files": ["**/*.ofdetest"]},
             "runtime": {"module": self.RT_BAD, "factory": "make"}}
         prov.badfactory_pack = lambda: {
             "id": "ext-badfac", "kind": "domain_pack", "capabilities": ["domain_summary"],
-            "detects": {"dependencies": [self.DEP]},
+            "detects": {"files": ["**/*.ofdetest"]},
             "runtime": {"module": self.RT, "factory": "boom"}}
         sys.modules[self.PROV] = prov
 
@@ -674,7 +674,7 @@ class RuntimeActivationTest(unittest.TestCase):
         return mock.patch("importlib.metadata.entry_points", fake_entry_points)
 
     def _match_repo(self):
-        return _repo({"package.json": json.dumps({"dependencies": {self.DEP: "^1.0.0"}})})
+        return _repo({"marker.ofdetest": "ofde external-runtime test marker\n"})
 
     def test_list_plugins_does_not_import_runtime(self):
         self.assertNotIn(self.RT, sys.modules)
@@ -736,7 +736,7 @@ class RuntimeActivationTest(unittest.TestCase):
         with d, self._patch_eps(["summary_pack", "arch_pack"]):
             active_ids = {p["id"] for p in plugins.active_plugins(root)}
             ds_ids = {p["id"] for p in plugins.active_plugins(root, capability="domain_summary")}
-        self.assertTrue({"ext-rt", "ext-arch", "js_ts"} <= active_ids)  # all match the repo
+        self.assertEqual(active_ids, {"ext-rt", "ext-arch"})            # only the fake providers match
         self.assertEqual(ds_ids, {"ext-rt"})                            # capability narrows it
 
     def test_local_manifest_runtime_is_ignored(self):
@@ -963,6 +963,141 @@ class TreeSitterInstallTest(unittest.TestCase):
              mock.patch(self._TS, return_value=False):
             self.assertTrue(plugins.plugin_install_plan("treesitter-js-ts")["ok"])
             self.assertTrue(plugins.treesitter_recommendation(root)["recommended"])
+
+
+# Known-good Vitest failure output (mirrors tests/test_language_packs.py) for the failure_parser hook.
+_VITEST_OUTPUT = (
+    " ❯ src/math.test.ts (1 test | 1 failed) 12ms\n"
+    "   × add > adds two numbers 5ms\n"
+    "\n"
+    "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n"
+    "\n"
+    " FAIL  src/math.test.ts > add > adds two numbers\n"
+    "AssertionError: expected 5 to be 4 // Object.is equality\n"
+    " ❯ src/math.test.ts:8:19\n"
+)
+
+
+class JsTsRuntimeHookTest(unittest.TestCase):
+    """v1-J: the JS/TS built-in pack proves the plugin contract — its existing assimilation, test
+    detection, and failure parsing run through the runtime hooks (architecture / test_detector /
+    failure_parser / repro_drafter), loaded lazily and only for JS/TS repos. Regex fallback + all
+    current behavior preserved; nothing is installed."""
+
+    RT = "openfde.plugins_runtime.js_ts"
+    _TS = "openfde.language_packs.js_ts_treesitter.available"
+
+    def setUp(self):
+        sys.modules.pop(self.RT, None)
+        plugins._RUNTIME_CACHE.clear()
+
+    def tearDown(self):
+        plugins._RUNTIME_CACHE.clear()
+
+    def _js_repo(self):
+        return _repo({"package.json": json.dumps({"name": "x", "scripts": {"test": "vitest"}}),
+                      "src/app.ts": "export function f() { return 1 }\n"})
+
+    def _arch_runtime(self, root):
+        provs = plugins.runtime_for_capability(root, "architecture")
+        self.assertEqual([p["id"] for p in provs], ["js_ts"])
+        return plugins.runtime_hook(provs[0]["runtime"], "architecture")
+
+    def test_list_plugins_does_not_import_js_ts_runtime(self):
+        import subprocess
+        d, root = self._js_repo()
+        with d:
+            code = ("import sys, json, openfde.plugins as p;"
+                    f"p.list_plugins({json.dumps(str(root))});"
+                    "print('openfde.plugins_runtime.js_ts' in sys.modules,"
+                    " 'openfde.architect' in sys.modules)")
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.strip(), "False False", out.stderr)
+
+    def test_js_ts_builtin_declares_runtime_metadata_only(self):
+        d, root = self._js_repo()
+        with d:
+            row = next(r for r in plugins.list_plugins(root) if r["id"] == "js_ts")
+        self.assertTrue(row["hasRuntime"])
+        self.assertEqual(set(row["capabilities"]),
+                         {"architecture", "test_detector", "failure_parser", "repro_drafter"})
+
+    def test_runtime_activates_only_for_js_ts_repos(self):
+        d, root = self._js_repo()
+        with d:
+            self.assertEqual([p["id"] for p in plugins.runtime_for_capability(root, "architecture")],
+                             ["js_ts"])
+        d2, pyroot = _repo({"main.py": "def f():\n    return 1\n"})
+        with d2:
+            self.assertEqual(plugins.runtime_for_capability(pyroot, "architecture"), [])
+            self.assertIsNone(plugins.load_plugin_runtime("js_ts", pyroot))   # js_ts not detected
+
+    def test_architecture_hook_matches_analyzer_shape(self):
+        from openfde import architect
+        d, root = self._js_repo()
+        with d:
+            hook = self._arch_runtime(root)
+            via_hook = hook(root)
+            via_core = architect.analyze_repo(root)
+        self.assertEqual(set(via_hook), set(via_core))
+        self.assertTrue({"modules", "files", "functions", "edges",
+                         "flows", "fileEdges", "warnings"} <= set(via_hook))
+        self.assertIn("f", {fn["name"] for fn in via_hook["functions"]})
+
+    def test_missing_treesitter_falls_back_to_regex(self):
+        d, root = self._js_repo()
+        with d, mock.patch(self._TS, return_value=False):
+            g = self._arch_runtime(root)(root)
+        self.assertIn("f", {fn["name"] for fn in g["functions"]})        # regex still extracts
+        self.assertTrue(any("regex fallback" in w for w in g["warnings"]))
+
+    @unittest.skipUnless(__import__("openfde.language_packs.js_ts_treesitter",
+                                    fromlist=["available"]).available(),
+                         "tree-sitter not installed")
+    def test_treesitter_preferred_when_available(self):
+        d, root = self._js_repo()
+        with d:
+            g = self._arch_runtime(root)(root)
+        self.assertTrue(any("tree-sitter" in w for w in g["warnings"]))
+
+    def test_test_detector_hook_finds_scripts(self):
+        d, root = self._js_repo()
+        with d:
+            rt = plugins.load_plugin_runtime("js_ts", root)
+            checks = plugins.runtime_hook(rt, "test_detector")(root)
+        self.assertTrue(checks)
+        self.assertTrue(any("test" in " ".join(c["command"]) for c in checks))
+
+    def test_failure_parser_hook_parses_vitest(self):
+        d, root = self._js_repo()
+        with d:
+            rt = plugins.load_plugin_runtime("js_ts", root)
+            locs = plugins.runtime_hook(rt, "failure_parser")(_VITEST_OUTPUT, root)
+        self.assertEqual(len(locs), 1)
+        self.assertEqual(locs[0]["file"], "src/math.test.ts")
+        self.assertEqual(locs[0]["line"], 8)
+        self.assertEqual(locs[0]["test"], "adds two numbers")
+
+    def test_repro_drafter_hook_is_an_explicit_deferred_seam(self):
+        d, root = self._js_repo()
+        with d:
+            rt = plugins.load_plugin_runtime("js_ts", root)
+            out = plugins.runtime_hook(rt, "repro_drafter")(root)
+        self.assertIn("context", out)
+        self.assertIn("deferred", out["drafting"])                       # honest: drafting not built
+
+    def test_bad_runtime_pointer_logs_skips_not_crash(self):
+        # Point the js_ts builtin runtime at a missing module → load is logged + None, listing is fine.
+        bad = {**plugins._LANGUAGE_PACK_META,
+               "js_ts": {**plugins._LANGUAGE_PACK_META["js_ts"],
+                         "runtime": {"module": "openfde._no_such_rt_module", "factory": "make_runtime"}}}
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "_LANGUAGE_PACK_META", bad):
+            plugins._RUNTIME_CACHE.clear()
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                self.assertIsNone(plugins.load_plugin_runtime("js_ts", root))
+            rows = {r["id"] for r in plugins.list_plugins(root)}          # listing never crashes
+            self.assertIn("js_ts", rows)
 
 
 class PackagingTest(unittest.TestCase):
