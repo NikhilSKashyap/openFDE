@@ -287,9 +287,13 @@ export const getPlugins = () => apiFetch('/api/plugins')
  * WebXR domain-pack architecture hints (v1-E): frameworks, .glb/.gltf assets, XR entrypoints,
  * and the markers found in the watched repo. Read-only, bounded — `warnings` carries the honest
  * "architecture hints only, no test lens" boundary.
+ *
+ * Generous timeout: the cold scan walks the repo once (≈10s+ on a large repo like
+ * immersive-web/webxr-samples) before it caches, and this drives the canvas/tree
+ * badges — a too-tight timeout aborts the first load and the badges never appear.
  * @returns {Promise<{ok, detected, entrypoints, assets, frameworks, markers, warnings}|null>}
  */
-export const getWebxrSummary = () => apiFetch('/api/plugins/webxr/summary', { _timeout: 9000 })
+export const getWebxrSummary = () => apiFetch('/api/plugins/webxr/summary', { _timeout: 30000 })
 
 /**
  * ENABLE a known optional pack by writing its local manifest into `.openfde/plugins/{id}.json`
