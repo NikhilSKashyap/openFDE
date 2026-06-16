@@ -16,6 +16,7 @@ export default function Whiteboard({
   repoName = '',
   // In-place nesting (Step 16)
   archGraph,
+  webxrBadges = null,
   expandedIds,
   onToggleExpand,
   onSelectArchEntity,
@@ -143,6 +144,7 @@ export default function Whiteboard({
           executing={executing}
           repoName={repoName}
           archGraph={archGraph}
+          webxrBadges={webxrBadges}
           expandedIds={expandedIds}
           onToggleExpand={onToggleExpand}
           onSelectArchEntity={onSelectArchEntity}

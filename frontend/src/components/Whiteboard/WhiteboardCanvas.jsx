@@ -10,6 +10,7 @@ import { computeArchLayoutElk } from './elkArchLayout'
 import { computeStoryLayout } from './storyLayout'
 import { pickPrimaryFn } from '../../lib/flowResolve'
 import { watchFocusTargetId } from '../../lib/watchTarget'
+import { badgeNodesById } from '../../lib/webxrBadges'
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s || ''))
@@ -94,6 +95,9 @@ export default function WhiteboardCanvas({
   // Canvas spotlight (Step 37a Slice 2/3): light the boxes holding a concept, or
   // the boxes a commit touched (+ amber for partially-touched concepts).
   spotlight = null, onClearSpotlight = null,
+  // WebXR architecture badges: path → { kind, label } for files the WebXR pack
+  // flagged (XR entrypoints / 3D assets). null on every non-WebXR repo.
+  webxrBadges = null,
 }) {
   const svgRef = useRef(null)
   const scrollRef = useRef(null)          // .wb-canvas-scroll — Live-follow camera pans this
@@ -232,6 +236,20 @@ export default function WhiteboardCanvas({
     }
     return out
   }, [storyData, layout, nodes])
+
+  // Resolve WebXR badges (path → kind/label) to on-canvas geometry, the same way
+  // story badges resolve: each flagged file → its file node → position. A badge
+  // only renders for a file that's actually visible (an expanded module), so it's
+  // never orphaned in empty space. Architecture metadata only — no runtime lens.
+  const webxrBadgeNodes = useMemo(() => {
+    if (!webxrBadges) return []
+    const out = []
+    for (const [id, badge] of Object.entries(badgeNodesById(webxrBadges))) {
+      const n = layout.fileById?.[id]
+      if (n) out.push({ id, ...badge, x: n.x, y: n.y })
+    }
+    return out
+  }, [webxrBadges, layout])
 
   // Active viewport bounds (story stage overrides the nested layout's bounds).
   const viewBounds = storyStage ? storyStage.bounds : bounds
@@ -1014,6 +1032,20 @@ export default function WhiteboardCanvas({
                     <text x={b.x + 9} y={b.y + 12.5} textAnchor="middle" fontSize={10} fontWeight={700}
                       fill="#fff" fontFamily="inherit">{b.order}</text>
                   </g>
+                ))}
+              </g>
+
+              {/* WebXR architecture badges — a small calm tag on the top edge of any
+                  file the WebXR pack flagged (XR entrypoint / 3D asset). Read-only:
+                  no glow, no animation, no arrows. Auto-sized HTML chip so the label
+                  never clips; sits above the box so it never covers the filename. */}
+              <g pointerEvents="none">
+                {webxrBadgeNodes.map(b => (
+                  <foreignObject key={`xr-${b.id}`} x={b.x} y={b.y - 18} width={140} height={16}>
+                    <div xmlns="http://www.w3.org/1999/xhtml" className={`xr-badge ${b.kind}`} title={b.label}>
+                      {b.label}
+                    </div>
+                  </foreignObject>
                 ))}
               </g>
             </>

@@ -1,11 +1,15 @@
 import { useState } from 'react'
+import { badgeForPath } from '../../lib/webxrBadges'
 
-export default function FileNode({ node, depth = 0 }) {
+export default function FileNode({ node, depth = 0, webxrBadges = null }) {
   const [open, setOpen] = useState(node.defaultOpen ?? false)
   const isDir = !!node.children
   const indent = depth * 14
 
   const statusClass = node.status ? `status-${node.status}` : null
+  // WebXR architecture tag (Plugin Registry payoff): a tiny calm chip on files the
+  // WebXR pack flagged — XR entrypoint / 3D asset. Read-only metadata; null elsewhere.
+  const xr = !isDir ? badgeForPath(webxrBadges, node.path) : null
 
   return (
     <div>
@@ -29,6 +33,13 @@ export default function FileNode({ node, depth = 0 }) {
         {/* Name */}
         <span className="file-node-name">{node.name}</span>
 
+        {/* WebXR architecture tag (XR entrypoint / 3D asset) */}
+        {xr && (
+          <span className={`file-node-xr ${xr.kind}`} title={xr.label}>
+            {xr.kind === 'entrypoint' ? 'XR' : '3D'}
+          </span>
+        )}
+
         {/* Status dot */}
         {statusClass && <span className={`file-node-status ${statusClass}`} />}
       </div>
@@ -37,7 +48,7 @@ export default function FileNode({ node, depth = 0 }) {
       {isDir && open && (
         <div className="file-node-children">
           {node.children.map(child => (
-            <FileNode key={child.name} node={child} depth={depth + 1} />
+            <FileNode key={child.name} node={child} depth={depth + 1} webxrBadges={webxrBadges} />
           ))}
         </div>
       )}

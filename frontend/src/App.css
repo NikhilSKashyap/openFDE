@@ -327,6 +327,57 @@
 .status-active   { background: var(--active); }
 .status-modified { background: var(--dotted); }
 
+/* WebXR file-tree tag — a tiny calm chip marking files the WebXR pack flagged
+   (XR entrypoint / 3D asset). Read-only architecture metadata; no glow/animation.
+   The 2-char label is kind-coloured so the colour itself carries the meaning. */
+.file-node-xr {
+  flex-shrink: 0;
+  margin-left: 4px;
+  padding: 0 4px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  background: color-mix(in srgb, currentColor 13%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+}
+.file-node-xr.entrypoint { color: #4a9eff; }
+.file-node-xr.asset      { color: #c084fc; }
+
+/* WebXR canvas badge — the same architecture tag on the matching file node's top
+   edge. Auto-sized HTML chip inside a non-interactive SVG foreignObject; calm
+   surface with a kind-coloured dot + border, muted text. No glow/animation. */
+.xr-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 15px;
+  padding: 0 7px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.xr-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--xr-dot, var(--text-muted));
+}
+.xr-badge.entrypoint { --xr-dot: #4a9eff; border-color: color-mix(in srgb, #4a9eff 38%, var(--border)); }
+.xr-badge.asset      { --xr-dot: #c084fc; border-color: color-mix(in srgb, #c084fc 36%, var(--border)); }
+
 .file-node-children {
   overflow: hidden;
 }

@@ -59,8 +59,10 @@ import {
   landEpisode,
   askConcept,
   getConceptCards,
-  saveConceptCard, hatchFlow } from './api/backend'
+  saveConceptCard, hatchFlow,
+  getPlugins, getWebxrSummary } from './api/backend'
 import { connectWS, closeWS } from './api/ws'
+import { badgeMapFromSummary } from './lib/webxrBadges'
 
 // Merge event lists, dedup by id, newest-first, capped. Existing (live) entries
 // win over incoming so locally-enriched fields (live, projectEntryId) survive.
@@ -126,6 +128,10 @@ export default function App() {
   const [archGraph, setArchGraph]     = useState(null)
   const [expandedIds, setExpandedIds] = useState(() => new Set())
   const [archSel, setArchSel]         = useState(null)
+  // WebXR canvas badges (Plugin Registry payoff): path → { kind, label } for the
+  // files the WebXR pack flagged (XR entrypoints / 3D assets). null until a
+  // detected/enabled WebXR pack resolves; stays null on every other repo.
+  const [webxrBadges, setWebxrBadges] = useState(null)
   // The repair hatch — function-scoped fix surface, summoned ONLY by a failure
   // receipt's "Show →" ({file, line, func, funcName, test, start, end} | null).
   const [hatch, setHatch] = useState(null)
@@ -756,6 +762,29 @@ export default function App() {
   // Keep boxesRef synced so the WS handlers can map a file path → its module.
   useEffect(() => { boxesRef.current = canvasState.boxes }, [canvasState.boxes])
   useEffect(() => { archGraphRef.current = archGraph }, [archGraph])
+
+  // WebXR canvas badges: gate on the plugin registry, then pull the summary ONCE.
+  // We only fetch the (bounded) WebXR summary when the registry says the pack is
+  // detected or enabled (a local manifest) for this repo — every other repo skips
+  // the scan entirely. The result indexes XR entrypoints / 3D assets by path so the
+  // canvas can mark matching file nodes. Architecture metadata only — no runtime or
+  // test lens. Fail quiet: a badge-less canvas is the correct fallback. setState
+  // lives only in the async callbacks (never synchronously in the effect), so it
+  // can't trigger cascading renders.
+  useEffect(() => {
+    let alive = true
+    getPlugins().then(res => {
+      if (!alive || !res?.ok) return
+      const webxr = (res.plugins || []).find(p => p.id === 'webxr')
+      if (!webxr || !(webxr.detected || webxr.source === 'local')) return
+      getWebxrSummary().then(sum => {
+        if (!alive || !sum?.ok) return
+        const map = badgeMapFromSummary(sum)
+        if (Object.keys(map).length) setWebxrBadges(map)
+      })
+    })
+    return () => { alive = false }
+  }, [])
 
   const fileNodeId = (p) => `box:file:${p}`
   function moduleBoxForFile(path) {
@@ -2091,7 +2120,7 @@ export default function App() {
               title={leftOpen ? 'Collapse file tree' : 'Expand file tree'}>
               {leftOpen ? '‹' : '›'}
             </button>
-            {leftOpen && <FileTree repoName={session?.repoName || ''} cachedTree={bootFileTree} />}
+            {leftOpen && <FileTree repoName={session?.repoName || ''} cachedTree={bootFileTree} webxrBadges={webxrBadges} />}
           </aside>
           <main className="panel-middle">
             <Whiteboard
@@ -2108,6 +2137,7 @@ export default function App() {
               executing={executing}
               repoName={session?.repoName || ''}
               archGraph={archGraph}
+              webxrBadges={webxrBadges}
               expandedIds={expandedIds}
               onToggleExpand={toggleExpand}
               onSelectArchEntity={selectArchEntity}

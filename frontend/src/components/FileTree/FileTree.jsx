@@ -38,7 +38,7 @@ const statusStyle = { padding: '12px 14px', fontSize: 11.5, color: 'var(--text-m
  *
  * @param {{ repoName?: string }} props - the watched repo name, for the loading label.
  */
-export default function FileTree({ repoName = '', cachedTree = null }) {
+export default function FileTree({ repoName = '', cachedTree = null, webxrBadges = null }) {
   const [query, setQuery] = useState('')
   // Paint the cached tree (from /api/boot/canvas) IMMEDIATELY so the Explorer is never blank on
   // first load; null only when there is no cache yet (a never-scanned repo).
@@ -115,7 +115,7 @@ export default function FileTree({ repoName = '', cachedTree = null }) {
           </div>
         )}
         {state === 'live' && filtered.map(node => (
-          <FileNode key={node.path || node.name} node={node} depth={0} />
+          <FileNode key={node.path || node.name} node={node} depth={0} webxrBadges={webxrBadges} />
         ))}
       </div>
     </>
