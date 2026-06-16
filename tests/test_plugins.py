@@ -1232,6 +1232,108 @@ class JsTsConsumptionTest(unittest.TestCase):
         self.assertEqual(checks, [])                         # empty is valid → honored, NOT fallback
 
 
+class ReferenceExternalPluginTest(unittest.TestCase):
+    """v1-L: prove the lightweight external plug-and-play story end to end with a real, on-disk
+    reference package (``tests/fixtures/ofde_sample_plugin``) — put on sys.path + reached via a
+    monkeypatched entry point, simulating a pip-installed package. Covers discovery, metadata-only
+    listing, lazy runtime, probe-gated activation, safe skip of malformed plugins, the local-manifest
+    no-runtime rule, and safe handling of hook output by the consuming seam."""
+
+    PKG = "ofde_sample_plugin"
+    RT = "ofde_sample_plugin.runtime"
+    FIXTURES = str(Path(__file__).resolve().parent / "fixtures")
+
+    def setUp(self):
+        if self.FIXTURES not in sys.path:
+            sys.path.insert(0, self.FIXTURES)
+        plugins._RUNTIME_CACHE.clear()
+
+    def tearDown(self):
+        for m in [m for m in sys.modules if m == self.PKG or m.startswith(self.PKG + ".")]:
+            sys.modules.pop(m, None)
+        try:
+            sys.path.remove(self.FIXTURES)
+        except ValueError:
+            pass
+        plugins._RUNTIME_CACHE.clear()
+
+    def _patch_eps(self, value="ofde_sample_plugin.plugin:manifest", target_group="openfde.domain_packs"):
+        def fake_entry_points(group=None):   # param MUST be 'group' to match entry_points(group=…)
+            return [importlib.metadata.EntryPoint("sample", value, target_group)] if group == target_group else []
+        return mock.patch("importlib.metadata.entry_points", fake_entry_points)
+
+    def _marker_repo(self):
+        return _repo({"app.samplemarker": "x\n", "README.md": "# demo\n"})
+
+    def test_discovery_sees_the_manifest(self):
+        with self._patch_eps():
+            rows = {r["id"]: r for r in plugins.list_plugins()}
+        self.assertIn("sample-pack", rows)
+        self.assertEqual(rows["sample-pack"]["source"], "external")
+        self.assertEqual(rows["sample-pack"]["kind"], "domain_pack")
+        self.assertIn("domain_summary", rows["sample-pack"]["capabilities"])
+        self.assertTrue(rows["sample-pack"]["hasRuntime"])
+
+    def test_listing_is_metadata_only_no_runtime_import(self):
+        self.assertNotIn(self.RT, sys.modules)
+        d, root = self._marker_repo()
+        with d, self._patch_eps():
+            rows = {r["id"] for r in plugins.list_plugins(root)}
+        self.assertIn("sample-pack", rows)
+        self.assertNotIn(self.RT, sys.modules, "listing must not import the plugin runtime")
+
+    def test_runtime_loads_only_on_capability_request(self):
+        d, root = self._marker_repo()
+        with d, self._patch_eps():
+            self.assertNotIn(self.RT, sys.modules)
+            provs = plugins.runtime_for_capability(root, "domain_summary")
+            self.assertIn(self.RT, sys.modules)                 # imported NOW, on request
+            self.assertEqual([p["id"] for p in provs], ["sample-pack"])
+            hook = plugins.runtime_hook(provs[0]["runtime"], "domain_summary")
+            self.assertEqual(hook(root)["provider"], "sample-pack")
+
+    def test_activation_requires_probe_match(self):
+        d, root = _repo({"src/app.py": "x = 1\n"})              # no *.samplemarker → not detected
+        with d, self._patch_eps():
+            self.assertEqual(plugins.runtime_for_capability(root, "domain_summary"), [])
+            self.assertIsNone(plugins.load_plugin_runtime("sample-pack", root))
+        self.assertNotIn(self.RT, sys.modules)
+
+    def test_malformed_external_plugin_skipped_safely(self):
+        # entry point points at a missing attr → load() fails → logged + skipped; listing still works
+        with self._patch_eps(value="ofde_sample_plugin.plugin:does_not_exist"):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                rows = {r["id"] for r in plugins.list_plugins()}
+        self.assertIn("python", rows)
+        self.assertNotIn("sample-pack", rows)
+
+    def test_local_manifest_cannot_import_runtime(self):
+        # SECURITY: a repo-local manifest with the same runtime pointer must NOT load code.
+        manifest = {"id": "sample-pack", "kind": "domain_pack", "status": "available",
+                    "capabilities": ["domain_summary"],
+                    "runtime": {"module": self.RT, "factory": "make_runtime"}}
+        d, root = _repo({".openfde/plugins/sample-pack.json": json.dumps(manifest)})
+        with d:                                                 # note: NO entry-point patch
+            row = next(r for r in plugins.list_plugins(root) if r["id"] == "sample-pack")
+            self.assertEqual(row["source"], "local")
+            self.assertFalse(row["hasRuntime"])                # repo-declared runtime dropped
+            self.assertIsNone(plugins.load_plugin_runtime("sample-pack", root))
+        self.assertNotIn(self.RT, sys.modules)                 # never imported
+
+    def test_consuming_seam_safely_handles_hook_output(self):
+        d, root = self._marker_repo()
+        with d, self._patch_eps():
+            r = plugins.run_capability_hook(root, "domain_summary", lambda h: h(root))
+            self.assertEqual(r["provider"], "sample-pack")     # valid output flows through the seam
+        # a throwing external hook → NO_HOOK (logged), never raised through the consuming path
+        boom = {"domain_summary": lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))}
+        bad = [{"id": "sample-pack", "capability": "domain_summary", "runtime": boom}]
+        with mock.patch.object(plugins, "runtime_for_capability", return_value=bad):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                r2 = plugins.run_capability_hook(root, "domain_summary", lambda h: h(root))
+        self.assertIs(r2, plugins.NO_HOOK)
+
+
 class PackagingTest(unittest.TestCase):
     """Release-readiness: version metadata aligned, and wheel package discovery includes subpackages."""
 
