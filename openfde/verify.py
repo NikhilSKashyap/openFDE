@@ -18,11 +18,14 @@ Pure-ish helpers; the subprocess runner is injectable for tests.
 """
 
 import json
+import logging
 import re
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger("openfde.verify")
 
 VERIFY_CONFIG = "verify.json"          # optional override: .openfde/verify.json
 _TAIL_CAP = 2000                       # chars of combined output kept as evidence
@@ -448,14 +451,34 @@ def run_verification(root, *, checks=None, runner=None, timeout: int = _CHECK_TI
 # (config-only / frontend-only). Imports are lazy to keep verify ↔ language_packs
 # free of an import cycle.
 
+def _valid_check_list(value) -> bool:
+    """v1-K hardening: a plugin ``test_detector`` result is acceptable only as a LIST of dicts, each
+    with at least a non-empty string ``id`` and a list/tuple ``command``. Lenient otherwise — extra
+    fields are preserved, an empty list is valid (a repo with no checks). A trusted hook returning the
+    wrong type must not crash the discovery path; it falls back."""
+    if not isinstance(value, list):
+        return False
+    for c in value:
+        if not isinstance(c, dict):
+            return False
+        if not (isinstance(c.get("id"), str) and c.get("id")):
+            return False
+        if not isinstance(c.get("command"), (list, tuple)):
+            return False
+    return True
+
+
 def _pack_checks(pack, root) -> list:
     """One pack's checks as ``[as_dict]`` — PREFERRING its plugin ``test_detector`` runtime hook (v1-K),
-    else the pack's in-core discovery. A missing/failing hook falls back (see ``run_capability_hook``).
-    Scoped by ``provider_id=pack.name`` so only THIS pack's hook is preferred, preserving pack order."""
+    else the pack's in-core discovery. A missing/failing/**malformed** hook falls back. Scoped by
+    ``provider_id=pack.name`` so only THIS pack's hook is preferred, preserving pack order."""
     from openfde import plugins
     r = plugins.run_capability_hook(root, "test_detector", lambda h: h(root), provider_id=pack.name)
     if r is not plugins.NO_HOOK:
-        return r                                   # hook returns the standard check dicts (as_dict)
+        if _valid_check_list(r):
+            return r                               # valid hook output (standard check dicts) wins
+        logger.warning("plugin 'test_detector' hook for %s returned a malformed result (%s); "
+                       "using in-core discovery", pack.name, type(r).__name__)
     return [spec.as_dict() for spec in pack.discover_checks(root)]
 
 
@@ -476,16 +499,36 @@ def _discover_via_packs(root) -> list:
     return out
 
 
+def _valid_failure_list(value) -> bool:
+    """v1-K hardening: a plugin ``failure_parser`` result is acceptable only as a LIST of dicts, each
+    with at least a non-empty string ``file`` and an integer ``line`` (a bool is not a line). Lenient
+    otherwise — extra fields preserved, an empty list valid. A trusted hook returning a wrong shape must
+    not pass invalid data through as if it were failure locations; it falls back."""
+    if not isinstance(value, list):
+        return False
+    for loc in value:
+        if not isinstance(loc, dict):
+            return False
+        if not (isinstance(loc.get("file"), str) and loc.get("file")):
+            return False
+        if not isinstance(loc.get("line"), int) or isinstance(loc.get("line"), bool):
+            return False
+    return True
+
+
 def _pack_failures(pack, output: str, root) -> list:
     """One pack's failure locations as ``[as_dict]`` — PREFERRING its plugin ``failure_parser`` runtime
-    hook (v1-K), else the pack's in-core parser. A missing/failing hook falls back. Scoped by
-    ``provider_id=pack.name`` so only THIS pack's hook is preferred, preserving the cross-pack order
+    hook (v1-K), else the pack's in-core parser. A missing/failing/**malformed** hook falls back. Scoped
+    by ``provider_id=pack.name`` so only THIS pack's hook is preferred, preserving the cross-pack order
     (first non-empty wins)."""
     from openfde import plugins
     r = plugins.run_capability_hook(root, "failure_parser", lambda h: h(output, root),
                                     provider_id=pack.name)
     if r is not plugins.NO_HOOK:
-        return r                                   # hook returns the standard failure dicts (as_dict)
+        if _valid_failure_list(r):
+            return r                               # valid hook output (standard failure dicts) wins
+        logger.warning("plugin 'failure_parser' hook for %s returned a malformed result (%s); "
+                       "using in-core parser", pack.name, type(r).__name__)
     return [loc.as_dict() for loc in pack.parse_failures(output, root)]
 
 
