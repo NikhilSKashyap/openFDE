@@ -223,10 +223,17 @@ def reconcile_commit(commit: dict, episodes: list, *, watched_root=None) -> list
             out.append(_verdict(eid, EXPLICIT, "named in the commit's OpenFDE-Episodes trailer",
                                 matched, attach=True))
             continue
-        # 2. Inference needs file evidence + the same canonical repo.
+        # 2. Inference needs file evidence. The same-repo gate guards against sibling-repo path
+        #    collisions — but a BASELINE match (the commit's first parent IS the episode's
+        #    ``initialHead``, a watched-repo sha) is repo-specific proof that cannot collide across
+        #    repos, so it BYPASSES the gate. That bypass is what lets cwd-agnostic capture (the
+        #    agent's cwd ≠ the watched repo, so ``sessionCwd`` points elsewhere) still attribute its
+        #    own landed commit — the real P119 rail-attribution gap.
         if not ep_files or not matched:
             continue
-        if watched_root is not None and not _same_repo(ep.get("sessionCwd"), watched_root):
+        baseline = _baseline_match(ep, commit)                                               # (B)
+        if (not baseline and watched_root is not None
+                and not _same_repo(ep.get("sessionCwd"), watched_root)):
             continue
 
         coverage = len(matched) / len(ep_files)
@@ -243,7 +250,7 @@ def reconcile_commit(commit: dict, episodes: list, *, watched_root=None) -> list
 
         # 3. Provenance — file overlap alone is NOT enough; the commit must belong to this turn.
         in_window = _within_capture_window(_capture_ts(ep), commit_ts)                       # (A)
-        baseline = _baseline_match(ep, commit)                                               # (B)
+        # (B) baseline computed above (it also gates the same-repo bypass).
         current = (eid == latest_active                                                      # (C)
                    and _within_capture_window(_capture_ts(ep), commit_ts, _ACTIVE_WINDOW_S))
         if not (in_window or baseline or current):
@@ -353,5 +360,85 @@ def reconcile_episodes(commits: list, episodes: list, *, watched_root=None,
                 continue
             if attach_commit(ep, sha, confidence=v["confidence"], reason=v["reason"],
                              matched_files=v["matchedFiles"]):
+                changed.setdefault(v["episodeId"], []).append(v)
+    return changed
+
+
+# ── Rail attribution: attribute OpenFDE's own landed commits + mark them landed ──────
+# An OpenFDE-landed commit usually carries an OpenFDE-Episode trailer. When it doesn't (e.g. a
+# council/Claude-Code land outside the trailer path), the rail shows the episode as reviewing /
+# complete_no_changes with no commit. This conservatively attaches that commit and marks the
+# episode landed — trailer first, heuristic only for OpenFDE-authored commits, and never on an
+# AMBIGUOUS multi-episode guess.
+_OPENFDE_AUTHOR_EMAILS = frozenset({"openfde@localhost"})
+# Pre-land statuses: an attached commit IS the land, so the rail stops showing it as in-flight.
+_PRELAND_STATES = frozenset({"open", "reviewing", "needs_manual_land", "complete_no_changes"})
+
+
+def is_openfde_author(commit: dict) -> bool:
+    """True when the commit was authored by OpenFDE's land identity (``OpenFDE
+    <openfde@localhost>``). The trailer-less heuristic only attributes OpenFDE's OWN commits — a
+    human/foreign commit is never guessed onto an episode by file overlap."""
+    email = str(commit.get("email") or "").strip().lower()
+    name = str(commit.get("author") or "").strip().lower()
+    return email in _OPENFDE_AUTHOR_EMAILS or name == "openfde"
+
+
+def _mark_landed(episode: dict) -> bool:
+    """Flip a pre-land episode (open/reviewing/needs_manual_land/complete_no_changes) to ``landed``
+    once a commit is attached. Idempotent; an already-landed/other status is left untouched."""
+    if episode.get("status") in _PRELAND_STATES:
+        episode["status"] = "landed"
+        return True
+    return False
+
+
+def _unambiguous(verdicts: list) -> list:
+    """Keep only inferred verdicts whose matched files are UNIQUE to them across the candidate set.
+    A trailer-less commit must NOT be guessed onto two episodes that claim the SAME file (which
+    prompt owns that change?), so any episode sharing a matched file with another is dropped as
+    ambiguous. Episodes with DISJOINT matched files all survive (many prompts → one commit)."""
+    from collections import Counter
+    counts = Counter(f for v in verdicts for f in (v.get("matchedFiles") or []))
+    return [v for v in verdicts
+            if v.get("matchedFiles") and all(counts[f] == 1 for f in v["matchedFiles"])]
+
+
+def reconcile_authored_episodes(commits: list, episodes: list, *, watched_root=None) -> dict:
+    """Conservative rail attribution: attach each commit to the episode(s) it provably satisfies,
+    then mark those episodes ``landed``. Two paths, trailer first:
+      • an **explicit trailer** attaches every named episode (the many-prompts → one-commit
+        contract), authoritative — no author or ambiguity gate;
+      • otherwise a **heuristic**, applied ONLY to OpenFDE-authored commits, attaches an episode
+        when ``reconcile_commit`` confidently links it (strong overlap / baseline / capture window)
+        AND the link is **unambiguous** — a commit whose inferred match would land on two episodes
+        sharing the SAME file is refused (we never guess which prompt it belongs to). Timing
+        closeness alone never attaches (``reconcile_commit`` already requires real provenance).
+
+    Mutates ``episodes`` in place. Returns ``{episodeId: [verdicts]}`` for what changed (a new
+    commit and/or a landed flip), so a caller can persist + rebuild caches for exactly those.
+    """
+    by_id = {e.get("episodeId"): e for e in episodes if e.get("episodeId")}
+    changed: dict = {}
+    for commit in commits:
+        sha = commit.get("sha")
+        if not sha:
+            continue
+        verdicts = reconcile_commit(commit, episodes, watched_root=watched_root)
+        explicit = [v for v in verdicts if v["attach"] and v["confidence"] == EXPLICIT]
+        if explicit:
+            to_apply = explicit                              # trailer wins; multi-attach allowed
+        elif not is_openfde_author(commit):
+            continue                                         # heuristic is OpenFDE-authored only
+        else:
+            to_apply = _unambiguous([v for v in verdicts if v["attach"]])
+        for v in to_apply:
+            ep = by_id.get(v["episodeId"])
+            if ep is None:
+                continue
+            touched = attach_commit(ep, sha, confidence=v["confidence"], reason=v["reason"],
+                                    matched_files=v["matchedFiles"])
+            landed = _mark_landed(ep)
+            if touched or landed:
                 changed.setdefault(v["episodeId"], []).append(v)
     return changed

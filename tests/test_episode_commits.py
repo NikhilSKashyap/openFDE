@@ -45,9 +45,11 @@ def _ep(eid, files, *, created=NOW, status="reviewing", signal="product",
     return e
 
 
-def _commit(sha, files, *, ids=None, ts=NOW, parents=None):
+def _commit(sha, files, *, ids=None, ts=NOW, parents=None,
+            author="OpenFDE", email="openfde@localhost"):
     return {"sha": sha, "files": list(files), "episodeIds": list(ids or []),
-            "timestamp": _iso(ts), "parents": list(parents or [])}
+            "timestamp": _iso(ts), "parents": list(parents or []),
+            "author": author, "email": email}
 
 
 class TrailerParseTest(unittest.TestCase):
@@ -151,6 +153,70 @@ class ReconcileCommitTest(unittest.TestCase):
 
     def test_no_shared_file_no_link(self):
         self.assertEqual(ec.reconcile_commit(_commit("c", ["a.py"]), [_ep("P", ["z.py"])]), [])
+
+    def test_baseline_match_bypasses_the_repo_gate(self):
+        # cwd-agnostic capture (P119): the episode's sessionCwd is a DIFFERENT repo, but the commit
+        # baseline-matches (first parent == initialHead, a watched-repo sha) → still attached.
+        ep = _ep("P119", ["tests/test_plugins.py"], status="complete_no_changes",
+                 session_cwd="/some/other/repo", initial_head="BASE")
+        commit = _commit("c", ["openfde/plugins.py", "tests/test_plugins.py"], parents=["BASE"])
+        [v] = ec.reconcile_commit(commit, [ep], watched_root="/the/watched/repo")
+        self.assertTrue(v["attach"])
+        self.assertIn("baseline", v["reason"])
+
+
+class ReconcileAuthoredEpisodesTest(unittest.TestCase):
+    """Conservative rail attribution: trailer wins; the heuristic attaches OpenFDE-authored commits
+    on a single unambiguous match and marks the episode landed; ambiguous overlap is refused."""
+
+    def test_explicit_trailer_wins_and_marks_landed(self):
+        ep = _ep("P9", ["x.py"], status="reviewing")
+        # foreign-authored, no file overlap — still attaches via its trailer (authoritative).
+        commit = _commit("abc", ["unrelated.py"], ids=["P9"], author="A Human", email="dev@x.com")
+        changed = ec.reconcile_authored_episodes([commit], [ep])
+        self.assertIn("P9", changed)
+        self.assertEqual(ep["commitShas"], ["abc"])
+        self.assertEqual(ep["status"], "landed")
+
+    def test_heuristic_attaches_strong_overlap_and_marks_landed(self):
+        ep = _ep("P1", ["a.py", "b.py"], status="reviewing")
+        changed = ec.reconcile_authored_episodes([_commit("c1", ["a.py", "b.py", "extra.py"])], [ep])
+        self.assertIn("P1", changed)
+        self.assertEqual(ep["commitShas"], ["c1"])
+        self.assertEqual(ep["commitMeta"]["c1"]["confidence"], "high_file_overlap")
+        self.assertEqual(ep["status"], "landed")
+
+    def test_heuristic_attaches_across_cwd_mismatch_via_baseline(self):
+        # The P119 gap end-to-end: different sessionCwd + complete_no_changes, but baseline-matched.
+        ep = _ep("P119", ["tests/test_plugins.py"], status="complete_no_changes",
+                 session_cwd="/some/other/repo", initial_head="BASE")
+        commit = _commit("4975551", ["openfde/plugins.py", "tests/test_plugins.py"], parents=["BASE"])
+        changed = ec.reconcile_authored_episodes([commit], [ep], watched_root="/the/watched/repo")
+        self.assertIn("P119", changed)
+        self.assertEqual(ep["commitShas"], ["4975551"])
+        self.assertEqual(ep["status"], "landed")
+
+    def test_heuristic_refuses_ambiguous_multi_episode_overlap(self):
+        # Two episodes both claim the SAME file → can't tell which prompt owns it → attach to NEITHER.
+        a, b = _ep("A", ["shared.py"], status="reviewing"), _ep("B", ["shared.py"], status="reviewing")
+        changed = ec.reconcile_authored_episodes([_commit("c", ["shared.py"])], [a, b])
+        self.assertEqual(changed, {})
+        self.assertNotIn("commitShas", a)
+        self.assertNotIn("commitShas", b)
+        self.assertEqual(a["status"], "reviewing")
+
+    def test_disjoint_overlap_still_multi_attaches(self):
+        # DISTINCT files per episode → many prompts → one commit still works (not ambiguous).
+        a, b = _ep("A", ["a.py"], status="reviewing"), _ep("B", ["b.py"], status="reviewing")
+        changed = ec.reconcile_authored_episodes([_commit("c", ["a.py", "b.py"])], [a, b])
+        self.assertEqual(set(changed), {"A", "B"})
+
+    def test_foreign_authored_commit_is_not_heuristically_attached(self):
+        ep = _ep("P1", ["a.py", "b.py"], status="reviewing")
+        commit = _commit("c", ["a.py", "b.py"], author="A Human", email="dev@human.com")
+        self.assertEqual(ec.reconcile_authored_episodes([commit], [ep]), {})
+        self.assertNotIn("commitShas", ep)
+        self.assertEqual(ep["status"], "reviewing")           # not flipped to landed
 
 
 class AttachCommitTest(unittest.TestCase):

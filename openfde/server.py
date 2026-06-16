@@ -1937,7 +1937,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                       for c in commits[:40]
                       if c.get("sha") and not c.get("episodeIds") and c.get("sha") not in already_attached]
         if candidates:
-            for eid in episode_commits_mod.reconcile_episodes(candidates, episodes, watched_root=path):
+            # Conservative: trailer wins; the heuristic attaches only OpenFDE-authored commits on a
+            # single unambiguous, provenance-gated match (strong overlap / baseline / capture window)
+            # and marks the episode landed. A baseline match also rescues cwd-agnostic capture.
+            for eid in episode_commits_mod.reconcile_authored_episodes(candidates, episodes, watched_root=path):
                 ep = next((e for e in episodes if e.get("episodeId") == eid), None)
                 if ep is not None:
                     persistence.upsert_episode(ep)
@@ -2127,7 +2130,38 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         except OSError:
             logger.warning("could not write rail cache")
 
-    _rail_refresh = {"running": False, "again": False, "mtime": 0.0}
+    def _head_sha() -> "str | None":
+        """The watched repo's current HEAD sha — a cheap gate so reconciliation runs only when a
+        commit actually lands, not on every idle poll tick."""
+        try:
+            r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                               capture_output=True, text=True, timeout=5)
+            return (r.stdout.strip() or None) if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def _reconcile_landed_sync() -> bool:
+        """Attribute recent OpenFDE-authored, trailer-less commits to their episodes (conservative:
+        trailer wins; heuristic only on a single unambiguous, provenance-gated match — strong
+        overlap / baseline / capture window) and mark those episodes landed. Persists only the
+        changed episodes; off the event loop. Returns True iff anything changed. This is the RELIABLE
+        rail-attribution path — independent of the heavy, sometimes-starved full-rail read — so a
+        trailer-less land (the P119 gap) shows its commit + lands the episode without it."""
+        episodes = persistence.load_episodes()
+        attached = {s for e in episodes for s in (e.get("commitShas") or [])}
+        cands = [{**c, "files": commit_files(path, c["sha"])}
+                 for c in git_timeline(path, limit=40)[:20]
+                 if c.get("sha") and not c.get("episodeIds") and c["sha"] not in attached]
+        if not cands:
+            return False
+        changed = episode_commits_mod.reconcile_authored_episodes(cands, episodes, watched_root=path)
+        for eid in changed:
+            ep = next((e for e in episodes if e.get("episodeId") == eid), None)
+            if ep is not None:
+                persistence.upsert_episode(ep)
+        return bool(changed)
+
+    _rail_refresh = {"running": False, "again": False, "mtime": 0.0, "head": None}
 
     async def _refresh_rail_cache() -> None:
         """Rebuild the tiny rail boot cache off-loop — serialized + coalesced so a burst of captures
@@ -2151,20 +2185,35 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             _rail_refresh["running"] = False
 
     async def _rail_cache_poller() -> None:
-        """Keep the rail boot cache RECENT through ALL mutation paths (capture, land, create): when
-        episodes.json changes, rebuild the tiny cache off-loop. Cheap — a stat each tick, a build only
-        on change — so the next first paint shows the latest ~10 without ever parsing the full store
-        on the request path. mtime-gated so an idle repo costs only a stat."""
+        """Keep the rail current through ALL mutation paths, off the request path. Each tick:
+          (1) HEAD-gated — when a commit lands, attribute OpenFDE's trailer-less commits to their
+              episodes + mark them landed (the reliable rail-attribution path; rebuilds the Story
+              cache + nudges clients when it changes anything), then
+          (2) mtime-gated — rebuild the tiny rail boot cache so first paint shows the latest ~10.
+        Cheap when idle: a HEAD rev-parse + a stat, real work only on a change."""
         while True:
             try:
                 await asyncio.sleep(5)
+                loop = asyncio.get_event_loop()
+                # (1) Attribute newly-landed OpenFDE commits → episodes (only when HEAD moves).
+                reconciled = False
+                head = await loop.run_in_executor(None, _head_sha)
+                if head and head != _rail_refresh["head"]:
+                    _rail_refresh["head"] = head
+                    reconciled = await loop.run_in_executor(None, _reconcile_landed_sync)
+                # (2) Rebuild the tiny rail boot cache FAST when the store changed (reconcile above,
+                #     or any capture/land/create) — this is the user-visible first-paint surface.
                 try:
                     mt = persistence.episodes_path.stat().st_mtime
                 except OSError:
-                    continue
-                if mt != _rail_refresh["mtime"]:
+                    mt = None
+                if mt is not None and mt != _rail_refresh["mtime"]:
                     _rail_refresh["mtime"] = mt
                     await _refresh_rail_cache()
+                # (3) Story cache is the heavy build — refresh it in the BACKGROUND so it never
+                #     delays the rail boot rebuild above (the bug: an ~8s Story build blocked it).
+                if reconciled:
+                    asyncio.create_task(_refresh_story_cache_and_broadcast())
             except asyncio.CancelledError:
                 break
             except Exception:  # noqa: BLE001 — a poller tick must never crash the loop
