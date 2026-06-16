@@ -353,9 +353,14 @@ def webxr_summary(root) -> dict:
 
 
 def _suggested_specs() -> list:
-    """Deterministic domain-pack SUGGESTIONS (v1-B Lite): metadata only, surfaced
-    when the repo shows cheap markers. NEVER active, NEVER loaded — each manifest's
-    ``status`` resolves to 'suggested' when its probe matches, else 'missing'."""
+    """Deterministic domain-pack SUGGESTIONS (v1-B Lite): metadata only, surfaced when the repo shows
+    cheap markers. A suggestion's ``status`` resolves to 'suggested' when its probe matches, else
+    'missing'.
+
+    v1-H: WebXR is the FIRST suggestion to carry a built-in ``runtime`` — a TRUSTED, code-defined
+    pointer (NOT a repo-declared one) to ``openfde.plugins_runtime.webxr`` — so its ``domain_summary``
+    capability runs behind the activation hook. It is still never auto-loaded: the runtime module is
+    imported only when the summary is actually requested for a WebXR-active repo."""
     return [PluginSpec(
         id="webxr",
         kind="domain_pack",
@@ -363,9 +368,11 @@ def _suggested_specs() -> list:
         activatesOn="HTML entry + an XR signal — navigator.xr / XRFrame / "
                     "requestSession, .glb/.gltf assets, or Three / Babylon / A-Frame",
         provides=("xr-entrypoints", "scene-graph-hints", "device-frame-lens"),
+        capabilities=("domain_summary",),
         status="suggested",
         source="suggested",
         probe=_detect_webxr,
+        runtime={"module": "openfde.plugins_runtime.webxr", "factory": "make_runtime"},
     )]
 
 
@@ -1041,3 +1048,27 @@ def runtime_for_capability(root, capability):
         if runtime is not None:
             out.append({"id": spec.id, "capability": capability, "runtime": runtime})
     return out
+
+
+def resolve_webxr_summary(root) -> dict:
+    """WebXR architecture summary via the plugin RUNTIME system first (v1-H), with a guaranteed
+    fallback to the core :func:`webxr_summary`. This is the first real capability migrated onto the
+    runtime hook.
+
+    Prefers an active ``domain_summary`` runtime provider with id ``webxr`` (loaded lazily, only when
+    its probe matches the repo). If no such runtime is active, or its hook is missing / raises /
+    returns an empty result, it falls back to ``webxr_summary(root)`` — so the endpoint NEVER
+    regresses and the response shape is identical (the built-in runtime delegates to the same core)."""
+    try:
+        for provider in runtime_for_capability(root, "domain_summary"):
+            if provider.get("id") != "webxr":
+                continue
+            hook = runtime_hook(provider.get("runtime"), "domain_summary")
+            if not callable(hook):
+                continue
+            result = hook(root)
+            if isinstance(result, dict) and result:
+                return result
+    except Exception as exc:  # noqa: BLE001 — the runtime path must never break the endpoint
+        logger.warning("WebXR runtime summary failed; using core fallback: %s", exc)
+    return webxr_summary(root)

@@ -1380,15 +1380,19 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_webxr_summary(request: web.Request) -> web.Response:
         """WebXR domain-pack architecture hints for the watched repo (v1-E): frameworks (Three /
         R3F / Babylon / A-Frame), ``.glb``/``.gltf`` assets, XR entrypoints, and the markers found.
-        Bounded scan, OFF the event loop. **Metadata + architecture hints only — no runtime/test
-        lens, no install, no network;** the honest boundary rides in ``warnings``.
+        Bounded scan, OFF the event loop. **Metadata + architecture hints only — no WebXR device
+        runtime / test lens, no install, no network;** the honest boundary rides in ``warnings``.
+
+        Resolved through the plugin RUNTIME system (v1-H): the WebXR pack's ``domain_summary`` hook is
+        loaded lazily when the repo is WebXR-active, falling back to the core scan otherwise — the
+        response shape is identical either way.
 
         Returns:
             web.Response — {ok, detected, entrypoints[], assets[], frameworks[], markers[],
-            warnings[]} — each list bounded.
+            fileBadges[], warnings[]} — each list bounded.
         """
         loop = asyncio.get_event_loop()
-        summary = await loop.run_in_executor(None, lambda: plugins_mod.webxr_summary(path))
+        summary = await loop.run_in_executor(None, lambda: plugins_mod.resolve_webxr_summary(path))
         return web.json_response({"ok": True, **summary})
 
     async def post_plugin_install(request: web.Request) -> web.Response:

@@ -617,24 +617,28 @@ class RuntimeActivationTest(unittest.TestCase):
     PROV = "_ofde_test_rtprov"        # manifest-provider module (sys.modules, lightweight)
     RT = "_ofde_test_runtime"         # runtime module (ON DISK, imported lazily — never pre-loaded)
     RT_BAD = "_ofde_test_runtime_bad"
+    DEP = "fake-runtime-marker"       # a NON-WebXR dep marker — keeps this suite off the real WebXR pack
 
     def setUp(self):
         prov = types.ModuleType(self.PROV)
+        # Detect on a NON-WebXR marker so this suite isolates external-runtime behavior from the
+        # real built-in WebXR domain_summary provider (WebXR activates on three / .glb / navigator.xr,
+        # and now also provides "domain_summary" — using "three" here would conflate the two).
         prov.summary_pack = lambda: {
             "id": "ext-rt", "kind": "domain_pack", "displayName": "Ext Runtime", "version": "1.0.0",
-            "capabilities": ["domain_summary"], "detects": {"dependencies": ["three"]},
+            "capabilities": ["domain_summary"], "detects": {"dependencies": [self.DEP]},
             "runtime": {"module": self.RT, "factory": "make"}}
         prov.arch_pack = lambda: {
             "id": "ext-arch", "kind": "domain_pack", "capabilities": ["architecture"],
-            "detects": {"dependencies": ["three"]},
+            "detects": {"dependencies": [self.DEP]},
             "runtime": {"module": self.RT, "factory": "make"}}
         prov.badimport_pack = lambda: {
             "id": "ext-badimp", "kind": "domain_pack", "capabilities": ["domain_summary"],
-            "detects": {"dependencies": ["three"]},
+            "detects": {"dependencies": [self.DEP]},
             "runtime": {"module": self.RT_BAD, "factory": "make"}}
         prov.badfactory_pack = lambda: {
             "id": "ext-badfac", "kind": "domain_pack", "capabilities": ["domain_summary"],
-            "detects": {"dependencies": ["three"]},
+            "detects": {"dependencies": [self.DEP]},
             "runtime": {"module": self.RT, "factory": "boom"}}
         sys.modules[self.PROV] = prov
 
@@ -670,7 +674,7 @@ class RuntimeActivationTest(unittest.TestCase):
         return mock.patch("importlib.metadata.entry_points", fake_entry_points)
 
     def _match_repo(self):
-        return _repo({"package.json": '{"dependencies":{"three":"^0.160.0"}}'})
+        return _repo({"package.json": json.dumps({"dependencies": {self.DEP: "^1.0.0"}})})
 
     def test_list_plugins_does_not_import_runtime(self):
         self.assertNotIn(self.RT, sys.modules)
@@ -748,6 +752,87 @@ class RuntimeActivationTest(unittest.TestCase):
             self.assertFalse(rows["local-rt"]["hasRuntime"])          # runtime dropped
             self.assertIsNone(plugins.load_plugin_runtime("local-rt", root))
         self.assertNotIn(self.RT, sys.modules)                        # never imported
+
+
+class WebxrRuntimeMigrationTest(unittest.TestCase):
+    """v1-H migration: WebXR ``domain_summary`` runs behind the plugin runtime hook (the first real
+    capability migrated), with a guaranteed fallback to core ``webxr_summary``. Listing never imports
+    the runtime; the response shape is unchanged; a repo-local manifest still cannot inject a runtime."""
+
+    RT = "openfde.plugins_runtime.webxr"        # the built-in runtime module (imported lazily)
+
+    def setUp(self):
+        sys.modules.pop(self.RT, None)
+        plugins._RUNTIME_CACHE.clear()
+
+    def tearDown(self):
+        plugins._RUNTIME_CACHE.clear()
+
+    def _xr_repo(self):
+        return _repo({"package.json": '{"dependencies":{"three":"^0.160.0"}}',
+                      "src/app.js": "navigator.xr.requestSession('immersive-vr')\n"})
+
+    def test_webxr_spec_declares_runtime_and_capability(self):
+        d, root = self._xr_repo()
+        with d:
+            row = next(m for m in plugins.list_plugins(root) if m["id"] == "webxr")
+        self.assertIn("domain_summary", row["capabilities"])
+        self.assertTrue(row["hasRuntime"])                       # advertises the runtime (metadata only)
+
+    def test_list_plugins_does_not_import_webxr_runtime(self):
+        # Fresh process: listing (even on a WebXR-active repo) must NOT import the runtime module.
+        import subprocess
+        d, root = self._xr_repo()
+        with d:
+            code = ("import sys, openfde.plugins as p;"
+                    f"p.list_plugins({json.dumps(str(root))});"
+                    "print('openfde.plugins_runtime.webxr' in sys.modules)")
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.strip(), "False",
+                         f"listing imported the WebXR runtime:\n{out.stderr}")
+
+    def test_resolve_loads_runtime_only_on_request_and_matches_core(self):
+        d, root = self._xr_repo()
+        with d:
+            self.assertNotIn(self.RT, sys.modules)               # not loaded yet
+            resolved = plugins.resolve_webxr_summary(root)
+            self.assertIn(self.RT, sys.modules)                  # imported NOW, on summary request
+            core = plugins.webxr_summary(root)
+        self.assertEqual(set(resolved), set(core))               # identical shape…
+        self.assertEqual(resolved["detected"], core["detected"]) # …and identical content
+        self.assertEqual(resolved["frameworks"], core["frameworks"])
+        self.assertIn("Three.js", resolved["frameworks"])
+
+    def test_summary_shape_is_unchanged(self):
+        d, root = self._xr_repo()
+        with d:
+            s = plugins.resolve_webxr_summary(root)
+        for key in ("detected", "entrypoints", "assets", "frameworks", "markers", "fileBadges", "warnings"):
+            self.assertIn(key, s)
+
+    def test_local_webxr_manifest_cannot_inject_runtime(self):
+        # SECURITY: a repo-local manifest declaring a runtime (here a malicious os.system) is dropped —
+        # the row lists as metadata with NO runtime, and the summary still resolves via core fallback.
+        manifest = {"id": "webxr", "kind": "domain_pack", "status": "available",
+                    "capabilities": ["domain_summary"],
+                    "runtime": {"module": "os", "factory": "system"}}
+        d, root = _repo({".openfde/plugins/webxr.json": json.dumps(manifest),
+                         "package.json": '{"dependencies":{"three":"^0.160.0"}}'})
+        with d:
+            row = next(m for m in plugins.list_plugins(root) if m["id"] == "webxr")
+            self.assertEqual(row["source"], "local")             # local supersedes the suggestion
+            self.assertFalse(row["hasRuntime"])                  # repo-declared runtime DROPPED
+            self.assertIsNone(plugins.load_plugin_runtime("webxr", root))
+            self.assertIn("detected", plugins.resolve_webxr_summary(root))   # endpoint still works
+
+    def test_runtime_failure_falls_back_to_core(self):
+        d, root = self._xr_repo()
+        with d:
+            with mock.patch.object(plugins, "runtime_for_capability",
+                                   side_effect=RuntimeError("runtime boom")):
+                summary = plugins.resolve_webxr_summary(root)   # must not raise
+        self.assertTrue(summary["detected"])                     # core fallback produced a real summary
+        self.assertIn("Three.js", summary["frameworks"])
 
 
 if __name__ == "__main__":
