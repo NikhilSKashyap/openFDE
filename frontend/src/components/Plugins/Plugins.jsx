@@ -1,20 +1,22 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getPlugins, getWebxrSummary, installPlugin } from '../../api/backend'
+import { getPlugins, getWebxrSummary, enablePlugin } from '../../api/backend'
 
-// Ids the UI may offer to enable (the backend re-checks this allowlist on the write path).
-const INSTALLABLE = new Set(['webxr'])
+// Ids the UI may offer to ENABLE (the backend re-checks this allowlist on the write path).
+const ENABLEABLE = new Set(['webxr'])
 
 /**
- * Plugins — a read-only window onto OpenFDE's capability registry
- * (Plugin Registry v1-A/B/C). It calls GET /api/plugins and shows each provider as a
- * card grouped by kind: displayName, kind, status, source, whether it's active for the
- * watched repo, the markers that activate it, and the capabilities it provides.
+ * Plugins — a window onto OpenFDE's capability registry (Plugin Registry v1-A → v1-F).
+ * Calls GET /api/plugins and shows each provider as a card grouped by kind: displayName,
+ * version, kind, status, source, active/detected, the markers that activate it, and the
+ * capabilities it provides.
  *
- * Visibility only — there is no install/enable/load action here (and the backend
- * exposes none). Three sources, one shape: built-ins (Python, JS/TS) show as `builtin`;
- * deterministic suggestions (e.g. WebXR) show as `suggested` when the repo's markers
- * match, else `missing`; and repo-local manifests (`.openfde/plugins/*.json`) carry a
- * `local` tag and show as `available` or `disabled` — metadata only, nothing loaded.
+ * Three sources, one shape: built-ins (Python, JS/TS) show as `builtin`; deterministic
+ * suggestions (e.g. WebXR) show as `suggested` when the repo's markers match, else
+ * `missing`; and repo-local manifests (`.openfde/plugins/*.json`) carry a `local` tag and
+ * show as `available`/`disabled`. The one action is **Enable** for an allowlisted suggested
+ * pack: it WRITES that pack's local manifest (`.openfde/plugins/{id}.json`) — a JSON file
+ * only, **no code is downloaded or run** — and the row then shows as an available local
+ * manifest. There is no package install, no dynamic import.
  *
  * @param {object}   props
  * @param {Function} props.onClose
@@ -23,7 +25,7 @@ export default function Plugins({ onClose }) {
   const [data, setData]       = useState(null)   // { kinds:[], plugins:[] } | null
   const [error, setError]     = useState('')
   const [loading, setLoading] = useState(true)
-  const [installingId, setInstallingId] = useState(null)
+  const [enablingId, setEnablingId] = useState(null)
   const [note, setNote]       = useState('')
 
   const reload = useCallback(async () => {
@@ -44,14 +46,14 @@ export default function Plugins({ onClose }) {
     return () => { alive = false }
   }, [])
 
-  // v1-F: ENABLE a known optional pack — writes its local manifest (a JSON file; no code is
-  // downloaded or executed), then refresh so the row flips to an `available` local manifest.
-  async function onInstall(id) {
-    setInstallingId(id); setNote('')
-    const res = await installPlugin(id)
-    setInstallingId(null)
+  // ENABLE a known optional pack — writes its local manifest (a JSON file; no code is downloaded
+  // or executed), then refresh so the row flips to an `available` local manifest.
+  async function onEnable(id) {
+    setEnablingId(id); setNote('')
+    const res = await enablePlugin(id)
+    setEnablingId(null)
     if (res?.installed) {
-      setNote(`${res.displayName || id} enabled — wrote ${res.path}; no external code was downloaded or executed.`)
+      setNote(`${res.displayName || id} enabled — wrote ${res.path}; no code was downloaded or run.`)
       await reload()
     } else {
       setNote(res?.reason || `Could not enable ${id}.`)
@@ -86,8 +88,8 @@ export default function Plugins({ onClose }) {
               <div className="plugins-group-label">{KIND_LABELS[g.kind] ?? g.kind}</div>
               {g.items.map(p => (
                 <PluginCard key={p.id} p={p}
-                            installing={installingId === p.id}
-                            onInstall={INSTALLABLE.has(p.id) ? onInstall : null} />
+                            enabling={enablingId === p.id}
+                            onEnable={ENABLEABLE.has(p.id) ? onEnable : null} />
               ))}
             </section>
           ))}
@@ -95,7 +97,7 @@ export default function Plugins({ onClose }) {
 
         <footer className="plugins-foot">
           <span className="plugins-note">
-            {note || `${activeCount} active for this repo · enabling a pack writes a local manifest — no code is downloaded or run`}
+            {note || `${activeCount} active for this repo · enabling writes .openfde/plugins/{id}.json — no code is downloaded or run`}
           </span>
         </footer>
       </div>
