@@ -1334,16 +1334,133 @@ class ReferenceExternalPluginTest(unittest.TestCase):
         self.assertIs(r2, plugins.NO_HOOK)
 
 
+class WebxrExternalPluginTest(unittest.TestCase):
+    """v1-M: WebXR as an EXTERNAL pack skeleton (``tests/fixtures/openfde_webxr_plugin``). Proves WebXR
+    can ship outside core: discovered via entry points, runtime lazy, de-duped with the built-in
+    suggestion / local manifest to ONE row, and ``/api/plugins/webxr/summary`` unchanged. WebXR stays
+    available WITHOUT the package; local manifests still can't declare runtime; a bad runtime falls back."""
+
+    PKG = "openfde_webxr_plugin"
+    RT = "openfde_webxr_plugin.runtime"
+    FIXTURES = str(Path(__file__).resolve().parent / "fixtures")
+
+    def setUp(self):
+        if self.FIXTURES not in sys.path:
+            sys.path.insert(0, self.FIXTURES)
+        plugins._RUNTIME_CACHE.clear()
+
+    def tearDown(self):
+        for m in [m for m in sys.modules if m == self.PKG or m.startswith(self.PKG + ".")]:
+            sys.modules.pop(m, None)
+        try:
+            sys.path.remove(self.FIXTURES)
+        except ValueError:
+            pass
+        plugins._RUNTIME_CACHE.clear()
+
+    def _patch_eps(self, value="openfde_webxr_plugin.plugin:manifest", target_group="openfde.domain_packs"):
+        def fake_entry_points(group=None):
+            return [importlib.metadata.EntryPoint("webxr", value, target_group)] if group == target_group else []
+        return mock.patch("importlib.metadata.entry_points", fake_entry_points)
+
+    def _xr_repo(self):
+        return _repo({"package.json": json.dumps({"dependencies": {"three": "^0.160.0"}})})
+
+    def test_external_webxr_discovered_through_entry_points(self):
+        with self._patch_eps():
+            rows = {r["id"]: r for r in plugins.list_plugins()}
+        self.assertIn("webxr", rows)
+        self.assertEqual(rows["webxr"]["source"], "external")
+        self.assertEqual(rows["webxr"]["kind"], "domain_pack")
+        self.assertIn("domain_summary", rows["webxr"]["capabilities"])
+        self.assertTrue(rows["webxr"]["hasRuntime"])
+
+    def test_listing_does_not_import_external_webxr_runtime(self):
+        self.assertNotIn(self.RT, sys.modules)
+        d, root = self._xr_repo()
+        with d, self._patch_eps():
+            plugins.list_plugins(root)
+        self.assertNotIn(self.RT, sys.modules, "listing must not import the external WebXR runtime")
+
+    def test_runtime_loads_only_on_domain_summary(self):
+        d, root = self._xr_repo()
+        with d, self._patch_eps():
+            self.assertNotIn(self.RT, sys.modules)
+            provs = plugins.runtime_for_capability(root, "domain_summary")
+            self.assertIn(self.RT, sys.modules)                # imported NOW, on request
+            self.assertEqual([p["id"] for p in provs], ["webxr"])
+
+    def test_dedupes_with_builtin_suggestion(self):
+        d, root = self._xr_repo()
+        with d, self._patch_eps():
+            webxr_rows = [r for r in plugins.list_plugins(root) if r["id"] == "webxr"]
+        self.assertEqual(len(webxr_rows), 1)
+        self.assertEqual(webxr_rows[0]["source"], "external")  # external supersedes the suggestion
+
+    def test_dedupes_with_local_manifest(self):
+        local = {"id": "webxr", "kind": "domain_pack", "status": "available",
+                 "capabilities": ["domain_summary"]}
+        d, root = _repo({".openfde/plugins/webxr.json": json.dumps(local),
+                         "package.json": json.dumps({"dependencies": {"three": "^0.160.0"}})})
+        with d, self._patch_eps():
+            webxr_rows = [r for r in plugins.list_plugins(root) if r["id"] == "webxr"]
+        self.assertEqual(len(webxr_rows), 1)
+        self.assertEqual(webxr_rows[0]["source"], "local")     # local supersedes external
+
+    def test_webxr_summary_shape_unchanged_with_external(self):
+        d, root = self._xr_repo()
+        with d, self._patch_eps():
+            via_external = plugins.resolve_webxr_summary(root)
+            core = plugins.webxr_summary(root)
+        self.assertEqual(set(via_external), set(core))
+        for k in ("detected", "entrypoints", "assets", "frameworks", "markers", "fileBadges", "warnings"):
+            self.assertIn(k, via_external)
+
+    def test_webxr_available_without_external_package(self):
+        # no entry-point patch → built-in suggestion + core runtime still serve WebXR
+        d, root = self._xr_repo()
+        with d:
+            row = next(r for r in plugins.list_plugins(root) if r["id"] == "webxr")
+            self.assertEqual(row["source"], "suggested")
+            self.assertTrue(row["detected"])
+            self.assertIn("detected", plugins.resolve_webxr_summary(root))
+
+    def test_local_manifest_cannot_declare_runtime(self):
+        local = {"id": "webxr", "kind": "domain_pack", "status": "available",
+                 "capabilities": ["domain_summary"],
+                 "runtime": {"module": self.RT, "factory": "make_runtime"}}
+        d, root = _repo({".openfde/plugins/webxr.json": json.dumps(local)})
+        with d:                                                # no entry-point patch
+            row = next(r for r in plugins.list_plugins(root) if r["id"] == "webxr")
+            self.assertEqual(row["source"], "local")
+            self.assertFalse(row["hasRuntime"])                # repo-declared runtime dropped
+            self.assertIsNone(plugins.load_plugin_runtime("webxr", root))
+        self.assertNotIn(self.RT, sys.modules)
+
+    def test_bad_external_webxr_runtime_falls_back(self):
+        d, root = self._xr_repo()
+        boom = {"domain_summary": lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))}
+        prov = [{"id": "webxr", "capability": "domain_summary", "runtime": boom}]
+        with d, mock.patch.object(plugins, "runtime_for_capability", return_value=prov):
+            with self.assertLogs("openfde.plugins", level="WARNING"):
+                s = plugins.resolve_webxr_summary(root)
+        self.assertTrue(s["detected"])                         # fell back to core webxr_summary
+
+
 class PackagingTest(unittest.TestCase):
     """Release-readiness: version metadata aligned, and wheel package discovery includes subpackages."""
 
     _ROOT = Path(__file__).resolve().parent.parent
 
     def test_version_metadata_aligned(self):
+        # Assert all version SOURCES agree with openfde.__version__ — no hardcoded value, so a bump
+        # only needs the four sources updated (this test won't need touching).
         import openfde
-        self.assertEqual(openfde.__version__, "0.5.9")
-        self.assertIn(f'version = "{openfde.__version__}"', (self._ROOT / "pyproject.toml").read_text())
-        self.assertIn(f'version="{openfde.__version__}"', (self._ROOT / "setup.py").read_text())
+        v = openfde.__version__
+        self.assertRegex(v, r"^\d+\.\d+\.\d+")
+        self.assertIn(f'version = "{v}"', (self._ROOT / "pyproject.toml").read_text())
+        self.assertIn(f'version="{v}"', (self._ROOT / "setup.py").read_text())
+        self.assertIn(f'"version": "{v}"', (self._ROOT / "frontend" / "package.json").read_text())
 
     def test_package_discovery_includes_subpackages(self):
         text = (self._ROOT / "pyproject.toml").read_text()
