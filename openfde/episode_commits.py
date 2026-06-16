@@ -158,6 +158,23 @@ def _baseline_match(episode: dict, commit: dict) -> bool:
     return p0 == ih or p0.startswith(ih) or ih.startswith(p0)   # tolerate short/full sha
 
 
+def _chains_from_commit(episode: dict, commit: dict) -> bool:
+    """True when the commit's FIRST PARENT is a commit ALREADY attached to the episode — the commit
+    is the direct git continuation of this episode's landed work. This is what links the SECOND
+    (third, …) trailer-less commit from one prompt: it chains off the first commit, not the original
+    ``initialHead`` (which only the first commit matches). First parent only, so a merge never
+    false-matches. Sha-level, so it links exactly ONE episode (a commit chains from one parent) —
+    unambiguous, and it cannot collide across repos, so it bypasses the same-repo gate like baseline."""
+    parents = commit.get("parents") or []
+    if not parents:
+        return False
+    p0 = parents[0]
+    for sha in (episode.get("commitShas") or []):
+        if sha and (p0 == sha or p0.startswith(sha) or sha.startswith(p0)):
+            return True
+    return False
+
+
 def _latest_active_id(episodes: list, watched_root) -> "str | None":
     """episodeId of the most recently captured open/reviewing episode in the watched repo — the
     'current work unit'. Only this one episode is granted the wider active window; everything else
@@ -232,7 +249,11 @@ def reconcile_commit(commit: dict, episodes: list, *, watched_root=None) -> list
         if not ep_files or not matched:
             continue
         baseline = _baseline_match(ep, commit)                                               # (B)
-        if (not baseline and watched_root is not None
+        # (D) The commit CHAINS off a commit already attached to this episode — the second/third
+        #     trailer-less commit from the same prompt. Like baseline, a sha-level proof that bypasses
+        #     the same-repo gate (and it links exactly this episode, so no cross-episode ambiguity).
+        chain = _chains_from_commit(ep, commit)
+        if (not baseline and not chain and watched_root is not None
                 and not _same_repo(ep.get("sessionCwd"), watched_root)):
             continue
 
@@ -253,15 +274,16 @@ def reconcile_commit(commit: dict, episodes: list, *, watched_root=None) -> list
         # (B) baseline computed above (it also gates the same-repo bypass).
         current = (eid == latest_active                                                      # (C)
                    and _within_capture_window(_capture_ts(ep), commit_ts, _ACTIVE_WINDOW_S))
-        if not (in_window or baseline or current):
+        if not (in_window or baseline or current or chain):                                  # (D)
             out.append(_verdict(
                 eid, AMBIGUOUS,
                 f"{len(matched)} shared file(s) but the commit is outside this episode's turn "
-                f"(no capture-window/baseline/active match)", matched, attach=False))
+                f"(no capture-window/baseline/chain/active match)", matched, attach=False))
             continue
 
         # 4. Confidence by file strength; reason names the provenance signal that carried it.
         why = ("commit lands on the episode's baseline" if baseline
+               else "continues this prompt's landed work (chains from an attached commit)" if chain
                else "within the episode's capture window" if in_window
                else "latest active work unit")
         if multi_strong:
@@ -420,7 +442,10 @@ def reconcile_authored_episodes(commits: list, episodes: list, *, watched_root=N
     """
     by_id = {e.get("episodeId"): e for e in episodes if e.get("episodeId")}
     changed: dict = {}
-    for commit in commits:
+    # Oldest commit first: a commit can CHAIN off one already attached this pass, so a parent must
+    # land before its child's chain check resolves — a 2+ commit prompt then attaches in one pass.
+    _floor = datetime.min.replace(tzinfo=timezone.utc)
+    for commit in sorted(commits, key=lambda c: _parse_ts(c.get("timestamp")) or _floor):
         sha = commit.get("sha")
         if not sha:
             continue

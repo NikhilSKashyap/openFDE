@@ -218,6 +218,48 @@ class ReconcileAuthoredEpisodesTest(unittest.TestCase):
         self.assertNotIn("commitShas", ep)
         self.assertEqual(ep["status"], "reviewing")           # not flipped to landed
 
+    # ── multi-commit: one prompt owns every commit it produced ───────────────
+    def test_two_sequential_trailerless_commits_both_attach(self):
+        # c1 lands on the episode's baseline; c2 chains off c1 — both belong to the one prompt.
+        ep = _ep("P1", ["a.py", "b.py"], status="reviewing", initial_head="BASE")
+        c1 = _commit("c1", ["a.py", "b.py"], parents=["BASE"], ts=NOW - timedelta(minutes=5))
+        c2 = _commit("c2", ["a.py", "b.py", "c.py"], parents=["c1"], ts=NOW)
+        ec.reconcile_authored_episodes([c2, c1], [ep])            # newest-first input
+        self.assertEqual(ep["commitShas"], ["c1", "c2"])         # processed oldest-first → both land
+        self.assertEqual(ep["status"], "landed")
+        self.assertIn("chains", ep["commitMeta"]["c2"]["reason"].lower())
+
+    def test_second_commit_chains_across_cwd_mismatch(self):
+        # The P121 gap: sessionCwd is a DIFFERENT repo, c1 already attached, c2 chains off c1 — so
+        # the repo gate is bypassed (chain is repo-specific proof) and c2 lands on the same prompt.
+        ep = _ep("P121", ["a.py", "b.py"], status="landed",
+                 session_cwd="/some/other/repo", initial_head="BASE")
+        ep["commitShas"] = ["c1"]
+        c2 = _commit("c2", ["a.py", "b.py"], parents=["c1"])
+        changed = ec.reconcile_authored_episodes([c2], [ep], watched_root="/the/watched/repo")
+        self.assertIn("P121", changed)
+        self.assertEqual(ep["commitShas"], ["c1", "c2"])
+
+    def test_ambiguous_second_commit_refuses(self):
+        # A new commit chains off NEITHER landed episode and shares the SAME file with both → refuse.
+        a = _ep("A", ["shared.py"], status="landed")
+        b = _ep("B", ["shared.py"], status="landed")
+        a["commitShas"], b["commitShas"] = ["ca"], ["cb"]
+        c2 = _commit("c2", ["shared.py"], parents=["zzz"])       # chains off neither
+        self.assertEqual(ec.reconcile_authored_episodes([c2], [a, b]), {})
+        self.assertEqual(a["commitShas"], ["ca"])
+        self.assertEqual(b["commitShas"], ["cb"])
+
+    def test_explicit_trailer_wins_over_chain_heuristic(self):
+        # c2 chains off P1's commit (heuristic would point at P1) but its trailer names P2 → P2 wins.
+        p1 = _ep("P1", ["a.py"], status="landed")
+        p1["commitShas"] = ["c1"]
+        p2 = _ep("P2", ["z.py"], status="reviewing")
+        c2 = _commit("c2", ["a.py"], ids=["P2"], parents=["c1"])
+        ec.reconcile_authored_episodes([c2], [p1, p2])
+        self.assertIn("c2", p2["commitShas"])                    # explicit trailer wins
+        self.assertNotIn("c2", (p1.get("commitShas") or []))     # heuristic chain is overridden
+
 
 class AttachCommitTest(unittest.TestCase):
     def test_idempotent_no_duplicate_sha(self):
