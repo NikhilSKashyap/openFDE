@@ -1193,6 +1193,44 @@ class JsTsConsumptionTest(unittest.TestCase):
             self.assertEqual(verify._pack_failures(py, out, root),
                              [loc.as_dict() for loc in py.parse_failures(out, root)])
 
+    # ── v1-K hardening: malformed hook RETURN values fall back (not just exceptions) ──
+    def _bad_provider(self, capability, value):
+        rt = {capability: lambda *a, **k: value}
+        return [{"id": "js_ts", "capability": capability, "runtime": rt}]
+
+    def test_malformed_test_detector_output_logs_and_falls_back(self):
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "runtime_for_capability",
+                                  return_value=self._bad_provider("test_detector", "bad-output")):
+            with self.assertLogs("openfde.verify", level="WARNING"):
+                checks = verify._discover_via_packs(root)
+        self.assertTrue(any("test" in " ".join(c["command"]) for c in checks))   # in-core fallback
+
+    def test_malformed_failure_parser_output_logs_and_falls_back(self):
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "runtime_for_capability",
+                                  return_value=self._bad_provider("failure_parser", "bad-output")):
+            with self.assertLogs("openfde.verify", level="WARNING"):
+                locs = verify._parse_via_packs(_VITEST_OUTPUT, root)
+        self.assertTrue(locs and locs[0]["file"] == "src/math.test.ts")          # in-core fallback
+
+    def test_valid_hook_output_wins_over_fallback(self):
+        d, root = self._js_repo()
+        good = [{"id": "custom", "label": "X", "command": ["echo", "hi"], "cwd": "", "required": True}]
+        with d, mock.patch.object(plugins, "runtime_for_capability",
+                                  return_value=self._bad_provider("test_detector", good)):
+            checks = verify._discover_via_packs(root)
+        by_id = {c["id"]: c for c in checks}
+        self.assertIn("custom", by_id)                       # valid hook output is used…
+        self.assertEqual(by_id["custom"]["cwd"], "")         # …and extra fields are preserved
+
+    def test_empty_hook_output_is_valid_no_fallback(self):
+        d, root = self._js_repo()
+        with d, mock.patch.object(plugins, "runtime_for_capability",
+                                  return_value=self._bad_provider("test_detector", [])):
+            checks = verify._discover_via_packs(root)
+        self.assertEqual(checks, [])                         # empty is valid → honored, NOT fallback
+
 
 class PackagingTest(unittest.TestCase):
     """Release-readiness: version metadata aligned, and wheel package discovery includes subpackages."""
