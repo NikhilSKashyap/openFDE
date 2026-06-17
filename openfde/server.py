@@ -2101,16 +2101,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 file_cache[sha] = commit_files(path, sha)
             return file_cache.get(sha, [])
 
-        # Reconcile trailer-less commits onto episodes by file overlap + timing — the product model
-        # is *many prompts → one commit*, so one batched commit can land on several prompt cards.
-        # Only RECENT, not-yet-attributed commits are candidates (steady state: nothing new → no
-        # work; old unrelated commits age out of the window). Confident links only
-        # (explicit / high_file_overlap / time_file_inferred); ambiguous is surfaced elsewhere, not
-        # auto-attached; an explicit trailer is never downgraded. Persist just the changed episodes.
+        # Reconcile recent commits onto episodes by trailer (explicit, wins) or file overlap + timing
+        # — the product model is *many prompts → one commit*, so one batched commit can land on several
+        # prompt cards. A commit is a candidate until its sha is recorded on SOME episode's commitShas
+        # (steady state: attached shas drop out → no work). Crucially we do NOT skip trailer-carrying
+        # commits: a trailer'd commit made OUTSIDE autoland (a manual/external land) still needs its
+        # episode attached — its episodeIds being parsed is not the same as the episode recording it,
+        # and the explicit-trailer path below attaches it. Confident links only (explicit /
+        # high_file_overlap / time_file_inferred); ambiguous is surfaced elsewhere, not auto-attached.
         already_attached = {s for e in episodes for s in (e.get("commitShas") or [])}
         candidates = [{**c, "files": _files(c.get("sha"))}
                       for c in commits[:40]
-                      if c.get("sha") and not c.get("episodeIds") and c.get("sha") not in already_attached]
+                      if c.get("sha") and c.get("sha") not in already_attached]
         if candidates:
             # Conservative: trailer wins; the heuristic attaches only OpenFDE-authored commits on a
             # single unambiguous, provenance-gated match (strong overlap / baseline / capture window)
@@ -2329,9 +2331,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         trailer-less land (the P119 gap) shows its commit + lands the episode without it."""
         episodes = persistence.load_episodes()
         attached = {s for e in episodes for s in (e.get("commitShas") or [])}
+        # Candidate = any commit whose sha is not yet on an episode's commitShas — trailer'd commits
+        # INCLUDED. A trailer'd commit made outside autoland (manual/external land) still needs its
+        # episode attached + landed; the explicit-trailer path in reconcile_authored_episodes does that.
+        # Steady state: once attached, the sha drops out of the candidate set, so there is no churn.
         cands = [{**c, "files": commit_files(path, c["sha"])}
                  for c in git_timeline(path, limit=40)[:20]
-                 if c.get("sha") and not c.get("episodeIds") and c["sha"] not in attached]
+                 if c.get("sha") and c["sha"] not in attached]
         if not cands:
             return False
         changed = episode_commits_mod.reconcile_authored_episodes(cands, episodes, watched_root=path)

@@ -178,6 +178,21 @@ class ReconcileAuthoredEpisodesTest(unittest.TestCase):
         self.assertEqual(ep["commitShas"], ["abc"])
         self.assertEqual(ep["status"], "landed")
 
+    def test_explicit_trailer_attaches_to_complete_no_changes_outside_autoland(self):
+        # The P155 gap: a trailer'd commit made OUTSIDE autoland (a manual / external land — here a
+        # human author) onto an episode ALREADY classified complete_no_changes (its files were
+        # committed, so not dirty) with no recorded commit. The trailer is authoritative, so it must
+        # still attach + flip the episode to landed. (The server's candidate filter must likewise not
+        # pre-exclude trailer-carrying commits, or such a commit never reaches this path.)
+        ep = _ep("P155", ["openfde/focus.py", "frontend/src/components/Focus/FocusLens.jsx"],
+                 status="complete_no_changes")
+        commit = _commit("9720d9d", ["openfde/focus.py"], ids=["P155"],
+                         author="NikhilSKashyap", email="dev@example.com")
+        changed = ec.reconcile_authored_episodes([commit], [ep])
+        self.assertIn("P155", changed)
+        self.assertEqual(ep["commitShas"], ["9720d9d"])
+        self.assertEqual(ep["status"], "landed")
+
     def test_heuristic_attaches_strong_overlap_and_marks_landed(self):
         ep = _ep("P1", ["a.py", "b.py"], status="reviewing")
         changed = ec.reconcile_authored_episodes([_commit("c1", ["a.py", "b.py", "extra.py"])], [ep])
