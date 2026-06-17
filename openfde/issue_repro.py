@@ -364,6 +364,32 @@ def find_test_home(root, target_file: str) -> dict:
     return {"path": f"tests/test_{stem}_repro.py", "excerpt": "", "exists": False}
 
 
+def _ensure_root_conftest(root) -> bool:
+    """Make repo-root modules importable from a tests/ repro (flat-layout repos).
+
+    The drafted repro lives under tests/ (see :func:`find_test_home`), but a flat-layout repo keeps its
+    modules at the root (e.g. nanoGPT's ``model.py``), so ``import model`` from tests/ fails with
+    ModuleNotFoundError — a FALSE "reproduction" that crashes on the import instead of the real bug, and
+    leaves no traceback for the failure lens. pytest loads a repo-root ``conftest.py`` before collection,
+    so a minimal one there puts the root on ``sys.path`` and fixes the import for ANY test under tests/.
+
+    Creates it ONLY when absent — never clobbers a conftest the repo already has. Returns True iff it
+    created the file, so the caller can revert it alongside the test when the repro doesn't pan out.
+    """
+    cf = Path(root) / "conftest.py"
+    if cf.exists():
+        return False
+    cf.write_text(
+        '"""Added by OpenFDE so a repro under tests/ can import repo-root modules (flat-layout repos).\n'
+        "pytest loads this before collection; inserting the rootdir puts the repo root on sys.path."
+        '"""\n'
+        "import os\n"
+        "import sys\n\n"
+        "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n",
+        encoding="utf-8")
+    return True
+
+
 def draft_repro_test(caller, issue_ctx: str, target: dict, home: dict):
     """One failing test in the repo's own dialect — or None, honestly.
 
@@ -546,6 +572,11 @@ def reproduce_issue(root, *, title: str, body: str, labels: list,
                 else "import pytest  # noqa: F401\n\n\n") + draft["code"].rstrip("\n") + "\n"
     home_path.parent.mkdir(parents=True, exist_ok=True)
     home_path.write_text(new_text, encoding="utf-8")
+    # The repro lives under tests/, but a flat-layout repo (modules at the root, e.g. model.py) needs the
+    # root on sys.path or the test dies on ModuleNotFoundError — a FALSE "reproduction" with no real
+    # traceback (and so no failure trace to draw). Guarantee a root conftest.py so the drafted test can
+    # import what the issue is actually about.
+    created_conftest = _ensure_root_conftest(root)
 
     def _revert():
         if original is None:
@@ -555,6 +586,11 @@ def reproduce_issue(root, *, title: str, body: str, labels: list,
                 pass
         else:
             home_path.write_text(original, encoding="utf-8")
+        if created_conftest:
+            try:
+                (Path(root) / "conftest.py").unlink()
+            except OSError:
+                pass
 
     run = run_single_test(root, check_cmd, home["path"], draft["name"])
     base = {"targets": targets, "testFile": home["path"], "testName": draft["name"],
