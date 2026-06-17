@@ -20,8 +20,9 @@ open layer that helps any coding agent behave more like that.
 
 It is not an editor, and it does not replace yours. Keep using Claude Code,
 Codex, Cursor, VS Code, or a plain terminal. OpenFDE sits above that workflow. It
-shows the repo as a living canvas, lets you scope what can change, runs an Agent
-Council, reviews the real diff, commits the work, and keeps the record.
+shows the repo as a living canvas, lets you scope what can change, can run an
+Agent Council when you want it to, reviews the real diff, commits the work, and
+keeps the record.
 
 It also remembers. Prompts from the council, OpenFDE wrappers, and passive
 Claude Code/Codex capture become episodes. Each episode gets attributed scope,
@@ -49,8 +50,10 @@ code. It is the record of how the code came to be. Whoever has that record has
 the best chance of understanding the system later. So the record needs a
 recorder, built with the same instincts as a flight recorder:
 
-1. **Always on.** It watches passively: any agent, any editor, no wrapper, no
-   ceremony. A record you have to remember to keep is a record you will not have.
+1. **Always on.** It watches file activity from any editor or agent. For Claude
+   Code and Codex it can also capture prompts passively; wrappers cover the
+   explicit OpenFDE path. A record you have to remember to keep is a record you
+   will not have.
 2. **Evidence-grade.** Receipts, not vibes: every episode carries its prompt,
    files, commits, check results, and pull request. A failed test is recorded
    as honestly as a passing one.
@@ -121,8 +124,8 @@ http://127.0.0.1:7420
   packs shipped **outside core** as pip-installed Python packages (entry points) all
   appear through one contract. Capabilities — `architecture`, `test_detector`,
   `failure_parser`, `domain_summary` — are real runtime **hooks**: a pack's runtime loads
-  **lazily** (only when a repo matches and a capability is asked), and core **consumes
-  them by default** with a safe fallback. So JS/TS assimilation, test discovery, and
+  **lazily** (only when a repo matches and a capability is asked), and wired product
+  paths consume those hooks with a safe fallback. So JS/TS assimilation, test discovery, and
   failure parsing run through the pack's trusted runtime — with optional **tree-sitter**
   for precise JS/TS parsing, else the built-in regex. The **WebXR pack** marks WebXR files
   on the canvas + Explorer with honest badges — **XR API**, **Three**, **R3F**, **Scene**,
@@ -133,8 +136,9 @@ http://127.0.0.1:7420
 
 ## Fix a real issue, end to end
 
-OpenFDE 0.6 closes the forward-deployed loop on repos it watches. Import a
-GitHub issue and take it to a reviewable PR, with proof at every step:
+OpenFDE 0.6 can run the forward-deployed loop on repos it watches. Import a
+GitHub issue, reproduce it, fix it, and take it to a reviewable PR with proof at
+every step:
 
 1. **Import the issue** (OpenPM → paste an issue number). It becomes a To-Do card with
    the issue as its durable intent.
@@ -280,7 +284,7 @@ assimilation (optional **tree-sitter** for precise parsing), Vitest/Jest/Playwri
 failure parsing, and HTML/web-app entrypoint mapping for web and WebXR repos. A
 **capability registry with a real plugin runtime** (`⌘K → Plugins`) lets built-in,
 repo-local, and pip-installed packs provide lazily-loaded capability hooks that core
-**consumes by default** (with a safe fallback). The **WebXR pack** marks WebXR files with
+uses in the wired product paths, with a safe fallback. The **WebXR pack** marks WebXR files with
 honest badges (XR API / Three / R3F / Scene / Shader / 3D asset) and groups scene assets, and
 an **additive focused path** (`POST /api/focus/neighborhood`) returns an issue/failure
 neighborhood + scoped-verify selection for large repos — backend groundwork toward O(issue), not
