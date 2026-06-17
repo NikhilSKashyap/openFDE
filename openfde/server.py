@@ -87,6 +87,7 @@ from openfde.prompt_story import build_prompt_graph
 from openfde import failure_flow as failure_flow_mod
 from openfde import feedback as feedback_mod
 from openfde import plugins as plugins_mod
+from openfde import focus as focus_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
 from openfde.episode_summary import commit_display, is_bad_title, reconcile_task_status, repair_episode_tasks
@@ -1421,6 +1422,24 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         the fallback). Off the event loop (a bounded repo-language probe)."""
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: plugins_mod.treesitter_recommendation(path))
+        return web.json_response(result)
+
+    async def post_focus_neighborhood(request: web.Request) -> web.Response:
+        """L2-A: a focused, O(issue) neighborhood for large repos — seed files + 1–2 hops of import /
+        function-flow neighbors from the ArchGraph, capped. ADDITIVE: whole-repo assimilation is
+        unchanged; this is opt-in. Body: {seeds:[paths], hops?, maxFiles?, primaryPath?:[paths]}.
+        Returns {ok, mode:'focused', seeds, files, functions, edges, warnings}. Off the event loop."""
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001 — a bad body must not crash the focused path
+            data = {}
+        seeds = data.get("seeds") or []
+        hops = int(data.get("hops") or 1)
+        max_files = int(data.get("maxFiles") or 40)
+        primary = data.get("primaryPath") or None
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: focus_mod.neighborhood(
+            path, seeds, hops=hops, max_files=max_files, primary_path=primary))
         return web.json_response(result)
 
     async def post_project(request: web.Request) -> web.Response:
@@ -4557,6 +4576,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/plugins/install-plan/{id}", get_plugin_install_plan)
     app.router.add_get( "/api/plugins/treesitter-recommendation", get_treesitter_recommendation)
     app.router.add_post("/api/plugins/{id}/install",     post_plugin_install)
+    app.router.add_post("/api/focus/neighborhood",       post_focus_neighborhood)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)
