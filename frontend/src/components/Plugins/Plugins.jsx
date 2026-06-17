@@ -185,8 +185,10 @@ function WebxrDetails({ defaultOpen = false }) {
           {data && (
             <>
               <WebxrRow label="Frameworks" items={data.frameworks} />
-              <WebxrRow label="Entrypoints" items={data.entrypoints} mono />
+              <WebxrRow label="XR API" items={data.entrypoints} mono />
               <WebxrRow label="Assets" items={data.assets} mono />
+              <WebxrRow label="Shaders" items={data.shaders} mono />
+              <WebxrRow label="Textures" items={data.textures} mono />
               <WebxrRow label="Markers" items={data.markers} mono />
               {(data.warnings || []).map(w => (
                 <div key={w} className="plugin-webxr-warn">{w}</div>

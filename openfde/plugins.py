@@ -199,6 +199,15 @@ _XR_TEXT_EXTS = (".html", ".htm", ".js", ".mjs", ".jsx", ".ts", ".tsx")
 _XR_SCAN_MAX_FILES = 300        # bound the content reads (markers, not assimilation)
 _XR_SCAN_MAX_BYTES = 200_000    # skip large/minified bundles
 _XR_WALK_MAX = 20_000           # hard backstop on directory entries walked
+# Slice-1 enrichment: shaders + 3D-specific textures as readable asset nodes (NOT generic png/jpg, to
+# avoid a hairball), and per-file Three / R3F / Scene markers found in the SAME bounded text scan.
+_XR_SHADER_EXTS = (".glsl", ".vert", ".frag", ".wgsl")
+_XR_TEXTURE_EXTS = (".ktx", ".ktx2", ".basis", ".hdr", ".exr")
+_XR_FILE_MARKERS = (
+    ("Three", ("from 'three'", 'from "three"', "import * as three", "require('three')", 'require("three")')),
+    ("R3F",   ("@react-three/fiber", "@react-three/drei")),
+    ("Scene", ("new scene(", "perspectivecamera", "new three.scene")),
+)
 
 
 def _detect_webxr(root) -> bool:
@@ -292,11 +301,14 @@ def webxr_summary(root) -> dict:
     try:
         from openfde.language_packs.js_ts_pack import _read_package_json, _SKIP_DIRS
     except Exception:  # noqa: BLE001 — never let a scan failure break the endpoint
-        return {"detected": False, "entrypoints": [], "assets": [], "frameworks": [],
-                "markers": [], "warnings": ["WebXR scan unavailable."]}
+        return {"detected": False, "entrypoints": [], "assets": [], "shaders": [], "textures": [],
+                "frameworks": [], "markers": [], "fileBadges": [], "assetGroups": [],
+                "warnings": ["WebXR scan unavailable."]}
 
     root = Path(root)
     frameworks, assets, entrypoints = [], [], []
+    shaders, textures = [], []
+    three_files, r3f_files, scene_files = [], [], []
     seen_markers: set = set()
     truncated = False
 
@@ -305,6 +317,15 @@ def webxr_summary(root) -> dict:
     for dep, label in _XR_FRAMEWORK_LABELS.items():
         if dep in deps and label not in frameworks:
             frameworks.append(label)
+
+    def _cap_add(bucket, rel):
+        nonlocal truncated
+        if rel in bucket:
+            return
+        if len(bucket) < _WEBXR_SUMMARY_CAP:
+            bucket.append(rel)
+        else:
+            truncated = True
 
     walked = scanned = 0
     try:
@@ -319,10 +340,13 @@ def webxr_summary(root) -> dict:
                 low = fn.lower()
                 rel = fn if rel_dir == "." else f"{rel_dir}/{fn}".replace(os.sep, "/")
                 if low.endswith(_XR_ASSET_EXTS):
-                    if len(assets) < _WEBXR_SUMMARY_CAP:
-                        assets.append(rel)
-                    else:
-                        truncated = True
+                    _cap_add(assets, rel)
+                    continue
+                if low.endswith(_XR_SHADER_EXTS):
+                    _cap_add(shaders, rel)
+                    continue
+                if low.endswith(_XR_TEXTURE_EXTS):
+                    _cap_add(textures, rel)
                     continue
                 if low.endswith(_XR_TEXT_EXTS) and scanned < _XR_SCAN_MAX_FILES:
                     p = Path(dirpath) / fn
@@ -333,10 +357,11 @@ def webxr_summary(root) -> dict:
                             hits = [m for m in _XR_API_MARKERS if m in text]
                             if hits:
                                 seen_markers.update(hits)
-                                if rel not in entrypoints and len(entrypoints) < _WEBXR_SUMMARY_CAP:
-                                    entrypoints.append(rel)
-                                elif len(entrypoints) >= _WEBXR_SUMMARY_CAP:
-                                    truncated = True
+                                _cap_add(entrypoints, rel)
+                            for label, needles in _XR_FILE_MARKERS:   # per-file framework / scene hints
+                                if any(n in text for n in needles):
+                                    _cap_add({"Three": three_files, "R3F": r3f_files,
+                                              "Scene": scene_files}[label], rel)
                     except OSError:
                         pass
     except OSError:
@@ -345,18 +370,34 @@ def webxr_summary(root) -> dict:
     warnings = ["Architecture hints only — no WebXR runtime or test lens is installed."]
     if truncated:
         warnings.append("Scan bounded — results may be partial on a large repo.")
-    # Canvas annotation HOOK: a flat {path, kind, label} list the frontend can match to canvas boxes
-    # to badge XR entrypoints + 3D assets later. Derived from the scan above — no extra walk, no
-    # canvas refactor, and NO runtime/test-lens claim (these are repo-relative file hints only).
-    file_badges = ([{"path": p, "kind": "entrypoint", "label": "XR entrypoint"} for p in entrypoints]
-                   + [{"path": p, "kind": "asset", "label": "3D asset"} for p in assets])
+
+    # Canvas/Explorer annotation HOOK (Slice 1): a flat {path, kind, label} list the frontend matches
+    # to files. Honest, repo-relative file hints from the scan above — NO extra walk, NO runtime/test
+    # lens. A file may carry several badges (e.g. an XR-API file that also uses Three and a Scene).
+    file_badges = (
+        [{"path": p, "kind": "entrypoint", "label": "XR API"}   for p in entrypoints]
+        + [{"path": p, "kind": "scene",     "label": "Scene"}   for p in scene_files]
+        + [{"path": p, "kind": "framework", "label": "Three"}   for p in three_files]
+        + [{"path": p, "kind": "framework", "label": "R3F"}     for p in r3f_files]
+        + [{"path": p, "kind": "shader",    "label": "Shader"}  for p in shaders]
+        + [{"path": p, "kind": "asset",     "label": "3D asset"} for p in assets]
+    )
+    # Assets grouped by TYPE so the canvas/details read as a few nodes, not a hairball of arrows.
+    asset_groups = [g for g in (
+        {"type": "3D model", "exts": list(_XR_ASSET_EXTS),   "paths": assets},
+        {"type": "Shader",   "exts": list(_XR_SHADER_EXTS),  "paths": shaders},
+        {"type": "Texture",  "exts": list(_XR_TEXTURE_EXTS), "paths": textures},
+    ) if g["paths"]]
     return {
         "detected": bool(frameworks or assets or seen_markers),
         "entrypoints": entrypoints,
         "assets": assets,
+        "shaders": shaders,
+        "textures": textures,
         "frameworks": frameworks,
         "markers": sorted(seen_markers),
         "fileBadges": file_badges,
+        "assetGroups": asset_groups,
         "warnings": warnings,
     }
 

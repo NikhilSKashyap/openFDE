@@ -362,6 +362,34 @@ class WebxrSummaryTest(unittest.TestCase):
         for b in s["fileBadges"]:                        # each badge carries a human label
             self.assertTrue(b["label"])
 
+    def test_slice1_enrichment_badges_and_asset_groups(self):
+        # Slice 1: richer, honest per-file badges (XR API / Three / R3F / Scene / Shader / 3D asset)
+        # + shaders/textures classification + assets grouped by type (no hairball).
+        s = self._summary({
+            "package.json": json.dumps({"dependencies": {"three": "^0.160.0",
+                                                         "@react-three/fiber": "^8"}}),
+            "src/main.js": ("import * as THREE from 'three'\n"
+                            "navigator.xr.requestSession('immersive-vr')\n"
+                            "const cam = new PerspectiveCamera(70, 1, 0.1, 100)\n"),
+            "src/app.jsx": "import { Canvas } from '@react-three/fiber'\nexport const App = () => null\n",
+            "shaders/water.glsl": "void main() { gl_FragColor = vec4(1.0); }\n",
+            "models/duck.glb": "GLB",
+            "textures/env.hdr": "HDR",
+        })
+        labels = {}
+        for b in s["fileBadges"]:
+            labels.setdefault(b["path"], set()).add(b["label"])
+        self.assertTrue({"XR API", "Three", "Scene"} <= labels.get("src/main.js", set()))
+        self.assertIn("R3F", labels.get("src/app.jsx", set()))
+        self.assertIn("Shader", labels.get("shaders/water.glsl", set()))
+        self.assertEqual(s["shaders"], ["shaders/water.glsl"])
+        self.assertIn("models/duck.glb", s["assets"])
+        groups = {g["type"]: g["paths"] for g in s["assetGroups"]}
+        self.assertEqual(groups.get("3D model"), ["models/duck.glb"])
+        self.assertEqual(groups.get("Shader"), ["shaders/water.glsl"])
+        self.assertEqual(groups.get("Texture"), ["textures/env.hdr"])
+        self.assertTrue(any("no webxr runtime" in w.lower() for w in s["warnings"]))  # boundary copy
+
 
 class InstallScaffoldingTest(unittest.TestCase):
     """install_plan is the ALLOWLIST VERDICT — no write, no download, no exec (the actual enable is

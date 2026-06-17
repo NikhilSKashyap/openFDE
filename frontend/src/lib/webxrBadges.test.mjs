@@ -47,4 +47,29 @@ assert.equal(badgeForPath(map, 'nope.js'), null)
 assert.equal(badgeForPath(null, 'x'), null)
 assert.equal(badgeForPath(map, null), null)
 
+// Slice 1: the richer badge kinds (scene / framework / shader) and per-file precedence — the
+// strongest signal wins for the single canvas pill (entrypoint > scene > framework > shader > asset).
+const rich = badgeMapFromSummary({ fileBadges: [
+  { path: 'src/main.js',  kind: 'shader',     label: 'Shader' },
+  { path: 'src/main.js',  kind: 'framework',  label: 'Three' },
+  { path: 'src/main.js',  kind: 'scene',      label: 'Scene' },
+  { path: 'src/main.js',  kind: 'entrypoint', label: 'XR API' },   // strongest → wins
+  { path: 'src/world.js', kind: 'framework',  label: 'R3F' },
+  { path: 'shaders/sea.glsl', kind: 'shader', label: 'Shader' },
+] })
+assert.deepEqual(rich['src/main.js'], { kind: 'entrypoint', label: 'XR API' })
+assert.deepEqual(rich['src/world.js'], { kind: 'framework', label: 'R3F' })
+assert.deepEqual(rich['shaders/sea.glsl'], { kind: 'shader', label: 'Shader' })
+
+// Precedence is order-independent: scene beats shader whichever arrives first.
+const order = badgeMapFromSummary({ fileBadges: [
+  { path: 'a.js', kind: 'scene',  label: 'Scene' },
+  { path: 'a.js', kind: 'shader', label: 'Shader' },
+] })
+assert.deepEqual(order['a.js'], { kind: 'scene', label: 'Scene' })
+
+// A label-less framework badge falls back to a sensible canonical label.
+assert.equal(badgeMapFromSummary({ fileBadges: [{ path: 'f.js', kind: 'framework' }] })['f.js'].label,
+             'Framework')
+
 console.log('webxrBadges: all assertions passed')
