@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from openfde.issue_repro import (
+    _ensure_root_conftest,
     draft_repro_test,
     find_test_home,
     locate_targets,
@@ -267,6 +268,52 @@ class ReproduceEndToEndTest(unittest.TestCase):
             cfg = Path(root) / ".openfde" / "verify.json"
             self.assertTrue(cfg.exists(), "should pin a pytest check on a bare repo")
             self.assertIn("pytest", json.dumps(json.loads(cfg.read_text())))
+
+    def test_flat_repo_repro_imports_via_generated_conftest(self):
+        # The nanoGPT shape: modules at the repo ROOT, no conftest. A repro written under tests/ must
+        # still import them. OpenFDE guarantees a root conftest.py, so the repro reproduces the REAL
+        # failure (ZeroDivisionError) — NOT a bogus ModuleNotFoundError that has no traceback to trace.
+        d = tempfile.TemporaryDirectory()
+        root = Path(d.name)
+        with d:
+            (root / "mathy.py").write_text("def half(x):\n    return x / 0  # bug: always divides by zero\n")
+            self.assertFalse((root / "conftest.py").exists())          # flat repo starts with none
+            draft = json.dumps({
+                "name": "test_half_returns_value",
+                "code": ("def test_half_returns_value():\n"
+                         "    import mathy\n"                          # the import that broke under tests/
+                         "    assert mathy.half(4) == 2\n"),
+            })
+            v = reproduce_issue(
+                root, title="half() divides by zero",
+                body=("In mathy.py, half() crashes.\n\n```\nZeroDivisionError: division by zero\n```\n"
+                      "Expected: half(4) == 2."),
+                labels=["bug"], caller=lambda s, u: draft, check_cmd=CHECK)
+            self.assertEqual(v["verdict"], "reproduced")
+            self.assertNotIn("ModuleNotFoundError", v.get("tail", ""))  # import resolved (real bug)
+            self.assertIn("ZeroDivisionError", v.get("tail", ""))
+            cf = root / "conftest.py"
+            self.assertTrue(cf.exists(), "OpenFDE should create a root conftest so tests/ can import")
+            self.assertIn("sys.path", cf.read_text())
+
+
+class ConftestGuaranteeTest(unittest.TestCase):
+    """_ensure_root_conftest: create a root conftest (root on sys.path) when absent; never clobber one."""
+
+    def test_creates_when_absent(self):
+        with tempfile.TemporaryDirectory() as dn:
+            root = Path(dn)
+            self.assertTrue(_ensure_root_conftest(root))
+            cf = root / "conftest.py"
+            self.assertTrue(cf.exists())
+            self.assertIn("sys.path", cf.read_text())
+
+    def test_does_not_clobber_existing(self):
+        with tempfile.TemporaryDirectory() as dn:
+            root = Path(dn)
+            (root / "conftest.py").write_text("# the repo's own conftest\n")
+            self.assertFalse(_ensure_root_conftest(root))
+            self.assertEqual((root / "conftest.py").read_text(), "# the repo's own conftest\n")
 
 
 if __name__ == "__main__":
