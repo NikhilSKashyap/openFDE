@@ -18,7 +18,13 @@ const TARGETS = [
   { id: 'verifier', label: 'Verifier' },
   { id: 'discuss', label: 'Council' },        // UI "Council" → backend target "discuss"
 ]
-const ROLE_HUMAN = { architect: 'Architect', senior_dev: 'Senior Dev', verifier: 'Verifier' }
+const ROLE_HUMAN = { architect: 'Architect', senior_dev: 'Senior Dev', verifier: 'Verifier', sr_dev: 'Senior Dev' }
+// Role-led council ritual: one lead role's brief (never "Council says…").
+const LEAD_BRIEF_LABEL = { architect: 'Architect-led brief', sr_dev: 'Senior Dev-led brief',
+                           verifier: 'Verifier-led brief' }
+const BRIEF_SECTIONS = [['productDirection', 'Product Direction'],
+                        ['implementationPlan', 'Implementation Plan'],
+                        ['risksVerification', 'Risks / Verification']]
 const SUGGESTIONS = [
   'What should we do next?',
   'Is this ready to ship?',
@@ -110,7 +116,7 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
     } else if (res?.ok) {
       patch(pendingId, {
         state: null, text: res.answer || '(no answer)', label: res.label,
-        contributorsLabel: res.contributorsLabel, provider: res.provider,
+        contributorsLabel: res.contributorsLabel, provider: res.provider, brief: res.brief,
       })
       setBusyRoles(res.workBusyRoles || [])
     } else {
@@ -158,9 +164,38 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
             <div className="cmsg-body">
               {m.state === 'pending' && <span className="cmsg-thinking">Thinking<span className="cmsg-ell">…</span></span>}
               {m.state === 'slow' && <span className="cmsg-thinking">Still thinking — this one’s taking a while.</span>}
-              {(!m.state || m.state === 'error' || m.state === 'cancelled') && m.text}
+              {(!m.state || m.state === 'error' || m.state === 'cancelled') && !m.brief && m.text}
             </div>
-            {m.role === 'assistant' && m.label && !m.state && (
+            {/* Role-led brief: one lead role, structured sections (replaces "Answered by Council"). */}
+            {m.role === 'assistant' && m.brief && !m.state && (
+              <div className="cmsg-brief">
+                <div className="cmsg-src">
+                  <strong>{LEAD_BRIEF_LABEL[m.brief.leadRole] || 'Brief'}</strong>
+                  {m.brief.consultedRoles?.length > 0 && (
+                    <span className="council-contrib"> · consulting {
+                      m.brief.consultedRoles.map(r => ROLE_HUMAN[r] || r).join(', ')}</span>
+                  )}
+                  {m.provider && <span className="council-prov"> · {m.provider}</span>}
+                </div>
+                {BRIEF_SECTIONS.map(([k, label]) => (
+                  m.brief.sections?.[k] ? (
+                    <div key={k} className="cmsg-brief-section">
+                      <div className="cmsg-brief-h">{label}</div>
+                      <div className="cmsg-brief-c">{m.brief.sections[k]}</div>
+                    </div>
+                  ) : null
+                ))}
+                {m.brief.humanEscalation?.needed && (
+                  <div className="cmsg-brief-escalate">Needs your call — {m.brief.humanEscalation.reason}.</div>
+                )}
+                {m.brief.canStartImplementation && (
+                  <button className="cmsg-action" disabled title="Implementation handoff coming next">
+                    {m.brief.startImplementationLabel || 'Start implementation'} — coming next
+                  </button>
+                )}
+              </div>
+            )}
+            {m.role === 'assistant' && m.label && !m.brief && !m.state && (
               <div className="cmsg-src">
                 Answered by <strong>{m.label}</strong>
                 {m.contributorsLabel && m.contributorsLabel !== m.label && (

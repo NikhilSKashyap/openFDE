@@ -126,6 +126,100 @@ def route(question, target="auto", agent_states=None) -> dict:
             "reason": f"matched {_ROLE_HUMAN[top]} keywords (score {scores[top]})"}
 
 
+# ── Role-led brief (structured decision, one lead role) ───────────────────────
+#
+# The Orient/Council answer is framed as ONE lead role's brief (never "Council says…"): the lead owns
+# the question, may CONSULT the others, and the answer is a structured {Product Direction, Implementation
+# Plan, Risks/Verification} brief. Routing reuses `route()`; the lead is deterministic. The human is
+# escalated ONLY for the critical decisions below — otherwise the lead decides and records the rationale.
+
+# leadRole in the brief uses the short alias `sr_dev` (the router's internal id is `senior_dev`).
+_LEAD_ALIAS = {"architect": "architect", "senior_dev": "sr_dev", "verifier": "verifier"}
+_LEAD_HUMAN = {"architect": "Architect", "sr_dev": "Senior Dev", "verifier": "Verifier"}
+_LEAD_SECTION = {"architect": "productDirection", "sr_dev": "implementationPlan",
+                 "verifier": "risksVerification"}
+
+# Critical signals — the ONLY cases that interrupt the human (conservative, to avoid over-escalating).
+_ESCALATION = (
+    ("destructive git / data loss",
+     ("force push", "force-push", "push --force", "reset --hard", "rm -rf", "drop table",
+      "delete all", "wipe the", "destroy the", "hard reset")),
+    ("security / privacy risk",
+     ("password", "api key", "secret key", "credential", "private key", "exfiltrat", "auth bypass",
+      "vulnerab", " pii", "personal data", "leak the")),
+    ("money / API spend",
+     ("spend money", "costs money", "billing", "purchase", "pay for", "buy a", "budget approval",
+      "charge the")),
+    ("public release / PR action",
+     ("publish", "release to", "open a pr", "open the pr", "merge to main", "deploy to prod",
+      "production deploy", "go live", "post publicly", "ship to production")),
+    ("irreversible product direction / taste",
+     ("rebrand", "rename the product", "pivot the", "kill the feature", "only you can decide",
+      "your call on", "which name should", "product taste")),
+)
+
+
+def needs_human_escalation(question) -> dict:
+    """Critical-only escalation. Returns {needed, reason}. Default: NOT needed — the lead role decides
+    and records rationale; the human is interrupted only for destructive / security / spend / public
+    release / irreversible-taste decisions."""
+    ql = (question or "").lower()
+    for reason, kws in _ESCALATION:
+        if any(k in ql for k in kws):
+            return {"needed": True, "reason": reason}
+    return {"needed": False, "reason": ""}
+
+
+def _sections_from_answer(lead: str, answer) -> dict:
+    """Place the lead role's answer in its section; the other two are honestly marked as not separately
+    generated yet (multi-section generation is the next step)."""
+    out = {"productDirection": "", "implementationPlan": "", "risksVerification": ""}
+    key = _LEAD_SECTION.get(lead, "productDirection")
+    out[key] = (answer or "").strip()
+    note = "— consult this role; per-section generation is next."
+    for k in out:
+        if k != key:
+            out[k] = note
+    return out
+
+
+def role_led_brief(question, *, decision=None, target="auto", agent_states=None,
+                   answer=None, sections=None) -> dict:
+    """Structured, role-LED decision brief (one lead, optional consults). Reuses :func:`route` for the
+    lead; never returns "Council". ``answer`` (the lead's reply) fills its section; explicit ``sections``
+    override. Critical questions set ``humanEscalation.needed`` (and block ``canStartImplementation``);
+    otherwise the lead decides. Shape: {ok, leadRole, consultedRoles, sections, humanEscalation,
+    canStartImplementation, startImplementationLabel}."""
+    if decision is None:
+        decision = route(question, target=target, agent_states=agent_states)
+    lead = _LEAD_ALIAS.get(decision.get("primaryRole", "architect"), "architect")
+    consulted = []
+    for r in decision.get("roles", []):
+        alias = _LEAD_ALIAS.get(r, r)
+        if alias != lead and alias not in consulted:
+            consulted.append(alias)
+
+    escalation = needs_human_escalation(question)
+    if isinstance(sections, dict):
+        sec = {k: str(sections.get(k, "") or "") for k in
+               ("productDirection", "implementationPlan", "risksVerification")}
+    else:
+        sec = _sections_from_answer(lead, answer)
+
+    # An implementation handoff makes sense for product / implementation briefs with no human gate;
+    # a pure readiness (Verifier) brief or an escalated question does not "start implementation".
+    can_start = (not escalation["needed"]) and lead in ("architect", "sr_dev")
+    return {
+        "ok": True,
+        "leadRole": lead,
+        "consultedRoles": consulted,
+        "sections": sec,
+        "humanEscalation": escalation,
+        "canStartImplementation": can_start,
+        "startImplementationLabel": "Start implementation",
+    }
+
+
 # ── Prompt building ──────────────────────────────────────────────────────────
 
 def build_role_prompt(role, question, context, discuss=False, custom_prompt="") -> tuple:

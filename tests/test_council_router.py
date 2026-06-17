@@ -227,5 +227,73 @@ class CustomPromptAndContractTest(unittest.TestCase):
         self.assertIn("senior_dev", res["workBusyRoles"])       # only reported
 
 
+class RoleLedBriefTest(unittest.TestCase):
+    """Role-led council ritual: ONE lead role + consults, a structured brief, and critical-only
+    human escalation. Routing reuses route(); the brief never says 'Council'."""
+
+    def test_product_question_architect_leads(self):
+        b = R.role_led_brief("What product direction should we take — the roadmap tradeoff and priority?")
+        self.assertEqual(b["leadRole"], "architect")
+
+    def test_implementation_question_sr_dev_leads(self):
+        b = R.role_led_brief("How do we implement the fix for the failing test in this code path?")
+        self.assertEqual(b["leadRole"], "sr_dev")
+
+    def test_readiness_question_verifier_leads(self):
+        b = R.role_led_brief("Is it ready to ship — do the tests pass and is there any regression to verify?")
+        self.assertEqual(b["leadRole"], "verifier")
+
+    def test_brief_shape_is_complete(self):
+        b = R.role_led_brief("what should we do about the architecture roadmap?", answer="Do X.")
+        self.assertTrue(b["ok"])
+        self.assertIn(b["leadRole"], ("architect", "sr_dev", "verifier"))
+        self.assertEqual(set(b["sections"]),
+                         {"productDirection", "implementationPlan", "risksVerification"})
+        self.assertEqual(set(b["humanEscalation"]), {"needed", "reason"})
+        self.assertIsInstance(b["canStartImplementation"], bool)
+        self.assertEqual(b["startImplementationLabel"], "Start implementation")
+
+    def test_answer_fills_only_the_lead_section(self):
+        b = R.role_led_brief("how should we implement this fix in the code path?", answer="Patch foo().")
+        self.assertEqual(b["leadRole"], "sr_dev")
+        self.assertEqual(b["sections"]["implementationPlan"], "Patch foo().")
+        self.assertNotEqual(b["sections"]["productDirection"], "Patch foo().")
+
+    def test_high_impact_fork_returns_one_lead_no_escalation(self):
+        b = R.role_led_brief("Should we refactor the architecture and how do we implement the code path?")
+        self.assertEqual(b["leadRole"], "architect")          # tie-break → one lead
+        self.assertIn("sr_dev", b["consultedRoles"])          # the other role consulted
+        self.assertFalse(b["humanEscalation"]["needed"])      # high-impact ≠ critical
+
+    def test_can_start_implementation_gating(self):
+        self.assertTrue(R.role_led_brief("what should we build next for the product?")["canStartImplementation"])
+        self.assertTrue(R.role_led_brief("how do we implement the fix?")["canStartImplementation"])
+        self.assertFalse(R.role_led_brief("is it ready to ship — do the tests pass, any regression?")
+                         ["canStartImplementation"])          # readiness brief ≠ implementation
+
+
+class EscalationTest(unittest.TestCase):
+    def test_critical_cases_escalate_with_reason(self):
+        cases = {
+            "destructive git / data loss": "should we force push and reset --hard the branch?",
+            "security / privacy risk": "should we hardcode the api key and the personal data?",
+            "money / API spend": "should we purchase the plan and charge the budget?",
+            "public release / PR action": "should we open a pr, merge to main, and deploy to prod?",
+            "irreversible product direction / taste": "should we rebrand and rename the product?",
+        }
+        for reason, q in cases.items():
+            e = R.needs_human_escalation(q)
+            self.assertTrue(e["needed"], q)
+            self.assertEqual(e["reason"], reason)
+
+    def test_normal_question_does_not_escalate(self):
+        self.assertFalse(R.needs_human_escalation("how do we implement the focus helper?")["needed"])
+
+    def test_critical_question_blocks_start_implementation(self):
+        b = R.role_led_brief("should we force push and reset --hard to fix this quickly?")
+        self.assertTrue(b["humanEscalation"]["needed"])
+        self.assertFalse(b["canStartImplementation"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3294,6 +3294,17 @@
   background: none; border: 1px solid var(--border); color: var(--text-muted);
   border-radius: 8px; padding: 2px 9px; }
 .cmsg-action:hover { border-color: var(--accent); color: var(--text); }
+.cmsg-action:disabled { opacity: 0.55; cursor: default; border-style: dashed; }
+.cmsg-action:disabled:hover { border-color: var(--border); color: var(--text-muted); }
+/* Role-led brief — calm, structured sections (one lead role, no "Council says…"). */
+.cmsg-brief { display: flex; flex-direction: column; gap: 7px; margin-top: 2px; }
+.cmsg-brief-section { display: flex; flex-direction: column; gap: 2px; }
+.cmsg-brief-h { font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-muted); }
+.cmsg-brief-c { font-size: 12px; line-height: 1.5; color: var(--text); white-space: pre-wrap;
+  word-break: break-word; }
+.cmsg-brief-escalate { font-size: 11px; color: var(--solid, #d98a3d); padding-left: 8px;
+  border-left: 2px solid var(--solid, #d98a3d); }
 
 /* bottom-docked composer */
 .council-composer { flex: 0 0 auto; display: flex; gap: 6px; align-items: flex-end;
