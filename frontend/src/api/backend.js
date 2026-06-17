@@ -759,6 +759,36 @@ export const getPlan = () => apiFetch('/api/plan')
  */
 export const getArchgraph = () => apiFetch('/api/archgraph')
 
+// ── Focus (L2-B) ────────────────────────────────────────────────────────────
+/**
+ * Request a FOCUSED neighborhood: seeds + 1–2 hops of import / function-flow neighbors from the
+ * server's CACHED ArchGraph, capped — a small subgraph, not the full repo hairball. Bounded and
+ * deterministic; if no graph is cached the server returns the seeds with a warning (never a fresh
+ * scan, never a blank canvas).
+ * @param {string[]} seeds - seed file paths
+ * @param {{hops?:number, maxFiles?:number, primaryPath?:string[]}} [opts]
+ * @returns {Promise<{ok, mode, seeds, files, functions, edges, warnings}|null>}
+ */
+export const postFocusNeighborhood = (seeds, { hops = 1, maxFiles, primaryPath = null } = {}) =>
+  apiFetch('/api/focus/neighborhood', {
+    method: 'POST',
+    body: JSON.stringify({ seeds, hops, ...(maxFiles ? { maxFiles } : {}),
+                           ...(primaryPath ? { primaryPath } : {}) }),
+  })
+
+/**
+ * Fetch the SCOPED VERIFY PLAN for a focused/repro context — the smallest honest check set. ADVISORY:
+ * it never runs or changes the verify gate, it only reports whether verify would be 'scoped' (and why)
+ * or fall back. Surfaces the plan before it becomes the enforced default.
+ * @param {{touchedFiles?:string[], reproCheck?:object}} [opts]
+ * @returns {Promise<{ok, mode:'scoped'|'fallback', checks, reason, warnings}|null>}
+ */
+export const postFocusVerifyPlan = ({ touchedFiles = [], reproCheck = null } = {}) =>
+  apiFetch('/api/focus/verify-plan', {
+    method: 'POST',
+    body: JSON.stringify({ touchedFiles, ...(reproCheck ? { reproCheck } : {}) }),
+  })
+
 /**
  * Generate canvas state from the repo's ArchGraph and persist it server-side.
  *

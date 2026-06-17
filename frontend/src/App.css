@@ -3352,3 +3352,60 @@
 
 /* the drawer is the recorder readout — orange edge where it meets the board */
 .tlv3-drawer { border-left: 2px solid var(--accent-orange-border); }
+
+/* ── L2-B Focus lens — a small focused subgraph over the full canvas ───────── */
+.focus-trigger {
+  position: absolute; top: 12px; right: 16px; z-index: 70;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 99px; cursor: pointer;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--text); background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(16px) saturate(1.4); -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 0.5px solid var(--accent-orange-border); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3); }
+.focus-trigger:hover { color: var(--accent); }
+
+.focus-lens {
+  position: absolute; top: 12px; right: 16px; z-index: 71;
+  width: 320px; max-height: calc(100% - 24px); overflow: auto;
+  display: flex; flex-direction: column;
+  border-radius: 12px; padding: 12px 14px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  border: 0.5px solid var(--accent-orange-border); box-shadow: 0 14px 40px rgba(0, 0, 0, 0.4); }
+.focus-lens-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.focus-lens-title { font-size: 12px; font-weight: 800; color: var(--text); }
+.focus-lens-seed { font-size: 10.5px; color: var(--text-muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+.focus-lens-exit { margin-left: auto; font-size: 10.5px; cursor: pointer; color: var(--text-muted);
+  background: transparent; border: 0.5px solid var(--border); border-radius: 6px; padding: 2px 7px; }
+.focus-lens-exit:hover { color: var(--text); border-color: var(--accent); }
+.focus-lens-empty { font-size: 11px; color: var(--text-muted); padding: 4px 0; }
+.focus-lens-body { display: flex; flex-direction: column; gap: 10px; }
+.focus-lens-files { display: flex; flex-wrap: wrap; gap: 5px; }
+.focus-node { position: relative; font-size: 10.5px; color: var(--text); background: var(--surface-2);
+  border: 0.5px solid var(--border); border-radius: 6px; padding: 3px 7px; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.focus-node.seed { border-color: var(--accent-orange-border); color: var(--accent);
+  font-weight: 700; display: inline-flex; align-items: center; gap: 5px; }
+.focus-node-badge { font-size: 8.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--surface); background: var(--accent); border-radius: 4px; padding: 0 4px; }
+.focus-lens-sub { font-size: 9.5px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+.focus-lens-edges { display: flex; flex-direction: column; gap: 2px; }
+.focus-edge { font-size: 10.5px; color: var(--text); font-family: var(--mono, monospace); }
+.focus-arrow { color: var(--accent); }
+.focus-lens-verify { border-top: 0.5px dashed var(--border); padding-top: 8px; }
+.focus-verify-mode, .work-verify-mode { font-size: 9px; font-weight: 800; letter-spacing: 0.05em;
+  text-transform: uppercase; border-radius: 4px; padding: 1px 6px; }
+.focus-verify-mode.scoped, .work-verify-mode.scoped { color: var(--surface); background: var(--solid, #d98a3d); }
+.focus-verify-mode.fallback, .work-verify-mode.fallback { color: var(--text-muted);
+  border: 0.5px solid var(--border); }
+.focus-verify-reason { font-size: 10.5px; color: var(--text); margin-top: 4px; }
+.focus-warn { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+.focus-lens-warnings { border-top: 0.5px dashed var(--border); padding-top: 6px; }
+
+/* Scoped verify plan surfaced in Work Review (advisory, never the enforced gate) */
+.work-verifyplan { margin-top: 8px; padding-top: 8px; border-top: 0.5px dashed var(--border); }
+.work-verifyplan-h { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700;
+  color: var(--text); }
+.work-verify-warn { font-size: 10px; color: var(--text-muted); margin-top: 2px; }

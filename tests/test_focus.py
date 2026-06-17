@@ -79,6 +79,14 @@ class NeighborhoodTest(unittest.TestCase):
         focus.neighborhood(None, ["a.py"], graph=GRAPH, hops=2)
         self.assertEqual(json.dumps(GRAPH, sort_keys=True), before)  # whole-repo data untouched
 
+    def test_provided_graph_is_used_without_reparse(self):
+        # PERFORMANCE GUARD (L2-B): a provided graph must be used verbatim — analyze_repo is NEVER run.
+        # A bogus root would crash a re-parse; passing graph= bypasses it entirely, so focus stays
+        # bounded + deterministic (this is what the endpoint does with the server's cached ArchGraph).
+        r = focus.neighborhood("/no/such/repo/anywhere", ["a.py"], graph=GRAPH, hops=1)
+        self.assertEqual(r["mode"], "focused")
+        self.assertIn("b.py", r["files"])                # derived from the provided graph, not a re-parse
+
 
 class ScopedVerifyTest(unittest.TestCase):
     def test_picks_explicit_repro_check(self):
@@ -150,6 +158,34 @@ class CoerceRequestTest(unittest.TestCase):
         r = focus.neighborhood(None, a["seeds"], hops=a["hops"], max_files=a["max_files"],
                                primary_path=a["primary_path"], graph=GRAPH)
         self.assertTrue(r["ok"])     # focused response, never a crash
+
+
+class CoerceVerifyRequestTest(unittest.TestCase):
+    """L2-B: POST /api/focus/verify-plan body coercion — malformed input must NEVER 500."""
+
+    def test_defaults_on_empty_or_bad_body(self):
+        for bad in ({}, None, "nope", 5, []):
+            self.assertEqual(focus.coerce_verify_request(bad),
+                             {"touched_files": [], "repro_check": None})
+
+    def test_touched_files_only_list_of_strings(self):
+        self.assertEqual(focus.coerce_verify_request({"touchedFiles": "a.py"})["touched_files"], [])
+        self.assertEqual(
+            focus.coerce_verify_request({"touchedFiles": ["a.py", 7, "", "b.py"]})["touched_files"],
+            ["a.py", "b.py"])
+
+    def test_repro_check_only_dict(self):
+        self.assertIsNone(focus.coerce_verify_request({"reproCheck": "x"})["repro_check"])
+        chk = {"id": "repro", "command": ["pytest", "-k", "x"]}
+        self.assertEqual(focus.coerce_verify_request({"reproCheck": chk})["repro_check"], chk)
+
+    def test_coerced_request_feeds_scoped_verify(self):
+        d, root = _repo({"foo.py": "x = 1\n", "tests/test_foo.py": "def test_f():\n    assert True\n"})
+        with d:
+            a = focus.coerce_verify_request({"touchedFiles": ["foo.py", 3]})
+            plan = focus.scoped_verify(root, touched_files=a["touched_files"], repro_check=a["repro_check"])
+            self.assertEqual(plan["mode"], "scoped")            # obvious test matched
+            self.assertTrue(any("not proven" in w for w in plan["warnings"]))   # honest, no overclaim
 
 
 if __name__ == "__main__":

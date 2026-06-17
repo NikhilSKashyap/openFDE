@@ -5,6 +5,7 @@ import FileTree from './components/FileTree/FileTree'
 import Whiteboard from './components/Whiteboard/Whiteboard'
 import RightPanel from './components/RightPanel/RightPanel'
 import WorkPanel from './components/WorkPanel/WorkPanel'
+import FocusLens from './components/Focus/FocusLens'
 import { deriveMoment } from './productFlow/deriveMoment'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import AgentSettings from './components/AgentSettings/AgentSettings'
@@ -60,7 +61,7 @@ import {
   askConcept,
   getConceptCards,
   saveConceptCard, hatchFlow,
-  getPlugins, getWebxrSummary } from './api/backend'
+  getPlugins, getWebxrSummary, postFocusNeighborhood } from './api/backend'
 import { connectWS, closeWS } from './api/ws'
 import { badgeMapFromSummary } from './lib/webxrBadges'
 
@@ -144,6 +145,9 @@ export default function App() {
   const [hatchZ, setHatchZ] = useState(60)         // hatch window z (raised on "Open in editor")
   const [flowLens, setFlowLens] = useState(null)   // {artifact, busy} — failure-flow lens
   const [repairPhase, setRepairPhase] = useState(null) // failing | fixing | fixed
+  // L2-B Focus lens: a small focused subgraph overlay (seeds + neighbors) over the full canvas.
+  // {busy} | {result, seedLabel, hops} | {error}. Null = no focus (full canvas). Never mutates canvas.
+  const [focusLens, setFocusLens] = useState(null)
   const flowExpandRef = useRef('')                 // last fingerprint auto-expanded (once per failure)
   // ── Execution run / live trace (Step 17) ─────────────────────────────────
   // run: { runId, status, scopedBoxIds, scopedArrowIds, nodeStates, edgeStates,
@@ -1086,6 +1090,18 @@ export default function App() {
     setExpandedIds(ids)
   }
   function collapseAll() { setExpandedIds(new Set()); setArchSel(null) }
+
+  // L2-B: request a focused neighborhood (a small subgraph), bounded by the backend (cached graph,
+  // capped). Reuses /api/focus/neighborhood. Never mutates the canvas — it opens an overlay lens.
+  const requestFocus = useCallback(async ({ seeds, primaryPath = null, label = '', hops = 1 }) => {
+    const clean = [...new Set((seeds || []).filter(Boolean))]
+    if (!clean.length) return
+    setFocusLens({ busy: true, seedLabel: label, hops })
+    const res = await postFocusNeighborhood(clean, { hops, primaryPath })
+    setFocusLens(res?.ok
+      ? { result: res, seedLabel: label, hops, busy: false }
+      : { error: true, seedLabel: label, hops, busy: false })
+  }, [])
 
   // Show failure flow → enter the lens. Expand exactly the files on the distilled
   // causal path (so their FUNCTION boxes render — the lens rings functions, not
@@ -2242,6 +2258,27 @@ export default function App() {
                   </button>
                 ))}
               </div>
+            )}
+            {/* L2-B Focus: a small focused subgraph for the selected file/function or the active
+                failure path. Overlays the full canvas (which stays intact); Exit returns to it. */}
+            {!focusLens && activeView === 'whiteboard' && (() => {
+              let target = null
+              if (flowLens?.artifact) {
+                const files = [...new Set((flowLens.artifact.primaryPath || []).map(n => n.file).filter(Boolean))]
+                if (files.length) target = { seeds: files, primaryPath: files, label: 'failure path', kind: 'failure' }
+              } else if (archSel?.data?.path) {
+                target = { seeds: [archSel.data.path], label: archSel.data.path, kind: 'file' }
+              }
+              if (!target) return null
+              return (
+                <button className="focus-trigger" onClick={() => requestFocus(target)}
+                        title="Show a small focused neighborhood for this target — the full canvas stays intact">
+                  ⊙ Focus {target.kind === 'failure' ? 'the failure' : 'this file'}
+                </button>
+              )
+            })()}
+            {focusLens && activeView === 'whiteboard' && (
+              <FocusLens lens={focusLens} onExit={() => setFocusLens(null)} />
             )}
           </main>
           <aside className={`panel-right${rightOpen ? '' : ' collapsed'}`}

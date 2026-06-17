@@ -50,6 +50,16 @@ def coerce_request(data) -> dict:
     }
 
 
+def coerce_verify_request(data) -> dict:
+    """Coerce a ``POST /api/focus/verify-plan`` body into SAFE kwargs for :func:`scoped_verify` —
+    NEVER raises. ``touchedFiles`` is accepted only as a list of non-empty strings; ``reproCheck`` only
+    as a dict (else dropped). Surfacing the plan is advisory — it never runs or changes the verify gate."""
+    data = data if isinstance(data, dict) else {}
+    repro = data.get("reproCheck")
+    return {"touched_files": _str_list(data.get("touchedFiles")),
+            "repro_check": repro if isinstance(repro, dict) else None}
+
+
 def _neighborhood_from_graph(graph: dict, seeds: list, *, hops: int = 1,
                              max_files: int = _DEFAULT_MAX_FILES, primary_path=None) -> dict:
     """Pure neighborhood selection from an ArchGraph dict (no I/O) — unit-testable with a synthetic

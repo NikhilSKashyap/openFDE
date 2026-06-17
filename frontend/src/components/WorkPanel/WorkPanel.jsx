@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { MOMENT_LABEL, MOMENT_PROMPT } from '../../productFlow/deriveMoment'
 import CouncilChat from '../CouncilChat/CouncilChat'
+import { postFocusVerifyPlan } from '../../api/backend'
 
 /**
  * WorkPanel — the single progressive panel from FLOW.md (Step 28 Slice 2).
@@ -50,6 +51,21 @@ export default function WorkPanel({
     String(commitDiff.sha).slice(0, 7) === String(reviewCommitSha).slice(0, 7)
       ? commitDiff.data.patch : null
   const reviewNeedsApproval = !!(lastResult?.approval) || (!lastResult && pendingApproval)
+  // L2-B: the SCOPED VERIFY PLAN for this run's touched files — advisory only (it never runs or changes
+  // the verify gate), surfaced so the scoped plan is visible before it becomes the enforced default.
+  // Keyed by the touched set so a stale plan is derived away (no synchronous reset in the effect).
+  const [verifyPlan, setVerifyPlan] = useState(null)   // { key, data }
+  const touchedKey = (lastResult?.writes || []).join('|')
+  useEffect(() => {
+    let alive = true
+    const files = touchedKey ? touchedKey.split('|') : []
+    if (moment === 'review' && files.length) {
+      postFocusVerifyPlan({ touchedFiles: files })
+        .then(r => { if (alive && r?.ok) setVerifyPlan({ key: touchedKey, data: r }) })
+    }
+    return () => { alive = false }
+  }, [moment, touchedKey])
+  const verifyForRender = verifyPlan?.key === touchedKey ? verifyPlan.data : null
   // Council stage story (Step 29 Slice 3 polish): the Architect → Sr Dev →
   // Verifier stages for THIS run, surfaced directly in Work Review.
   const latestCouncilRun = lastResult?.fromRun ||
@@ -147,6 +163,18 @@ export default function WorkPanel({
               {(lastResult?.writes?.length > 0) && (
                 <div className="work-files">
                   {lastResult.writes.slice(0, 8).map(f => <code key={f} className="work-file">{f}</code>)}
+                </div>
+              )}
+              {verifyForRender && (
+                <div className="work-verifyplan">
+                  <div className="work-verifyplan-h">
+                    Verify plan
+                    <span className={`work-verify-mode ${verifyForRender.mode}`}>{verifyForRender.mode}</span>
+                  </div>
+                  <p className="work-sub">{verifyForRender.reason}</p>
+                  {(verifyForRender.warnings || []).map((w, i) => (
+                    <p key={i} className="work-verify-warn">{w}</p>
+                  ))}
                 </div>
               )}
               {reviewCommitSha && (

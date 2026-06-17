@@ -1511,11 +1511,36 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # Coerce + clamp every field (hops 0..3, maxFiles 1..200, seeds/primaryPath = list[str]) so a
         # malformed body yields a focused response with warnings, never a 500.
         args = focus_mod.coerce_request(data)
+        # PERFORMANCE GUARD (L2-B): focus must be O(issue) and bounded — reuse the ALREADY-CACHED
+        # ArchGraph (in-memory snapshot, else the warm disk snapshot) instead of re-running analyze_repo
+        # (which can take tens of seconds on a large repo). No cache yet → pass {} so the neighborhood
+        # is the seeds + an honest warning (graceful, never a fresh scan and never a blank canvas).
+        cached = _arch_mem.get("graph")
+        if cached is None:
+            warm = boot_cache_mod.read_warm(persistence.openfde_dir)
+            cached = (warm or {}).get("arch")
+        graph_for_focus = cached if cached is not None else {}
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: focus_mod.neighborhood(
             path, args["seeds"], hops=args["hops"], max_files=args["max_files"],
-            primary_path=args["primary_path"]))
+            primary_path=args["primary_path"], graph=graph_for_focus))
         return web.json_response(result)
+
+    async def post_focus_verify_plan(request: web.Request) -> web.Response:
+        """L2-B: surface the SCOPED VERIFY PLAN — the smallest honest check set — for a focused/repro
+        context. Body: {touchedFiles?:[paths], reproCheck?:{...}}. Returns
+        {ok, mode:'scoped'|'fallback', checks, reason, warnings}. ADVISORY + READ-ONLY: it neither runs
+        nor changes the verify gate; it only shows whether verify WOULD be scoped (and why) or fall back,
+        so the scoped plan is visible before it ever becomes the enforced default."""
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001 — a bad body must not crash the advisory path
+            data = {}
+        args = focus_mod.coerce_verify_request(data)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: focus_mod.scoped_verify(
+            path, touched_files=args["touched_files"], repro_check=args["repro_check"]))
+        return web.json_response({"ok": True, **result})
 
     async def post_project(request: web.Request) -> web.Response:
         """Persist project metadata, regenerate PROJECT_META.md and PLAN.md.
@@ -4700,6 +4725,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/plugins/treesitter-recommendation", get_treesitter_recommendation)
     app.router.add_post("/api/plugins/{id}/install",     post_plugin_install)
     app.router.add_post("/api/focus/neighborhood",       post_focus_neighborhood)
+    app.router.add_post("/api/focus/verify-plan",         post_focus_verify_plan)
     app.router.add_get( "/api/boot",                  get_boot)
     app.router.add_get( "/api/boot/canvas",           get_boot_canvas)
     app.router.add_get( "/api/files",                 get_files)
