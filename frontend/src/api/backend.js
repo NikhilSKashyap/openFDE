@@ -729,6 +729,18 @@ export const postCouncilAsk = (question, target = 'auto', { signal } = {}) =>
  */
 export const getCouncilHistory = () => apiFetch('/api/council/history')
 
+/**
+ * Start an implementation handoff from a role-led brief. READ-ONLY w.r.t. the repo — the server
+ * re-validates the escalation gate and persists a VISIBLE pending handoff record; it never dispatches
+ * a file-editing run. Returns null on refusal (409) or network error.
+ * @param {string} question - the original question the brief answered
+ * @param {object} brief - the role-led brief ({leadRole, sections, ...})
+ * @returns {Promise<{ok, handoff, message}|null>}
+ */
+export const postCouncilImplementation = (question, brief, { signal } = {}) =>
+  apiFetch('/api/council/implementation',
+    { method: 'POST', body: JSON.stringify({ question, brief }), _timeout: 60_000, signal })
+
 // ── Plan ──────────────────────────────────────────────────────────────────
 
 /**

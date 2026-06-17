@@ -228,6 +228,9 @@ class Persistence:
         self.concept_cards_path = openfde_dir / "concept_cards.json"
         self.episodes_path = openfde_dir / "episodes.json"
         self.council_chat_path = openfde_dir / "council_chat.json"
+        # Pending implementation handoffs created from a role-led council brief. These are VISIBLE,
+        # read-only records (the structured prompt + lead + sections) — they do NOT dispatch a run.
+        self.council_handoffs_path = openfde_dir / "council_handoffs.json"
         # Low-confidence backfilled transcript fragments live HERE, never in episodes.json — they
         # are importable later but never consume a P<n> until accepted. P<n> means a real prompt.
         self.backfill_candidates_path = openfde_dir / "backfill_candidates.json"
@@ -644,6 +647,32 @@ class Persistence:
         thread = thread[-cap:]
         self._write_json(self.council_chat_path, thread)
         return thread
+
+    def load_council_handoffs(self) -> list:
+        """Pending implementation handoffs (oldest-first), each a structured, read-only record.
+
+        Returns:
+            list[dict] — each {id, status, question, leadRole, sections, prompt,
+                activeEpisodeId?, ts}. A handoff is a VISIBLE bridge into a scoped run; it never
+                dispatches one itself.
+        """
+        raw = self._read_json(self.council_handoffs_path, [])
+        return raw if isinstance(raw, list) else []
+
+    def append_council_handoff(self, handoff: dict, cap: int = 50) -> dict:
+        """Append one pending handoff record, keeping the most recent ``cap``.
+
+        Args:
+            handoff: dict — a complete handoff record (id/status/prompt/… built by the caller).
+            cap: int — maximum handoffs retained.
+
+        Returns:
+            dict — the stored ``handoff`` (echoed back for the response).
+        """
+        records = self.load_council_handoffs()
+        records.append(handoff)
+        self._write_json(self.council_handoffs_path, records[-cap:])
+        return handoff
 
     # ------------------------------------------------------------------ #
     #  Backfill candidates (low-confidence transcript fragments)           #

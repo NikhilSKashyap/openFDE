@@ -4540,11 +4540,26 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     result["provider"] = prov     # secondary metadata, not the label
             result["routedTarget"] = target
             result["agents"] = agent_states
-            # Additive (Role-led Council): a structured, one-lead-role brief over the same answer —
-            # leadRole + consulted + {productDirection, implementationPlan, risksVerification} +
-            # humanEscalation + canStartImplementation. Existing fields (answer/label/…) are unchanged.
+            # Additive (Role-led Council): a structured, one-lead-role brief. The lead's section reuses
+            # the answer above; the OTHER two sections are consulted from their owning role via that
+            # role's OWN read-only text caller (reusing the `callers` already built — no extra wiring),
+            # each with the centralized SECTION_ROLE_PROMPTS. Unavailable roles fall back deterministically.
+            def _section_filler(brief_role, role_prompt):
+                srole = council_router_mod.SETTINGS_ROLE.get(brief_role, brief_role)
+                caller = callers.get(srole)
+                if not caller:
+                    return ""
+                system, user = council_router_mod.build_section_prompt(
+                    brief_role, role_prompt, question, ctx,
+                    custom_prompt=custom_prompts.get(srole, ""))
+                try:
+                    return (caller(system, user) or "").strip()
+                except Exception:  # noqa: BLE001 — provider failure degrades to the deterministic default
+                    return ""
             result["brief"] = council_router_mod.role_led_brief(
-                question, decision=decision, answer=result.get("answer"))
+                question, decision=decision, answer=result.get("answer"),
+                section_filler=_section_filler)
+            result["brief"]["question"] = question      # self-contained: lets a restored brief start a handoff
             return result
 
         try:
@@ -4575,6 +4590,84 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_council_history(request: web.Request) -> web.Response:
         """Recent council chat thread (oldest-first) so a refresh restores it, never an empty box."""
         return web.json_response({"ok": True, "turns": persistence.load_council_chat()})
+
+    async def post_council_implementation(request: web.Request) -> web.Response:
+        """Create a SAFE, visible implementation handoff from a role-led council brief. Body:
+        {question, brief?}.
+
+        This is the 'Start implementation' affordance. It is READ-ONLY w.r.t. the repo: it does NOT
+        dispatch a file-editing run — that path (`/api/council/run`) requires an explicit canvas scope
+        with dotted/solid permissions, which a chat brief does not carry. Instead it RE-VALIDATES the
+        gate server-side (never trusting the client to bypass escalation / lead rules), composes the
+        handoff prompt from the brief + active episode, PERSISTS a pending handoff record, and appends a
+        short confirmation turn so the result survives a refresh. A future slice carries the pending
+        handoff into the scoped run path."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        question = (body.get("question") or "").strip()
+        if not question:
+            return web.json_response({"ok": False, "error": "question required"}, status=400)
+        client_brief = body.get("brief") if isinstance(body.get("brief"), dict) else {}
+        client_sections = client_brief.get("sections") if isinstance(client_brief.get("sections"), dict) else None
+
+        def _work():
+            agent_states = _council_agent_states()
+            decision = council_router_mod.route(question, "auto", agent_states)
+            # Re-derive the gate server-side from the QUESTION (route + escalation). The display text of
+            # the sections may come from the client (low risk — it only feeds the prompt), but whether a
+            # handoff is ALLOWED is decided here, authoritatively.
+            brief = council_router_mod.role_led_brief(
+                question, decision=decision, sections=client_sections)
+            return brief
+
+        try:
+            loop = asyncio.get_event_loop()
+            brief = await loop.run_in_executor(None, _work)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("council handoff failed: %s", exc)
+            return web.json_response({"ok": False, "error": "handoff failed"}, status=500)
+
+        if not brief.get("canStartImplementation"):
+            esc = brief.get("humanEscalation") or {}
+            reason = esc.get("reason") or ("a readiness/Verifier brief does not start implementation — "
+                                           "ask a product or implementation question to plan a change")
+            return web.json_response({"ok": False, "error": "implementation handoff not allowed",
+                                      "reason": reason, "humanEscalation": esc}, status=409)
+
+        # Active-episode context for the handoff prompt (best-effort; the handoff is still valid without it).
+        ep = persistence.latest_active_episode() or {}
+        ep_ctx = ""
+        ep_id = None
+        if isinstance(ep, dict):
+            ep_ctx = (ep.get("title") or ep.get("summary") or ep.get("intent")
+                      or ep.get("prompt") or "").strip()
+            ep_id = ep.get("episodeId")
+        prompt = council_router_mod.build_handoff_prompt(
+            question, brief["leadRole"], brief["sections"], episode=ep_ctx)
+
+        ts = datetime.now(timezone.utc).isoformat()
+        handoff = {
+            "id": "handoff_" + secrets.token_hex(5),
+            "status": "pending",
+            "question": question,
+            "leadRole": brief["leadRole"],
+            "sections": brief["sections"],
+            "prompt": prompt,
+            "activeEpisodeId": ep_id,
+            "ts": ts,
+        }
+        message = f"Implementation started from this brief. (handoff {handoff['id']})"
+        try:
+            persistence.append_council_handoff(handoff)
+            # Persist a compact confirmation turn so the start result survives a browser refresh.
+            persistence.append_council_chat([
+                {"role": "assistant", "text": message, "label": "OpenFDE", "ts": ts},
+            ])
+        except Exception:  # noqa: BLE001
+            logger.warning("could not persist council handoff")
+        return web.json_response({"ok": True, "handoff": handoff, "message": message})
 
     # ---- register routes (order matters: specific before catch-all) -----
     app.router.add_get("/ws",                          ws_handler)
@@ -4640,6 +4733,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/council/context",           get_council_context)
     app.router.add_post("/api/council/ask",               post_council_ask)
     app.router.add_get("/api/council/history",            get_council_history)
+    app.router.add_post("/api/council/implementation",    post_council_implementation)
     app.router.add_get( "/api/execution/workflows",       get_workflows)
     app.router.add_post("/api/execution/workflow/{workflowId}/result", post_workflow_result)
     app.router.add_get( "/api/execution/workflow/{workflowId}", get_workflow_one)

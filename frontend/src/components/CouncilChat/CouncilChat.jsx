@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation } from '../../api/backend'
 
 /**
  * CouncilChat — the read-only brain of Orient, as a real chat thread (not a single answer card).
@@ -129,6 +129,26 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
 
   const cancel = () => abortRef.current?.abort()
 
+  // Start implementation: hand the structured brief to the server, which re-validates the gate and
+  // creates a SAFE, visible pending handoff (it never edits files / dispatches a run from here). On
+  // success we append a compact confirmation (also persisted server-side, so it survives a refresh)
+  // and mark the brief started; on failure we show an inline error and leave the brief intact.
+  const startImplementation = useCallback(async (m) => {
+    if (!m?.brief || m.startState === 'starting' || m.startState === 'started') return
+    const q = m.brief.question || ''
+    if (!q) { patch(m.id, { startError: 'Missing the original question for this brief.' }); return }
+    patch(m.id, { startState: 'starting', startError: null })
+    const res = await postCouncilImplementation(q, m.brief)
+    if (res?.ok) {
+      patch(m.id, { startState: 'started', startError: null, startHandoffId: res.handoff?.id })
+      setMessages(ms => [...ms, { id: nextId(), role: 'assistant',
+        text: res.message || 'Implementation started from this brief.' }])
+    } else {
+      patch(m.id, { startState: 'error',
+        startError: 'Could not start implementation — the brief is unchanged. Try again.' })
+    }
+  }, [patch])
+
   // Enter sends; Shift+Enter inserts a newline; Cmd/Ctrl+Enter also sends.
   const onKeyDown = (e) => {
     if (e.key !== 'Enter') return
@@ -191,11 +211,23 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
                 {m.brief.humanEscalation?.needed && (
                   <div className="cmsg-brief-escalate">Needs your call — {m.brief.humanEscalation.reason}.</div>
                 )}
-                {m.brief.canStartImplementation && (
-                  <button className="cmsg-action" disabled title="Implementation handoff coming next">
-                    {m.brief.startImplementationLabel || 'Start implementation'} — coming next
+                {/* Start implementation: enabled only for non-escalated Architect/Senior Dev briefs;
+                    otherwise disabled with the reason. Creates a safe, visible handoff (no auto-run). */}
+                <div className="cmsg-brief-start">
+                  <button className="cmsg-action"
+                    disabled={!m.brief.canStartImplementation || m.startState === 'starting' || m.startState === 'started'}
+                    title={m.brief.canStartImplementation
+                      ? 'Create a safe implementation handoff from this brief'
+                      : (m.brief.humanEscalation?.needed
+                          ? `Needs your decision — ${m.brief.humanEscalation.reason}`
+                          : 'Readiness brief — ask a product or implementation question to plan a change')}
+                    onClick={() => startImplementation(m)}>
+                    {m.startState === 'starting' ? 'Starting…'
+                      : m.startState === 'started' ? 'Implementation started ✓'
+                      : (m.brief.startImplementationLabel || 'Start implementation')}
                   </button>
-                )}
+                  {m.startError && <div className="cmsg-brief-error">{m.startError}</div>}
+                </div>
               </div>
             )}
             {m.role === 'assistant' && m.label && !m.brief && !m.state && (

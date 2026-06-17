@@ -122,5 +122,31 @@ class CouncilChatStoreTest(unittest.TestCase):
             self.assertEqual(thread[1]["text"], "old answer")
 
 
+class CouncilHandoffStoreTest(unittest.TestCase):
+    """Pending implementation handoffs — a visible, read-only record created from a role-led brief."""
+
+    def test_append_load_and_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d) / ".openfde")
+            self.assertEqual(p.load_council_handoffs(), [])             # empty when never written
+            handoff = {"id": "handoff_abc123", "status": "pending", "question": "Fix the parser.",
+                       "leadRole": "sr_dev",
+                       "sections": {"productDirection": "PD", "implementationPlan": "IP",
+                                    "risksVerification": "RV"},
+                       "prompt": "Implementation handoff …", "activeEpisodeId": "E7", "ts": "t0"}
+            returned = p.append_council_handoff(handoff)
+            self.assertEqual(returned, handoff)                        # echoes the stored record
+            loaded = p.load_council_handoffs()
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["id"], "handoff_abc123")
+            self.assertEqual(loaded[0]["status"], "pending")
+            self.assertEqual(loaded[0]["sections"]["implementationPlan"], "IP")
+            for i in range(60):                                        # cap keeps the most recent
+                p.append_council_handoff({"id": f"h{i}", "status": "pending"}, cap=50)
+            capped = p.load_council_handoffs()
+            self.assertEqual(len(capped), 50)
+            self.assertEqual(capped[-1]["id"], "h59")
+
+
 if __name__ == "__main__":
     unittest.main()
