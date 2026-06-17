@@ -3306,6 +3306,7 @@
 .cmsg-brief-escalate { font-size: 11px; color: var(--solid, #d98a3d); padding-left: 8px;
   border-left: 2px solid var(--solid, #d98a3d); }
 .cmsg-brief-start { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.cmsg-brief-hint { font-size: 10px; color: var(--text-muted); }
 .cmsg-brief-error { font-size: 10.5px; color: var(--solid, #d98a3d); }
 
 /* bottom-docked composer */

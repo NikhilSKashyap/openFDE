@@ -130,22 +130,22 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
   const cancel = () => abortRef.current?.abort()
 
   // Start implementation: hand the structured brief to the server, which re-validates the gate and
-  // creates a SAFE, visible pending handoff (it never edits files / dispatches a run from here). On
-  // success we append a compact confirmation (also persisted server-side, so it survives a refresh)
-  // and mark the brief started; on failure we show an inline error and leave the brief intact.
+  // CREATES a scoped handoff record from the brief — it never edits files or dispatches a run from
+  // here (no /api/council/run has started). On success we append a compact confirmation (also persisted
+  // server-side, so it survives a refresh); on failure we show an inline error and leave the brief intact.
   const startImplementation = useCallback(async (m) => {
-    if (!m?.brief || m.startState === 'starting' || m.startState === 'started') return
+    if (!m?.brief || m.startState === 'creating' || m.startState === 'created') return
     const q = m.brief.question || ''
     if (!q) { patch(m.id, { startError: 'Missing the original question for this brief.' }); return }
-    patch(m.id, { startState: 'starting', startError: null })
+    patch(m.id, { startState: 'creating', startError: null })
     const res = await postCouncilImplementation(q, m.brief)
     if (res?.ok) {
-      patch(m.id, { startState: 'started', startError: null, startHandoffId: res.handoff?.id })
+      patch(m.id, { startState: 'created', startError: null, startHandoffId: res.handoff?.id })
       setMessages(ms => [...ms, { id: nextId(), role: 'assistant',
-        text: res.message || 'Implementation started from this brief.' }])
+        text: res.message || 'Implementation handoff created.' }])
     } else {
       patch(m.id, { startState: 'error',
-        startError: 'Could not start implementation — the brief is unchanged. Try again.' })
+        startError: 'Could not create the handoff — the brief is unchanged. Try again.' })
     }
   }, [patch])
 
@@ -212,20 +212,24 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
                   <div className="cmsg-brief-escalate">Needs your call — {m.brief.humanEscalation.reason}.</div>
                 )}
                 {/* Start implementation: enabled only for non-escalated Architect/Senior Dev briefs;
-                    otherwise disabled with the reason. Creates a safe, visible handoff (no auto-run). */}
+                    otherwise disabled with the reason. Creates a scoped handoff record from the brief —
+                    no automatic edit or run (no /api/council/run is dispatched from here). */}
                 <div className="cmsg-brief-start">
                   <button className="cmsg-action"
-                    disabled={!m.brief.canStartImplementation || m.startState === 'starting' || m.startState === 'started'}
+                    disabled={!m.brief.canStartImplementation || m.startState === 'creating' || m.startState === 'created'}
                     title={m.brief.canStartImplementation
-                      ? 'Create a safe implementation handoff from this brief'
+                      ? 'Create a scoped implementation handoff from this brief — no automatic edit or run'
                       : (m.brief.humanEscalation?.needed
                           ? `Needs your decision — ${m.brief.humanEscalation.reason}`
                           : 'Readiness brief — ask a product or implementation question to plan a change')}
                     onClick={() => startImplementation(m)}>
-                    {m.startState === 'starting' ? 'Starting…'
-                      : m.startState === 'started' ? 'Implementation started ✓'
+                    {m.startState === 'creating' ? 'Creating…'
+                      : m.startState === 'created' ? 'Handoff created ✓'
                       : (m.brief.startImplementationLabel || 'Start implementation')}
                   </button>
+                  {m.brief.canStartImplementation && m.startState !== 'created' && (
+                    <div className="cmsg-brief-hint">Creates a scoped handoff from this brief — not an automatic edit or run.</div>
+                  )}
                   {m.startError && <div className="cmsg-brief-error">{m.startError}</div>}
                 </div>
               </div>
