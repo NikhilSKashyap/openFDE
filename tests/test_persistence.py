@@ -85,6 +85,42 @@ class CouncilChatStoreTest(unittest.TestCase):
             self.assertEqual(len(capped), 80)
             self.assertEqual(capped[-1]["text"], "q119")           # newest retained
 
+    def test_assistant_turn_round_trips_role_led_brief(self):
+        """A saved assistant turn may carry a structured role-led `brief`; it survives
+        load unchanged so a browser refresh restores the lead-role card."""
+        brief = {
+            "ok": True, "leadRole": "architect", "consultedRoles": ["senior_dev", "verifier"],
+            "sections": {"productDirection": "Ship the calm path.",
+                         "implementationPlan": "— consult this role; per-section generation is next.",
+                         "risksVerification": "— consult this role; per-section generation is next."},
+            "humanEscalation": {"needed": False, "reason": ""},
+            "canStartImplementation": True, "startImplementationLabel": "Start implementation",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d) / ".openfde")
+            p.append_council_chat([
+                {"role": "user", "text": "what next?"},
+                {"role": "assistant", "text": "Ship the calm path.", "label": "Architect",
+                 "brief": brief},
+            ])
+            thread = p.load_council_chat()
+            self.assertEqual(thread[1]["brief"], brief)             # deep round-trip, unchanged
+            self.assertEqual(thread[1]["brief"]["leadRole"], "architect")
+            self.assertEqual(thread[1]["brief"]["sections"]["productDirection"], "Ship the calm path.")
+
+    def test_older_turns_without_brief_still_load(self):
+        """Backward compatibility: turns saved before briefs existed have no `brief` key and
+        must still load cleanly (the frontend then renders them as plain assistant text)."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Persistence(Path(d) / ".openfde")
+            p.append_council_chat([
+                {"role": "user", "text": "old question"},
+                {"role": "assistant", "text": "old answer", "label": "Verifier"},
+            ])
+            thread = p.load_council_chat()
+            self.assertNotIn("brief", thread[1])                    # no key — hydrates as plain text
+            self.assertEqual(thread[1]["text"], "old answer")
+
 
 if __name__ == "__main__":
     unittest.main()

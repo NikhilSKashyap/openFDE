@@ -4562,6 +4562,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 {"role": "assistant", "text": result.get("answer", ""),
                  "label": result.get("label", ""), "provider": result.get("provider"),
                  "contributorsLabel": result.get("contributorsLabel"),
+                 # Persist the structured role-led brief too, so a refresh restores the
+                 # lead-role card instead of falling back to plain assistant text. Older
+                 # turns saved without this key simply hydrate as plain text (brief absent).
+                 "brief": result.get("brief"),
                  "routedTarget": result.get("routedTarget"), "ts": ts},
             ])
         except Exception:  # noqa: BLE001

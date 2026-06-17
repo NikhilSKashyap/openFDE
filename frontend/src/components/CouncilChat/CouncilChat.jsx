@@ -61,6 +61,9 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
         setMessages(hist.turns.map(t => ({
           id: nextId(), role: t.role, text: t.text, label: t.label,
           contributorsLabel: t.contributorsLabel, provider: t.provider,
+          // Restore the structured role-led brief so the lead-role card survives a refresh.
+          // Older turns saved without it have t.brief === undefined → render as plain text.
+          brief: t.brief,
         })))
       }
       const ctx = await getCouncilContext()

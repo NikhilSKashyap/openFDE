@@ -622,7 +622,9 @@ class Persistence:
 
         Returns:
             list[dict] — each {role: 'user'|'assistant', text, label?, provider?,
-                contributorsLabel?, ts}.
+                contributorsLabel?, brief?, ts}. ``brief`` (when present) is the
+                structured role-led council card; older turns omit it and render as
+                plain text. Turns are stored verbatim, so any such field round-trips.
         """
         raw = self._read_json(self.council_chat_path, [])
         return raw if isinstance(raw, list) else []
