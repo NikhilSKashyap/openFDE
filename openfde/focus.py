@@ -17,6 +17,37 @@ from pathlib import Path
 logger = logging.getLogger("openfde.focus")
 
 _DEFAULT_MAX_FILES = 40
+_HOPS_DEFAULT, _HOPS_MIN, _HOPS_MAX = 1, 0, 3
+_MAX_FILES_MIN, _MAX_FILES_MAX = 1, 200
+
+
+def _clamp_int(value, default: int, lo: int, hi: int) -> int:
+    """Coerce ``value`` to an int (default on garbage), then clamp to [lo, hi]. Never raises."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(lo, min(hi, n))
+
+
+def _str_list(value) -> list:
+    """``value`` as a list of non-empty strings, else ``[]`` (drops non-strings / blanks). Never raises."""
+    return [v for v in value if isinstance(v, str) and v] if isinstance(value, list) else []
+
+
+def coerce_request(data) -> dict:
+    """Coerce a ``POST /api/focus/neighborhood`` body into SAFE kwargs for :func:`neighborhood` —
+    NEVER raises (so a malformed body yields a focused response with warnings, not a 500). ``hops``
+    defaults to 1 and clamps to 0..3; ``maxFiles`` defaults to 40 and clamps to 1..200; ``seeds`` /
+    ``primaryPath`` are accepted only as lists of non-empty strings."""
+    data = data if isinstance(data, dict) else {}
+    primary = _str_list(data.get("primaryPath"))
+    return {
+        "seeds": _str_list(data.get("seeds")),
+        "hops": _clamp_int(data.get("hops"), _HOPS_DEFAULT, _HOPS_MIN, _HOPS_MAX),
+        "max_files": _clamp_int(data.get("maxFiles"), _DEFAULT_MAX_FILES, _MAX_FILES_MIN, _MAX_FILES_MAX),
+        "primary_path": primary or None,
+    }
 
 
 def _neighborhood_from_graph(graph: dict, seeds: list, *, hops: int = 1,
