@@ -124,14 +124,16 @@ http://127.0.0.1:7420
   **lazily** (only when a repo matches and a capability is asked), and core **consumes
   them by default** with a safe fallback. So JS/TS assimilation, test discovery, and
   failure parsing run through the pack's trusted runtime — with optional **tree-sitter**
-  for precise JS/TS parsing, else the built-in regex. The **WebXR pack** tags XR
-  **entrypoints** and **3D assets** on the canvas + Explorer tree. Safety is fixed: a
-  repo-local manifest can **never** import code, and external packs are trusted only once
-  pip-installed. No marketplace yet — OpenFDE never downloads or installs packs.
+  for precise JS/TS parsing, else the built-in regex. The **WebXR pack** marks WebXR files
+  on the canvas + Explorer with honest badges — **XR API**, **Three**, **R3F**, **Scene**,
+  **Shader**, **3D asset** — and groups scene assets (models / shaders / textures) so they
+  read as a few nodes, not a hairball (architecture hints only — no runtime or test lens).
+  Safety is fixed: a repo-local manifest can **never** import code, and external packs are
+  trusted only once pip-installed. No marketplace yet — OpenFDE never downloads or installs packs.
 
 ## Fix a real issue, end to end
 
-OpenFDE 0.5 closes the forward-deployed loop on repos it watches. Import a
+OpenFDE 0.6 closes the forward-deployed loop on repos it watches. Import a
 GitHub issue and take it to a reviewable PR, with proof at every step:
 
 1. **Import the issue** (OpenPM → paste an issue number). It becomes a To-Do card with
@@ -272,13 +274,17 @@ OpenFDE doesn't just run changes. It remembers how the codebase got here.
 
 ## Status
 
-OpenFDE is early and moving fast. As of **0.5.10**, the architecture canvas, Watch,
+OpenFDE is early and moving fast. As of **0.6.0**, the architecture canvas, Watch,
 Review, and **failure lens** span **Python and JS/TS**. JS/TS support uses regex/AST
 assimilation (optional **tree-sitter** for precise parsing), Vitest/Jest/Playwright
 failure parsing, and HTML/web-app entrypoint mapping for web and WebXR repos. A
 **capability registry with a real plugin runtime** (`⌘K → Plugins`) lets built-in,
 repo-local, and pip-installed packs provide lazily-loaded capability hooks that core
-**consumes by default** (with a safe fallback). Repro-and-fix is still Python/pytest.
+**consumes by default** (with a safe fallback). The **WebXR pack** marks WebXR files with
+honest badges (XR API / Three / R3F / Scene / Shader / 3D asset) and groups scene assets, and
+an **additive focused path** (`POST /api/focus/neighborhood`) returns an issue/failure
+neighborhood + scoped-verify selection for large repos — backend groundwork toward O(issue), not
+yet full focused rendering. Repro-and-fix is still Python/pytest.
 
 The local-first council can run with **Codex local CLI for Architect/Verifier**
 and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
