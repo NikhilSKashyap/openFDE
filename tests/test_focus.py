@@ -115,5 +115,42 @@ class ScopedVerifyTest(unittest.TestCase):
         self.assertTrue(any("could not prove coverage" in w for w in r["warnings"]))
 
 
+class CoerceRequestTest(unittest.TestCase):
+    """Part 0: POST /api/focus/neighborhood body coercion — malformed input must NEVER 500."""
+
+    def test_defaults_on_empty_or_bad_body(self):
+        for bad in ({}, None, "nope", 5, []):
+            self.assertEqual(focus.coerce_request(bad),
+                             {"seeds": [], "hops": 1, "max_files": 40, "primary_path": None})
+
+    def test_hops_default_and_clamp(self):
+        self.assertEqual(focus.coerce_request({"hops": "abc"})["hops"], 1)   # garbage → default
+        self.assertEqual(focus.coerce_request({"hops": 99})["hops"], 3)      # clamp high
+        self.assertEqual(focus.coerce_request({"hops": -5})["hops"], 0)      # clamp low
+        self.assertEqual(focus.coerce_request({"hops": "2"})["hops"], 2)     # numeric string ok
+
+    def test_max_files_default_and_clamp(self):
+        self.assertEqual(focus.coerce_request({"maxFiles": "x"})["max_files"], 40)
+        self.assertEqual(focus.coerce_request({"maxFiles": 9999})["max_files"], 200)
+        self.assertEqual(focus.coerce_request({"maxFiles": 0})["max_files"], 1)
+        self.assertEqual(focus.coerce_request({"maxFiles": 10})["max_files"], 10)
+
+    def test_seeds_only_list_of_strings(self):
+        self.assertEqual(focus.coerce_request({"seeds": "a.py"})["seeds"], [])   # non-list → []
+        self.assertEqual(focus.coerce_request({"seeds": ["a.py", 3, "", "b.py"]})["seeds"],
+                         ["a.py", "b.py"])
+
+    def test_primary_path_only_list_of_strings(self):
+        self.assertIsNone(focus.coerce_request({"primaryPath": "x"})["primary_path"])
+        self.assertEqual(focus.coerce_request({"primaryPath": ["impl.py", 1]})["primary_path"],
+                         ["impl.py"])
+
+    def test_coerced_garbage_runs_without_crashing(self):
+        a = focus.coerce_request({"hops": "abc", "maxFiles": "x", "seeds": "nope"})
+        r = focus.neighborhood(None, a["seeds"], hops=a["hops"], max_files=a["max_files"],
+                               primary_path=a["primary_path"], graph=GRAPH)
+        self.assertTrue(r["ok"])     # focused response, never a crash
+
+
 if __name__ == "__main__":
     unittest.main()

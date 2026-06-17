@@ -1433,13 +1433,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             data = await request.json()
         except Exception:  # noqa: BLE001 — a bad body must not crash the focused path
             data = {}
-        seeds = data.get("seeds") or []
-        hops = int(data.get("hops") or 1)
-        max_files = int(data.get("maxFiles") or 40)
-        primary = data.get("primaryPath") or None
+        # Coerce + clamp every field (hops 0..3, maxFiles 1..200, seeds/primaryPath = list[str]) so a
+        # malformed body yields a focused response with warnings, never a 500.
+        args = focus_mod.coerce_request(data)
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: focus_mod.neighborhood(
-            path, seeds, hops=hops, max_files=max_files, primary_path=primary))
+            path, args["seeds"], hops=args["hops"], max_files=args["max_files"],
+            primary_path=args["primary_path"]))
         return web.json_response(result)
 
     async def post_project(request: web.Request) -> web.Response:
@@ -4540,6 +4540,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     result["provider"] = prov     # secondary metadata, not the label
             result["routedTarget"] = target
             result["agents"] = agent_states
+            # Additive (Role-led Council): a structured, one-lead-role brief over the same answer —
+            # leadRole + consulted + {productDirection, implementationPlan, risksVerification} +
+            # humanEscalation + canStartImplementation. Existing fields (answer/label/…) are unchanged.
+            result["brief"] = council_router_mod.role_led_brief(
+                question, decision=decision, answer=result.get("answer"))
             return result
 
         try:
