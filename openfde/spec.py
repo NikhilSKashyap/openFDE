@@ -13,6 +13,7 @@ import logging
 from typing import Optional
 
 from openfde.box_spec import render_prior_story
+from openfde.intent_graph import compile_intent_graph, render_intent_brief
 
 logger = logging.getLogger("openfde.spec")
 
@@ -139,14 +140,20 @@ def compile_spec(
         len(sel_boxes), len(sel_arrows), len(sel_files), len(sel_functions), len(all_warnings),
     )
 
+    # ── Intent Graph Brief (Sketch-First Intent) ──────────────────────────── #
+    # Compile any plain-English intent steps in the selection into an ordered
+    # brief the council implements from. Empty/absent for pure-architecture scopes.
+    intent_graph = compile_intent_graph(sel_boxes, sel_arrows)
+
     # ── Build outputs ──────────────────────────────────────────────────────── #
     context = {
-        "boxes":     sel_boxes,
-        "arrows":    sel_arrows,
-        "files":     sel_files,
-        "functions": sel_functions,
-        "tasks":     sel_tasks,
-        "warnings":  all_warnings,
+        "boxes":       sel_boxes,
+        "arrows":      sel_arrows,
+        "files":       sel_files,
+        "functions":   sel_functions,
+        "tasks":       sel_tasks,
+        "warnings":    all_warnings,
+        "intentGraph": intent_graph,
     }
 
     # Bounded prior-box-story section, derived from earlier Execute runs.
@@ -158,6 +165,7 @@ def compile_spec(
         box_by_id,
         is_global=(not selected_box_ids and not selected_arrow_ids),
         prior_story=prior_story,
+        intent_brief=render_intent_brief(intent_graph),
     )
 
     return {"markdown": markdown, "context": context}
@@ -177,6 +185,7 @@ def _build_markdown(
     box_by_id: dict,
     is_global: bool,
     prior_story: str = "",
+    intent_brief: str = "",
 ) -> str:
     """Assemble the full implementation spec markdown document.
 
@@ -192,6 +201,7 @@ def _build_markdown(
         box_by_id:  dict — all canvas boxes keyed by ID (for arrow lookup).
         is_global:  bool — True when no explicit selection (repo-level spec).
         prior_story: str — pre-rendered bounded "Prior Box Story" section.
+        intent_brief: str — pre-rendered "Intent Graph (sketch)" section.
 
     Returns:
         str — complete markdown document.
@@ -232,6 +242,12 @@ def _build_markdown(
     elif not proj_desc:
         a("_No module prompts defined. Add a prompt to each box to describe its purpose._")
         a("")
+
+    # ── Intent Graph (sketch) — the user's plain-English steps, if any ─────── #
+    if intent_brief:
+        a(intent_brief)
+        if lines and lines[-1] != "":
+            a("")
 
     # ── Selected Architecture ──────────────────────────────────────────────── #
     a("## Selected Architecture")

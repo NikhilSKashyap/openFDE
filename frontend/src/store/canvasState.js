@@ -125,6 +125,38 @@ function reducer(state, action) {
         ),
       }
     }
+    case 'TOGGLE_INTENT': {
+      // Mark/unmark boxes as plain-English intent steps (Sketch-First Intent).
+      // Intent boxes carry no linked files; `kind:undefined` reverts to a module.
+      const ids = new Set(action.ids)
+      return {
+        ...state,
+        boxes: state.boxes.map(b =>
+          ids.has(b.id) ? { ...b, kind: b.kind === 'intent' ? undefined : 'intent' } : b
+        ),
+      }
+    }
+    case 'SET_IMPL_FILES': {
+      // Post-run link-back: attach a council run's changed files to the intent
+      // boxes it implemented. action.links: { boxId: {files, attribution, confidence} }.
+      const links = action.links || {}
+      return {
+        ...state,
+        boxes: state.boxes.map(b =>
+          links[b.id]
+            ? {
+                ...b,
+                implementationFiles: links[b.id].files || [],
+                implementationMeta: {
+                  attribution: links[b.id].attribution || 'graph',
+                  confidence: links[b.id].confidence ?? null,
+                  runId: action.runId || null,
+                },
+              }
+            : b
+        ),
+      }
+    }
     case 'FREEZE_SELECTED': {
       return {
         ...state,

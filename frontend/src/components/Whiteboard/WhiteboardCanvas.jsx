@@ -1390,6 +1390,7 @@ export default function WhiteboardCanvas({
         <ContextMenu x={contextMenu.x} y={contextMenu.y} targetIds={contextMenu.targetIds} boxes={boxes}
           onClose={() => setContextMenu(null)}
           onToggleType={ids => dispatch({ type: 'TOGGLE_TYPE', ids })}
+          onToggleIntent={ids => dispatch({ type: 'TOGGLE_INTENT', ids })}
           onDuplicate={ids => dispatch({ type: 'DUPLICATE_BOXES', ids })}
           onDelete={ids => dispatch({ type: 'DELETE_BOXES', ids })}
           onExpandModule={onExpandModule} />

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 
-export default function ContextMenu({ x, y, targetIds, boxes, onClose, onToggleType, onDuplicate, onDelete, onExpandModule = null }) {
+export default function ContextMenu({ x, y, targetIds, boxes, onClose, onToggleType, onToggleIntent = null, onDuplicate, onDelete, onExpandModule = null }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -22,6 +22,8 @@ export default function ContextMenu({ x, y, targetIds, boxes, onClose, onToggleT
   const label = count === 1 ? '1 box' : `${count} boxes`
   const allSolid = targetIds.every(id => boxes.find(b => b.id === id)?.type === 'solid')
   const toggleLabel = allSolid ? 'Make dotted' : 'Make solid'
+  const allIntent = targetIds.every(id => boxes.find(b => b.id === id)?.kind === 'intent')
+  const intentLabel = allIntent ? 'Make a module' : 'Mark as intent step'
 
   // Single module box → offer in-place expand actions.
   const singleBox = count === 1 ? boxes.find(b => b.id === targetIds[0]) : null
@@ -68,6 +70,7 @@ export default function ContextMenu({ x, y, targetIds, boxes, onClose, onToggleT
       {isModule && onExpandModule && item('Expand all in module', () => onExpandModule(targetIds[0], true))}
       {isModule && onExpandModule && <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />}
       {item(toggleLabel, () => onToggleType(targetIds))}
+      {onToggleIntent && item(intentLabel, () => onToggleIntent(targetIds))}
       {item('Duplicate', () => onDuplicate(targetIds))}
       <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
       {item('Delete', () => onDelete(targetIds), true)}

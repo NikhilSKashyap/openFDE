@@ -1685,6 +1685,11 @@ export default function App() {
     // Surface the prompt chip + Review Changes affordance (no auto-commit).
     if (!cancelled) { refreshEpisodes(); refreshWorktree() }
     if (res.approval) setApprovals(prev => [res.approval, ...prev])
+    // Sketch-First Intent: link the run's files back onto the intent steps it
+    // implemented (persists via the debounced canvas save → shows a count badge).
+    if (res.intentLinks && Object.keys(res.intentLinks).length) {
+      _rawCanvasDispatch({ type: 'SET_IMPL_FILES', links: res.intentLinks, runId: res.runId })
+    }
     getBoxSpecs().then(s => { if (s && typeof s === 'object') setBoxSpecs(s) })
   }
 

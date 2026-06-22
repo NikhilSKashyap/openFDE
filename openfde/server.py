@@ -102,6 +102,7 @@ from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend
 from openfde.git_timeline import changed_paths, commit_files, ensure_baseline, git_commit, git_diff, git_status, git_timeline, worktree_diff, worktree_impact
 from openfde.report import generate_report
 from openfde.spec import compile_spec
+from openfde.intent_graph import attribute_intent_files, is_intent_box, render_intent_brief
 from openfde.workflow_result import commit_message, source_files, tests_summary, validate_result
 from openfde.filetree import build_file_tree
 from openfde.persistence import Persistence
@@ -3753,7 +3754,22 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 "No editable (dotted) in-scope files. Select a dotted box with linked files."}, status=400)
 
         scope_summary = f"{len(box_ids)} module(s), {len(editable)} editable file(s)"
-        user_prompt = (body.get("prompt") or "").strip() or "Implement the selected architecture scope."
+        user_request = (body.get("prompt") or "").strip()
+
+        # ── Sketch-First Intent: an intent-graph selection reframes the run ───
+        # The episode/ledger lead with the sketch summary (Story continuity) and
+        # the Architect receives the ordered Intent Graph Brief (Part C).
+        intent_graph = ctx.get("intentGraph") or {}
+        intent_brief = render_intent_brief(intent_graph)
+        intent_source = None
+        if intent_graph.get("present"):
+            summary = intent_graph.get("summary") or "intent graph"
+            user_prompt = f"Intent: {summary}" + (f" — {user_request}" if user_request else "")
+            intent_source = {"kind": "intent-graph", "ref": summary,
+                             "stepCount": len(intent_graph.get("steps") or [])}
+        else:
+            user_prompt = user_request or "Implement the selected architecture scope."
+
         wid = "council_" + secrets.token_hex(5)
         now = datetime.now(timezone.utc).isoformat()
 
@@ -3791,12 +3807,17 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         def architect(c):
             if cancel_token.is_set():
                 return ""
+            sketch = (c.get("intentBrief") or "").strip()
             if arch_caller:
                 user = (f"Intent: {c['prompt']}\nScope: {c['scopeSummary']}\n"
                         f"Editable files: {c['editable']}\nProtected (approval needed): {c['protected']}")
+                if sketch:
+                    user += ("\n\nThe user drew this sketch — translate each intent step into "
+                             "concrete edits within the editable scope:\n" + sketch)
                 return arch_caller(_ARCH_SYS, user)
-            return (f"Implement: {c['prompt']} within {c['scopeSummary']}. "
+            base = (f"Implement: {c['prompt']} within {c['scopeSummary']}. "
                     f"Edit only: {', '.join(c['editable'])}. Keep changes minimal and verify the intent.")
+            return f"{base}\n\n{sketch}" if sketch else base
 
         def verifier(brief, result):
             if cancel_token.is_set():
@@ -3862,7 +3883,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         outcome = await loop.run_in_executor(None, lambda: run_council(
             architect=architect, senior_dev=senior_dev, verifier=verifier,
             context={"prompt": user_prompt, "scopeSummary": scope_summary,
-                     "editable": editable, "protected": protected},
+                     "editable": editable, "protected": protected,
+                     "intentBrief": intent_brief},
             max_reprompts=1,
         ))
 
@@ -3925,6 +3947,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "userPrompt": user_prompt, "createdAt": now, "updatedAt": now,
             "eventIds": [started["id"]] + stage_event_ids,
         }
+        if intent_source:
+            artifact["intentSource"] = intent_source
         persistence.save_workflow_artifact(artifact)
         persistence.upsert_run({
             "runId": wid, "status": "prepared", "backend": "openfde-council", "kind": "council_run",
@@ -3933,6 +3957,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         })
 
         payload = await reconcile_result(artifact, wid, final)
+
+        # ── Link implementation back to the intent steps (Part D) ────────────
+        # The whole sketch shares the run's files (heuristic, labelled — see
+        # attribute_intent_files). The client writes these onto the intent boxes.
+        changed_files = payload.get("sourceFilesChanged") or []
+        intent_boxes = [b for b in sel_boxes if is_intent_box(b)]
+        named_text = " ".join(st.get("summary", "") for st in outcome["stages"])
+        intent_links = attribute_intent_files(intent_boxes, changed_files, named_text=named_text)
+
         return web.json_response({
             "ok": True, "runId": wid, "status": outcome["status"],
             "stages": _stages_out(outcome["stages"]),
@@ -3944,6 +3977,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "awaitingReview": payload.get("awaitingReview", False),
             "approval": payload.get("approval"),
             "verifier": outcome.get("verifier"),
+            "filesChanged": changed_files,
+            "intentLinks": intent_links,
         })
 
     async def post_council_cancel(request: web.Request) -> web.Response:
@@ -4006,13 +4041,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     def _link_episode_for_run(wid: str, prompt: str, kind: str, files: list,
                               event_ids: list, ledger_ids: list, summary: str,
-                              status: str) -> dict:
+                              status: str, intent_source: dict = None) -> dict:
         """Create or update the prompt episode that owns this run's changes.
 
         Episodes are the durable "prompt turn" — the user's intent plus the runs,
         events, and (after Land) commits it produced. Re-uses an episode already
         linked to ``wid``; otherwise mints a new one. Never downgrades a 'landed'
-        episode. Returns the stored episode (caller broadcasts).
+        episode. ``intent_source`` records where the prompt came from (e.g. a
+        Sketch-First intent graph) so Story shows the episode's origin. Returns the
+        stored episode (caller broadcasts).
         """
         now = datetime.now(timezone.utc).isoformat()
         ep = persistence.get_open_episode_for_run(wid)
@@ -4025,6 +4062,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 "projectEntryIds": list(ledger_ids or []), "commitShas": [],
                 "files": sorted(set(files or [])), "summary": summary or "",
             }
+            if intent_source:
+                ep["intentSource"] = intent_source
         else:
             ep["updatedAt"] = now
             if ep.get("status") != "landed":
@@ -4038,6 +4077,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 ep["prompt"] = prompt
             if summary:
                 ep["summary"] = summary
+            if intent_source and not ep.get("intentSource"):
+                ep["intentSource"] = intent_source
         persistence.upsert_episode(ep)
         return ep
 
@@ -4124,7 +4165,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         if status == "passed" and actually_changed:
             episode = _link_episode_for_run(
                 wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
-                actually_changed, event_ids, ledger_ids, report[:200], "reviewing")
+                actually_changed, event_ids, ledger_ids, report[:200], "reviewing",
+                intent_source=artifact.get("intentSource"))
             from openfde import autoland
             land = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: autoland.land_episode(path, persistence, episode, auto=True, allow_llm=True))
@@ -4139,7 +4181,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         elif status == "needs_approval" and actually_changed:
             episode = _link_episode_for_run(
                 wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
-                actually_changed, event_ids, ledger_ids, report[:200], "reviewing")
+                actually_changed, event_ids, ledger_ids, report[:200], "reviewing",
+                intent_source=artifact.get("intentSource"))
             commit_reason = "approval required — review and Land manually"
             rp = persistence.append_event({
                 "type": "review_pending",
@@ -4153,7 +4196,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         elif status in ("passed", "needs_approval"):
             episode = _link_episode_for_run(
                 wid, artifact.get("userPrompt"), _episode_kind_for(artifact),
-                [], event_ids, ledger_ids, report[:200], "open")
+                [], event_ids, ledger_ids, report[:200], "open",
+                intent_source=artifact.get("intentSource"))
             commit_reason = "no reported source files changed on disk"
 
         # ── Run record: prepared → outcome ───────────────────────────────────

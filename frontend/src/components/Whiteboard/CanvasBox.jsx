@@ -11,10 +11,17 @@ function portCoords(w, h, port) {
 
 export default function CanvasBox({ box, selected, isEditing, editingField, showPorts }) {
   const { id, x, y, w, h, type, title, prompt } = box
+  const isIntent = box.kind === 'intent'
   const isDotted = type === 'dotted'
 
-  const fill   = isDotted ? 'rgba(74,158,255,0.08)' : 'rgba(61,186,110,0.08)'
-  const stroke = isDotted ? 'var(--dotted)' : 'var(--solid)'
+  // Intent steps read as plain-English sketch (violet); modules keep the
+  // blue (dotted/editable) / green (solid/protected) architecture palette.
+  const stroke = isIntent ? 'var(--accent)' : (isDotted ? 'var(--dotted)' : 'var(--solid)')
+  const fill   = isIntent ? 'color-mix(in srgb, var(--accent) 9%, transparent)'
+                          : (isDotted ? 'rgba(74,158,255,0.08)' : 'rgba(61,186,110,0.08)')
+  const dash   = isIntent ? '2 4' : (isDotted ? '6 3' : undefined)
+
+  const implFiles = isIntent && Array.isArray(box.implementationFiles) ? box.implementationFiles : []
 
   return (
     <g
@@ -34,7 +41,7 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
         fill={fill}
         stroke={stroke}
         strokeWidth={1.5}
-        strokeDasharray={isDotted ? '6 3' : undefined}
+        strokeDasharray={dash}
         data-box-id={id}
       />
       <foreignObject x={0} y={0} width={w} height={h} pointerEvents="none">
@@ -44,25 +51,50 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
           display: 'flex', flexDirection: 'column', gap: 4,
           overflow: 'hidden', userSelect: 'none',
         }}>
-          <div style={{
-            fontSize: 13, fontWeight: 600,
-            color: 'var(--text)',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            opacity: isEditing && editingField === 'title' ? 0.2 : 1,
-          }}>
-            {title}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <div style={{
+              fontSize: 13, fontWeight: 600,
+              color: 'var(--text)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              opacity: isEditing && editingField === 'title' ? 0.2 : 1,
+              flex: 1, minWidth: 0,
+            }}>
+              {title}
+            </div>
+            {isIntent && (
+              <span style={{
+                flexShrink: 0, fontSize: 9, fontWeight: 600, letterSpacing: 0.3,
+                textTransform: 'uppercase', color: 'var(--accent)',
+                border: '1px solid color-mix(in srgb, var(--accent) 50%, var(--border))',
+                borderRadius: 4, padding: '1px 4px',
+              }}>
+                Intent step
+              </span>
+            )}
           </div>
           <div style={{ width: '100%', height: 1, background: 'var(--border)', flexShrink: 0 }} />
           <div style={{
             fontSize: 11, color: 'var(--text-muted)',
             overflow: 'hidden',
             display: '-webkit-box',
-            WebkitLineClamp: 3,
+            WebkitLineClamp: implFiles.length ? 2 : 3,
             WebkitBoxOrient: 'vertical',
             opacity: isEditing && editingField === 'prompt' ? 0.2 : 1,
+            flex: 1,
           }}>
             {prompt}
           </div>
+          {implFiles.length > 0 && (
+            <div style={{
+              flexShrink: 0, alignSelf: 'flex-start',
+              fontSize: 10, fontWeight: 600, color: 'var(--accent)',
+              background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
+              borderRadius: 4, padding: '1px 6px',
+            }}>
+              {`Implemented by ${implFiles.length} file${implFiles.length === 1 ? '' : 's'}`}
+            </div>
+          )}
         </div>
       </foreignObject>
 
