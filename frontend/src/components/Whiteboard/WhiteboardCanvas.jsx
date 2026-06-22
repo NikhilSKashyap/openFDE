@@ -1095,17 +1095,44 @@ export default function WhiteboardCanvas({
                     {node.drillable && (
                       <Chevron x={node.x + node.w - 20} y={node.y + 8} open={false} nodeId={node.id} kind="module" />
                     )}
-                    {sym && (
-                      <g data-intent-expand={node.id} style={{ cursor: 'pointer' }}>
-                        <rect x={node.x + node.w / 2 - 20} y={node.y + node.h - 8} width={40} height={16} rx={8}
-                          fill="var(--surface)" stroke="var(--accent)" strokeWidth={1} />
-                        <text x={node.x + node.w / 2} y={node.y + node.h} dy="0.32em" textAnchor="middle"
-                          fontSize={9} fontWeight={600} fill="var(--accent)"
-                          style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                          {intentExpanded.has(node.id) ? '▴ hide' : '▾ built'}
-                        </text>
-                      </g>
-                    )}
+                    {sym && (() => {
+                      const open = intentExpanded.has(node.id)
+                      const cx = node.x + node.w / 2
+                      const cy = node.y + node.h                 // straddles the box's bottom edge
+                      const aria = open ? 'Hide what this step became'
+                                        : 'Show what this step became'
+                      return (
+                        <g
+                          data-intent-expand={node.id}
+                          className="intent-toggle"
+                          role="button"
+                          tabIndex={0}
+                          aria-label={aria}
+                          aria-expanded={open}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              toggleIntent(node.id)
+                            }
+                          }}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <title>{aria}</title>
+                          {/* Forgiving, always-hittable target — the whole tab area, not just the text */}
+                          <rect x={cx - 34} y={cy - 13} width={68} height={26} rx={13}
+                            fill="transparent" style={{ pointerEvents: 'all' }} />
+                          {/* The compact visible control pill */}
+                          <rect x={cx - 27} y={cy - 9} width={54} height={18} rx={9}
+                            fill="var(--surface)" stroke="var(--accent)" strokeWidth={1}
+                            style={{ pointerEvents: 'none' }} />
+                          <text x={cx} y={cy} dy="0.32em" textAnchor="middle"
+                            fontSize={9} fontWeight={600} fill="var(--accent)"
+                            style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                            {open ? '▴ hide' : '▾ became'}
+                          </text>
+                        </g>
+                      )
+                    })()}
                   </g>
                 )
               })}

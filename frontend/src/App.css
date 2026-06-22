@@ -897,6 +897,12 @@
 .canvas-box:hover .box-ports,
 .canvas-box.show-ports .box-ports { opacity: 1; }
 
+/* Sketch-First "▾ became" intent control: pointer affordance + a clear keyboard focus ring. */
+.intent-toggle { cursor: pointer; outline: none; }
+.intent-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 13px; }
+.intent-toggle:hover rect:last-of-type,
+.intent-toggle:focus-visible rect:last-of-type { fill: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+
 /* ─── Command palette ────────────────────────────────────────────── */
 .cmd-backdrop {
   position: fixed;
