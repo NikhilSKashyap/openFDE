@@ -288,6 +288,29 @@ def resolve_run_scope(editable: list, protected: list, intent_graph: dict):
     return None
 
 
+def merge_step_files(steps: list, intent_links: dict) -> list:
+    """Attach each intent step's run files onto the step, keyed by ``boxId``.
+
+    ``intent_links`` (from :func:`attribute_intent_files`) maps boxId → {files,…}; this
+    folds those files onto the episode's ``intentSource.steps`` so Story can show, per
+    step, which files it produced. Preserves every existing step field (boxId/title);
+    a step with no link gets an empty ``files`` list. Pure — returns a new list.
+
+    Args:
+        steps: list — intentSource steps ({boxId, title}).
+        intent_links: dict — boxId → {files, attribution, confidence}.
+
+    Returns:
+        list — steps with a ``files`` list added to each.
+    """
+    links = intent_links or {}
+    out = []
+    for s in (steps or []):
+        files = (links.get(s.get("boxId")) or {}).get("files") or []
+        out.append({**s, "files": list(files)})
+    return out
+
+
 def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: str = "") -> dict:
     """Attribute a run's changed files back to the selected intent steps (v1 heuristic).
 

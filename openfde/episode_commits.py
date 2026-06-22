@@ -467,3 +467,63 @@ def reconcile_authored_episodes(commits: list, episodes: list, *, watched_root=N
             if touched or landed:
                 changed.setdefault(v["episodeId"], []).append(v)
     return changed
+
+
+def reconcile_manual_land(commits: list, episodes: list, *, watched_root=None) -> dict:
+    """Repair a ``needs_manual_land`` episode whose landing commit was made OUTSIDE the OpenFDE
+    land path — a plain ``git commit`` with no ``OpenFDE-Episode`` trailer, typically authored by
+    the human (so :func:`reconcile_authored_episodes`'s author + capture-window gates refuse it and
+    the episode is stuck ``needs_manual_land`` even though its work is committed).
+
+    This attaches such a commit ONLY when the link is unambiguous and git-provable — it does NOT
+    relax the precision of the main path, it adds a separate, stricter file-coverage rule:
+      - the episode is ``needs_manual_land``, in the watched repo (``sessionCwd``), with files;
+      - the commit carries **no explicit trailer** (a trailer'd commit is the main path's job);
+      - the commit landed **after** the episode was captured (``createdAt`` − small grace);
+      - the commit's changed files **cover all** of the episode's files (``ep_files ⊆ commit_files``)
+        — i.e. the commit landed exactly this turn's work, not a partial/overlapping change;
+      - the commit covers **exactly one** such episode (never guess between two candidates).
+    Author is intentionally NOT gated (a manual land is human-authored); coverage + uniqueness +
+    same-repo + after-capture carry the confidence. Oldest commit first so the earliest covering
+    commit wins. Mutates ``episodes`` in place; returns ``{episodeId: [verdict]}`` for what changed.
+    """
+    cands = [e for e in episodes
+             if e.get("status") == "needs_manual_land" and e.get("files")
+             and (watched_root is None or _same_repo(e.get("sessionCwd"), watched_root))]
+    if not cands:
+        return {}
+    changed: dict = {}
+    _floor = datetime.min.replace(tzinfo=timezone.utc)
+    for commit in sorted(commits, key=lambda c: _parse_ts(c.get("timestamp")) or _floor):
+        sha = commit.get("sha")
+        if not sha or commit.get("episodeIds"):          # trailer'd → main path owns it
+            continue
+        commit_files = set(commit.get("files") or [])
+        if not commit_files:
+            continue
+        commit_ts = _parse_ts(commit.get("timestamp"))
+        if commit_ts is None:
+            continue
+        matches = []
+        for ep in cands:
+            if ep.get("status") != "needs_manual_land":  # landed earlier this pass → skip
+                continue
+            if sha in (ep.get("commitShas") or []):
+                continue
+            ep_files = set(ep.get("files") or [])
+            if not ep_files or not ep_files.issubset(commit_files):
+                continue                                 # commit must land ALL the episode's files
+            cap = _capture_ts(ep)
+            if cap is None or (commit_ts - cap).total_seconds() < -_CAPTURE_GRACE_S:
+                continue                                 # commit predates capture → not its land
+            matches.append((ep, sorted(ep_files)))
+        if len(matches) != 1:                            # 0 or ambiguous (>1) → leave for manual Land
+            continue
+        ep, matched = matches[0]
+        reason = (f"manual land: commit changed all {len(matched)} of the episode's file(s) "
+                  "after capture (no trailer; unique needs_manual_land match)")
+        attach_commit(ep, sha, confidence=HIGH_FILE_OVERLAP, reason=reason, matched_files=matched)
+        _mark_landed(ep)
+        changed.setdefault(ep["episodeId"], []).append(
+            _verdict(ep["episodeId"], HIGH_FILE_OVERLAP, reason, matched, attach=True))
+    return changed

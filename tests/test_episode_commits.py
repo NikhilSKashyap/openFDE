@@ -345,5 +345,69 @@ class PrecisionRegressionTest(unittest.TestCase):
         self.assertEqual(fresh["commitShas"], ["new"])
 
 
+class ReconcileManualLandTest(unittest.TestCase):
+    """reconcile_manual_land — repair a needs_manual_land episode whose landing commit was made
+    outside the OpenFDE land path (manual `git commit`, no trailer, HUMAN-authored). It attaches
+    ONLY on an unambiguous, git-provable link: commit covers ALL the episode's files, lands after
+    capture, same repo, and is the single needs_manual_land candidate. Author is NOT gated."""
+
+    def _human(self, sha, files, *, ts, ids=None):
+        # The whole point: a human commit the main heuristic refuses (author + capture gates).
+        return _commit(sha, files, ids=ids, ts=ts, author="Nikhil", email="nik@example.com")
+
+    def _nml(self, eid, files, *, created=NOW, session_cwd=None):
+        return _ep(eid, files, created=created, status="needs_manual_land", session_cwd=session_cwd)
+
+    def test_attaches_and_lands_on_unique_full_coverage_after_capture(self):
+        ep = self._nml("P159", ["x.py", "y.py"])
+        commit = self._human("abc1234", ["x.py", "y.py", "z.py"], ts=NOW + timedelta(hours=1))
+        changed = ec.reconcile_manual_land([commit], [ep])
+        self.assertEqual(set(changed), {"P159"})
+        self.assertEqual(ep["status"], "landed")
+        self.assertEqual(ep["commitShas"], ["abc1234"])
+        self.assertEqual(ep["commitMeta"]["abc1234"]["confidence"], ec.HIGH_FILE_OVERLAP)
+
+    def test_two_candidates_are_left_for_manual_land(self):
+        a, b = self._nml("A", ["x.py"]), self._nml("B", ["x.py"])
+        commit = self._human("d", ["x.py"], ts=NOW + timedelta(hours=1))
+        self.assertEqual(ec.reconcile_manual_land([commit], [a, b]), {})
+        self.assertEqual((a["status"], b["status"]), ("needs_manual_land", "needs_manual_land"))
+
+    def test_commit_before_capture_does_not_attach(self):
+        ep = self._nml("P", ["x.py", "y.py"])
+        commit = self._human("old", ["x.py", "y.py"], ts=NOW - timedelta(hours=2))
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})
+        self.assertEqual(ep["status"], "needs_manual_land")
+
+    def test_partial_coverage_does_not_attach(self):
+        # The commit must land ALL the episode's files; a partial change waits for manual Land.
+        ep = self._nml("P", ["x.py", "y.py", "w.py"])
+        commit = self._human("c", ["x.py", "y.py"], ts=NOW + timedelta(hours=1))
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})
+
+    def test_only_needs_manual_land_is_a_candidate(self):
+        ep = _ep("P", ["x.py", "y.py"], created=NOW, status="reviewing")
+        commit = self._human("c", ["x.py", "y.py"], ts=NOW + timedelta(hours=1))
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})
+        self.assertEqual(ep["status"], "reviewing")
+
+    def test_trailered_commit_is_left_to_the_main_path(self):
+        ep = self._nml("P", ["x.py", "y.py"])
+        commit = self._human("c", ["x.py", "y.py"], ts=NOW + timedelta(hours=1), ids=["Pother"])
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})
+
+    def test_same_repo_gate_excludes_foreign_episode(self):
+        ep = self._nml("P", ["x.py", "y.py"], session_cwd="/other/repo")
+        commit = self._human("c", ["x.py", "y.py"], ts=NOW + timedelta(hours=1))
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep], watched_root="/watched/repo"), {})
+
+    def test_idempotent_second_pass_is_a_noop(self):
+        ep = self._nml("P", ["x.py", "y.py"])
+        commit = self._human("c", ["x.py", "y.py"], ts=NOW + timedelta(hours=1))
+        ec.reconcile_manual_land([commit], [ep])
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})   # already landed → no change
+        self.assertEqual(ep["commitShas"], ["c"])
+
+
 if __name__ == "__main__":
     unittest.main()

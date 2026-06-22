@@ -106,6 +106,7 @@ from openfde.intent_graph import (
     GENERATED_WORKSPACE,
     attribute_intent_files,
     is_intent_box,
+    merge_step_files,
     render_intent_brief,
     resolve_run_scope,
 )
@@ -2348,6 +2349,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         if not cands:
             return False
         changed = episode_commits_mod.reconcile_authored_episodes(cands, episodes, watched_root=path)
+        # A needs_manual_land episode whose landing commit was made OUTSIDE the OpenFDE land path
+        # (manual `git commit`, no trailer, human-authored) is refused by the path above (author +
+        # capture-window gates). Attach it when the link is unambiguous — the commit covers ALL the
+        # episode's files, lands after capture, and is the single needs_manual_land candidate.
+        manual = episode_commits_mod.reconcile_manual_land(cands, episodes, watched_root=path)
+        for eid, verdicts in manual.items():
+            changed.setdefault(eid, []).extend(verdicts)
         for eid in changed:
             ep = next((e for e in episodes if e.get("episodeId") == eid), None)
             if ep is not None:
@@ -3989,6 +3997,19 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         intent_boxes = [b for b in sel_boxes if is_intent_box(b)]
         named_text = " ".join(st.get("summary", "") for st in outcome["stages"])
         intent_links = attribute_intent_files(intent_boxes, changed_files, named_text=named_text)
+
+        # Gap 1: persist per-step file links onto the episode's intentSource (files are only
+        # known now, after the run). Story then shows which files each sketch step produced;
+        # episode-level files are left untouched. Preserves kind/ref/stepCount.
+        episode_id = payload.get("episodeId")
+        if episode_id and intent_source and intent_links:
+            ep = persistence.get_episode(episode_id)
+            src = ep.get("intentSource") if ep else None
+            if isinstance(src, dict) and src.get("kind") == "intent-graph":
+                src["steps"] = merge_step_files(src.get("steps"), intent_links)
+                ep["intentSource"] = src
+                persistence.upsert_episode(ep)
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
 
         return web.json_response({
             "ok": True, "runId": wid, "status": outcome["status"],

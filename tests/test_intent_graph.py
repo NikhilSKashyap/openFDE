@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from openfde import prompt_story
 from openfde.agent_runner import build_system_prompt, path_in_scope, run_agent
 from openfde.intent_graph import (
     GENERATED_WORKSPACE,
     attribute_intent_files,
     compile_intent_graph,
     is_intent_box,
+    merge_step_files,
     render_intent_brief,
     resolve_run_scope,
 )
@@ -340,6 +342,63 @@ class StorySketchTickTest(unittest.TestCase):
         from openfde import prompt_story
         ticks = prompt_story._episode_ticks(self._ep({"provider": "github", "issueNumber": 5}))
         self.assertEqual([t for t in ticks if t["kind"] == "sketch"], [])
+
+
+class MergeStepFilesTest(unittest.TestCase):
+    """Gap 1: an intent-graph episode stores each step's produced files (keyed by boxId),
+    computed only after the run, without disturbing the step's other fields."""
+
+    def test_attaches_files_per_step_preserving_fields(self):
+        steps = [{"boxId": "a", "title": "read"}, {"boxId": "b", "title": "train"}]
+        links = {"a": {"files": ["openfde_work/p.py"]},
+                 "b": {"files": ["openfde_work/p.py", "openfde_work/t.py"]}}
+        out = merge_step_files(steps, links)
+        self.assertEqual(out[0], {"boxId": "a", "title": "read", "files": ["openfde_work/p.py"]})
+        self.assertEqual(out[1]["title"], "train")
+        self.assertEqual(out[1]["files"], ["openfde_work/p.py", "openfde_work/t.py"])
+
+    def test_missing_link_yields_empty_files(self):
+        out = merge_step_files([{"boxId": "a", "title": "x"}], {})
+        self.assertEqual(out[0]["files"], [])
+
+    def test_empty_steps(self):
+        self.assertEqual(merge_step_files([], {"a": {"files": ["x"]}}), [])
+
+
+class StoryStepFilesTest(unittest.TestCase):
+    """Gap 2: Story timeline + narrative nodes carry intent.steps[].files, not just titles."""
+
+    SRC = {"kind": "intent-graph", "ref": "read → train",
+           "steps": [{"boxId": "a", "title": "read", "files": ["openfde_work/p.py"]},
+                     {"boxId": "b", "title": "train",
+                      "files": ["openfde_work/p.py", "openfde_work/t.py"]}]}
+
+    def test_intent_node_carries_per_step_files(self):
+        node = prompt_story._intent_node(self.SRC)
+        self.assertEqual(node["sketch"], "read → train")
+        self.assertEqual(node["steps"][0], {"title": "read", "files": ["openfde_work/p.py"]})
+        self.assertEqual(node["steps"][1]["files"], ["openfde_work/p.py", "openfde_work/t.py"])
+
+    def test_narrative_node_carries_per_step_files(self):
+        ep = {"episodeId": "e1", "tag": "P1", "title": "t",
+              "createdAt": "2026-06-21T00:00:00+00:00", "status": "landed",
+              "files": ["openfde_work/p.py"], "intentSource": self.SRC}
+        node = prompt_story._nv_node(ep, "now", "reason", "high")
+        self.assertIsNotNone(node["intent"])
+        self.assertEqual(node["intent"]["steps"][0]["files"], ["openfde_work/p.py"])
+
+    def test_timeline_spine_node_carries_per_step_files(self):
+        ep = {"episodeId": "e1", "tag": "P1", "title": "t", "summary": "",
+              "createdAt": "2026-06-21T00:00:00+00:00", "updatedAt": "2026-06-21T00:00:00+00:00",
+              "status": "landed", "sequence": 1, "files": ["openfde_work/p.py"],
+              "commitShas": [], "intentSource": self.SRC}
+        timeline = prompt_story.build_story_timeline([ep], [])
+        spine = timeline["spine"]
+        self.assertEqual(len(spine), 1)
+        self.assertEqual(spine[0]["intent"]["steps"][0]["files"], ["openfde_work/p.py"])
+
+    def test_non_intent_episode_has_no_intent_node(self):
+        self.assertIsNone(prompt_story._intent_node({"provider": "github"}))
 
 
 if __name__ == "__main__":

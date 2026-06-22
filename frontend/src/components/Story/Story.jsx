@@ -634,11 +634,21 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
           <div className="tlv3-drawer-section">
             <div className="tlv3-drawer-k">sketched</div>
             <div className="tlv3-drawer-summary">User sketched: {node.intent.sketch}</div>
-            {(node.intent.steps || []).map((s, i) => (
-              <div key={i} className="tlv3-drawer-row">
-                <span className="tlv3-drawer-v">{i + 1}. {s}</span>
-              </div>
-            ))}
+            {(node.intent.steps || []).map((s, i) => {
+              const title = typeof s === 'string' ? s : (s.title || '')
+              const files = (s && s.files) || []
+              return (
+                <div key={i} className="tlv3-drawer-row" style={{ display: 'block' }}>
+                  <span className="tlv3-drawer-v">{i + 1}. {title}</span>
+                  {files.slice(0, 3).map(f => (
+                    <div key={f} className="tlv3-drawer-file">{f}</div>
+                  ))}
+                  {files.length > 3 && (
+                    <div className="tlv3-drawer-file">+{files.length - 3} more</div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
         {commits.length > 0 && (
