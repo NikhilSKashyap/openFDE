@@ -414,6 +414,8 @@ class IntentEpisodeClassificationTest(unittest.TestCase):
         self.assertNotEqual(ep["title"], "Update openfde_work")
         self.assertIn("Read the data", ep["title"])
         self.assertFalse(ep["storyFacts"]["operational"])
+        self.assertEqual(ep["storyFacts"]["concepts"], [ep["title"]])   # concepts follow the corrected title
+        self.assertNotIn("Update openfde_work", ep["storyFacts"]["concepts"])
 
     def test_enrich_preserves_a_real_llm_title(self):
         # A settled, persisted LLM upgrade (summarySource is a provider, fingerprint fresh) is
@@ -435,18 +437,30 @@ class IntentEpisodeClassificationTest(unittest.TestCase):
         self.assertEqual(ep["signal"], "product")
         self.assertIn("Read the data", ep["title"])
 
+    def test_persisted_storyfacts_concepts_use_intent_title(self):
+        # The PERSISTED metadata (not just the derived Story graph) must be clean: the bad-title
+        # repair leaves "Update openfde_work" in storyFacts.concepts; the enrich end-guard
+        # normalizes it to the intent title at the source, keeping operational False.
+        from openfde.episode_summary import enrich_episode
+        from openfde.episode_llm_summary import enrich
+        ep = self._intent_ep(status="landed", commitShas=["abc1234"], sequence=1, tag="P1")
+        enrich_episode(ep, 0)
+        enrich(ep, allow_llm=False)
+        sf = ep.get("storyFacts") or {}
+        self.assertEqual(sf.get("concepts"), ["Read the data → drop nan values → train a classifier"])
+        self.assertFalse(sf.get("operational"))
+        self.assertEqual(ep["summary"], "Built from a sketch: read the data, drop nan values, train a classifier.")
+
     def test_story_concept_uses_intent_title_not_filepath_fallback(self):
-        # The visible Story concept (column card + narrative) must read the intent title, never
-        # the "Update openfde_work" file-path fallback the bad-title repair leaves in
-        # storyFacts.concepts (and which build_prompt_graph would otherwise prefer + then drop
-        # via is_bad_title, leaving NO concept at all).
+        # The visible Story concept (column card + narrative) reads the intent title — never the
+        # "Update openfde_work" file-path fallback (which build_prompt_graph would otherwise prefer
+        # and then drop via is_bad_title, leaving NO concept at all).
         from openfde import prompt_story
         from openfde.episode_summary import enrich_episode
         from openfde.episode_llm_summary import enrich
         ep = self._intent_ep(status="landed", commitShas=["abc1234"], sequence=1, tag="P1")
         enrich_episode(ep, 0)
         enrich(ep, allow_llm=False)
-        self.assertEqual((ep.get("storyFacts") or {}).get("concepts"), ["Update openfde_work"])  # stale, ignored
         g = prompt_story.build_prompt_graph([ep])
         titles = [c["title"] for c in g["concepts"]]
         self.assertIn("Read the data → drop nan values → train a classifier", titles)

@@ -322,30 +322,39 @@ def enrich(episode: dict, *, invoke=None, providers=None, timeout: int = 30, all
             logger.info("LLM-summarized %s via %s → %r", episode.get("episodeId"), clean["summarySource"], clean["title"])
 
     # 3) Sketch-First law (authoritative, after every other pass): an intent-graph run is a
-    # PRODUCT build. Its step text trips the operational/scaffolding heuristics, so the
-    # deterministic pass mislabels it operational + "Update <scope>". Enforce product here so
-    # neither that fallback nor a stray LLM verdict can bury the run; replace ONLY a generic
-    # deterministic title (a real LLM upgrade is kept).
+    # PRODUCT build. Its step text trips the operational/scaffolding + bad-title heuristics, so
+    # the deterministic pass mislabels it operational + "Update <scope>" AND writes that fallback
+    # into storyFacts.concepts. Enforce product + the step-derived title/summary/concept here so
+    # the PERSISTED metadata is clean (not just the derived Story graph). A real LLM upgrade
+    # (non-deterministic summarySource) keeps its title/concepts; we only normalize the flag.
     from openfde.episode_summary import intent_title_summary
     intent = intent_title_summary(episode)
     if intent:
+        t, s = intent
         if episode.get("signal") != "product":
             episode["signal"] = "product"
             changed = True
-        sf = episode.get("storyFacts")
-        if isinstance(sf, dict) and sf.get("operational"):
-            sf["operational"] = False
-            if not sf.get("concepts"):
-                sf["concepts"] = [episode.get("title") or intent[0]]
-            changed = True
-        if episode.get("summarySource") in (None, "deterministic"):
-            t, s = intent
+        deterministic = episode.get("summarySource") in (None, "deterministic")
+        if deterministic:
             if episode.get("title") != t:
                 episode["title"] = t
                 changed = True
             if episode.get("summary") != s:
                 episode["summary"] = s
                 changed = True
+        sf = episode.get("storyFacts")
+        if isinstance(sf, dict):
+            if sf.get("operational"):
+                sf["operational"] = False
+                changed = True
+            # The Story concept is the intent title, never the file-path fallback the
+            # deterministic pass derived from the bad-title re-derive. Only normalize the
+            # deterministic concepts; a real LLM's concepts are left as-is.
+            if deterministic:
+                want = [episode.get("title") or t]
+                if sf.get("concepts") != want:
+                    sf["concepts"] = want
+                    changed = True
     return changed
 
 
