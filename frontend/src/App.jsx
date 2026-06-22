@@ -1054,10 +1054,8 @@ export default function App() {
     setActiveView('whiteboard')
     setExpandedIds(new Set())
     setArchSel(null)
-    // The demo wrote a file under openfde_work/, invalidating the ArchGraph cache. A single
-    // getArchgraph awaits the (off-loop) rescan and returns with the file's functions, so the
-    // BECAME children populate — one call, not two, to avoid racing a second concurrent scan.
-    getArchgraph().then(g => { if (g && Array.isArray(g.files)) setArchGraph(g) })
+    // No ArchGraph refresh: the demo writes no file, so there is nothing new to scan. The boxes'
+    // implementationFiles drive ✓ BUILT + file-level BECAME directly — instant and side-effect-free.
     return res
   }
 

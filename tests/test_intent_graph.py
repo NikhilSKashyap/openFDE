@@ -452,8 +452,9 @@ class StoryStepCommitsTest(unittest.TestCase):
 
 
 class SketchDemoFixtureTest(unittest.TestCase):
-    """The deterministic Sketch-First verification fixture: a connected 3-step intent graph already
-    implemented by a real demo file, so the v3 ✓ built / BECAME / highlight surfaces are testable."""
+    """The deterministic Sketch-First verification fixture: a connected 3-step intent graph that drives
+    the v3 ✓ BUILT / file-level BECAME / highlight surfaces. Side-effect-free — pure canvas state, no
+    file write (so the empty-canvas demo loads instantly and never triggers a scan)."""
 
     def test_demo_state_shape(self):
         from openfde import sketch_demo
@@ -467,18 +468,14 @@ class SketchDemoFixtureTest(unittest.TestCase):
         mod = [b for b in st["boxes"] if b.get("kind") != "intent"]
         self.assertEqual(mod[0]["linkedFiles"], [sketch_demo.DEMO_FILE])   # a real node to amber
 
-    def test_write_demo_creates_function_bearing_file(self):
-        import tempfile
-        from pathlib import Path
+    def test_fixture_is_side_effect_free(self):
+        # The fixture is pure data: no file I/O entrypoint, so loading it can never write to the repo
+        # or trigger an assimilation pass — that is what keeps the empty-canvas demo sub-second.
         from openfde import sketch_demo
-        with tempfile.TemporaryDirectory() as d:
-            st = sketch_demo.write_demo(d)
-            f = Path(d) / sketch_demo.DEMO_FILE
-            self.assertTrue(f.exists())
-            body = f.read_text()
-            for fn in ("read_data", "drop_nans", "train_model"):   # → BECAME function children
-                self.assertIn(f"def {fn}", body)
-            self.assertEqual(len([b for b in st["boxes"] if b.get("kind") == "intent"]), 3)
+        self.assertFalse(hasattr(sketch_demo, "write_demo"))
+        st1 = sketch_demo.sketch_first_demo_state()
+        st2 = sketch_demo.sketch_first_demo_state()
+        self.assertEqual(st1, st2)                          # deterministic
 
 
 if __name__ == "__main__":
