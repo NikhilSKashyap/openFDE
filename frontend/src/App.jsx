@@ -1419,6 +1419,13 @@ export default function App() {
   // No real agent/LLM call yet — this is the product orchestration layer.
   async function onExecute(userPrompt = '') {
     if (!backendRef.current) return
+    // Sketch-First: a selection that includes INTENT boxes RUNS the council loop (episode →
+    // tasks → land → grounding → Story), regardless of the configured native/workflow backend —
+    // pressing Run on an intent sketch must actually run it, not just compile a spec.
+    const selIds = [...(canvasState.selectedIds ?? [])]
+    if (canvasState.boxes.some(b => b.kind === 'intent' && selIds.includes(b.id))) {
+      return onExecuteCouncil(userPrompt)
+    }
     // Step 19: route to the active execution backend. claude-code-workflow
     // prepares a workflow; openfde-native keeps the existing local flow.
     if (activeBackend === 'claude-code-workflow') return onExecuteWorkflow(userPrompt)

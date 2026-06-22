@@ -91,7 +91,7 @@ from openfde import focus as focus_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
 from openfde.episode_summary import (commit_display, is_bad_title, reconcile_task_status,
-                                     repair_episode_tasks, repair_task_commit_shas)
+                                     repair_episode_tasks, repair_task_commit_shas, sync_intent_tasks)
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
 from openfde import prs as prs_mod
@@ -3863,12 +3863,23 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # and the selected box ids — so the loop's record (Story / OpenPM linkback) exists
         # whether the run lands, awaits review, OR fails. reconcile_result reuses it by runId
         # and fills in files/commit on success; on failure it simply stays open.
+        intent_episode_id = None
         if intent_source:
             ep0 = _link_episode_for_run(wid, user_prompt, "council", [], [started["id"]], [],
                                         "", "open", intent_source=intent_source)
             ep0["boxIds"] = list(box_ids)
             persistence.upsert_episode(ep0)
+            intent_episode_id = ep0["episodeId"]
             await manager.broadcast({"type": "episode_updated", "episode": ep0})
+            # Server-durable OpenPM cards (source of truth): one per selected intent step, opened
+            # as `doing`. Settled to done | testing by the run's outcome below.
+            steps0 = [{"boxId": s.get("boxId"), "title": s.get("title")}
+                      for s in (intent_source.get("steps") or []) if s.get("boxId")]
+            tasks0, ch0 = sync_intent_tasks(persistence.load_tasks(), episode_id=intent_episode_id,
+                                            run_id=wid, tag=intent_source.get("ref") or "", steps=steps0)
+            if ch0:
+                persistence.save_tasks(tasks0)
+                await manager.broadcast({"type": "tasks_updated"})
 
         # ── Live activity stream (adaptive glow) ─────────────────────────────
         # Announce the planned files now (canvas pre-pulses them + drills in),
@@ -4064,7 +4075,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # Gap 1: persist per-step file links onto the episode's intentSource (files are only
         # known now, after the run). Story then shows which files each sketch step produced;
         # episode-level files are left untouched. Preserves kind/ref/stepCount.
-        episode_id = payload.get("episodeId")
+        episode_id = intent_episode_id or payload.get("episodeId")
         if episode_id and intent_source and intent_links:
             ep = persistence.get_episode(episode_id)
             src = ep.get("intentSource") if ep else None
@@ -4073,6 +4084,49 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 ep["intentSource"] = src
                 persistence.upsert_episode(ep)
                 await manager.broadcast({"type": "episode_updated", "episode": ep})
+
+        # ── Close the loop, server-durable (Fixes 2/3/4) ─────────────────────
+        if intent_source and intent_episode_id:
+            rstatus = outcome["status"]
+            landed_ok = rstatus in ("passed", "needs_approval")        # built (committed or pending)
+            failed = rstatus in ("failed", "needs_human")              # blocked
+            committed = bool(payload.get("committed"))
+            # (2) settle the OpenPM cards: done | testing, carrying the commit + per-step files.
+            steps_out = [{"boxId": b.get("id"), "title": b.get("title"),
+                          "files": (intent_links.get(b["id"]) or {}).get("files") or []}
+                         for b in intent_boxes if b.get("id")]
+            tasks1, ch1 = sync_intent_tasks(
+                persistence.load_tasks(), episode_id=intent_episode_id, run_id=wid,
+                tag=intent_source.get("ref") or "", steps=steps_out, committed=committed,
+                awaiting_review=bool(payload.get("awaitingReview")), failed=failed,
+                commit_sha=payload.get("commitSha"))
+            if ch1:
+                persistence.save_tasks(tasks1)
+                await manager.broadcast({"type": "tasks_updated"})
+            # (3) ground the canvas server-side (source of truth): built (with files) | blocked,
+            # persisted to state.json so a reload still shows ✓ BUILT + the file links.
+            st_state = persistence.load_state()
+            sboxes = st_state.get("boxes", [])
+            g_changed = False
+            for b in sboxes:
+                if b.get("kind") != "intent" or b.get("id") not in box_ids:
+                    continue
+                link = intent_links.get(b["id"])
+                if landed_ok and link:
+                    b["runState"] = "built"
+                    b["implementationFiles"] = link.get("files") or []
+                    b["implementationMeta"] = {"runId": wid, "attribution": link.get("attribution"),
+                                               "confidence": link.get("confidence")}
+                    g_changed = True
+                elif failed:
+                    b["runState"] = "blocked"
+                    g_changed = True
+            if g_changed:
+                persistence.save_state({"boxes": sboxes, "arrows": st_state.get("arrows", [])})
+                await manager.broadcast({"type": "state_updated", "payload": {"reason": "intent_run"}})
+            # (4) rebuild the Story graph NOW so /api/story/prompt-graph includes this episode
+            # immediately — no process restart / manual rebuild. Coalesced + off-loop in the helper.
+            await _refresh_story_cache_and_broadcast()
 
         return web.json_response({
             "ok": True, "runId": wid, "status": outcome["status"],

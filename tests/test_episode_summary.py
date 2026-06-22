@@ -413,5 +413,54 @@ class RepairTaskCommitShasTest(unittest.TestCase):
         self.assertFalse(changed)
 
 
+class SyncIntentTasksTest(unittest.TestCase):
+    """Server-durable OpenPM cards for an intent-graph run — the source of truth (tasks.json)."""
+
+    STEPS = [{"boxId": "b1", "title": "read"}, {"boxId": "b2", "title": "train"}]
+
+    def test_start_opens_doing_tasks_one_per_step(self):
+        tasks, changed = es.sync_intent_tasks([], episode_id="ep1", run_id="r1",
+                                              tag="read -> train", steps=self.STEPS)
+        self.assertTrue(changed)
+        self.assertEqual([t["title"] for t in tasks], ["read", "train"])
+        self.assertTrue(all(t["column"] == "doing" and t["verificationStatus"] == "pending"
+                            and t["source"] == "intent-graph" for t in tasks))
+        self.assertEqual([t["linkedBoxIds"] for t in tasks], [["b1"], ["b2"]])
+
+    def test_landed_marks_done_with_commit_and_files_no_dup(self):
+        tasks, _ = es.sync_intent_tasks([], episode_id="ep1", run_id="r1", tag="x", steps=self.STEPS)
+        landed = [{"boxId": "b1", "title": "read", "files": ["openfde_work/p.py"]},
+                  {"boxId": "b2", "title": "train", "files": ["openfde_work/p.py"]}]
+        out, changed = es.sync_intent_tasks(tasks, episode_id="ep1", run_id="r1", tag="x",
+                                            steps=landed, committed=True, commit_sha="abc123")
+        self.assertTrue(changed)
+        self.assertEqual(len(out), 2)                                  # updated in place, never duplicated
+        self.assertTrue(all(t["column"] == "done" and t["verificationStatus"] == "passed"
+                            and t["commitSha"] == "abc123" and t["files"] == ["openfde_work/p.py"]
+                            for t in out))
+
+    def test_rerun_is_idempotent(self):
+        t1, _ = es.sync_intent_tasks([], episode_id="ep1", run_id="r1", tag="x",
+                                     steps=self.STEPS, committed=True, commit_sha="abc")
+        t2, changed = es.sync_intent_tasks(t1, episode_id="ep1", run_id="r1", tag="x",
+                                           steps=self.STEPS, committed=True, commit_sha="abc")
+        self.assertFalse(changed)                                      # no change, no new cards
+        self.assertEqual(len(t2), 2)
+
+    def test_failed_run_marks_testing_failed(self):
+        out, _ = es.sync_intent_tasks([], episode_id="ep2", run_id="r2", tag="x",
+                                      steps=self.STEPS, failed=True)
+        self.assertTrue(all(t["column"] == "testing" and t["verificationStatus"] == "failed"
+                            for t in out))
+
+    def test_episode_id_keys_idempotency_across_runid(self):
+        # The start call and the land call share the SAME episode key, so a second runId never
+        # spawns a duplicate card for the same step (the slice's no-dup invariant).
+        t1, _ = es.sync_intent_tasks([], episode_id="ep1", run_id="r1", tag="x", steps=self.STEPS)
+        t2, _ = es.sync_intent_tasks(t1, episode_id="ep1", run_id="r2", tag="x",
+                                     steps=self.STEPS, committed=True, commit_sha="z")
+        self.assertEqual(len(t2), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

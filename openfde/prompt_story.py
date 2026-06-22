@@ -83,6 +83,11 @@ def is_operational_episode(ep: dict) -> bool:
     e.g. a demo-script or ROADMAP/FLOW edit). Either way it stays in the Events layer but
     off the Story spine. The ``nonImplementation`` verdict is stamped by
     :meth:`persistence.Persistence.flag_nonimplementation_episodes` (it needs git)."""
+    # A Sketch-First intent Run is deliberate PRODUCT work — always a story beat, never
+    # operational, even when its only files live in the generated workspace (openfde_work/)
+    # and its plain-English prompt ("read the data → …") trips the meta-content heuristics.
+    if (ep.get("intentSource") or {}).get("kind") == "intent-graph":
+        return False
     sf = ep.get("storyFacts") or {}
     return (ep.get("signal") == "operational" or bool(sf.get("operational"))
             or bool(ep.get("nonImplementation")))

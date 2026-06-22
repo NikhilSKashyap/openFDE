@@ -15,6 +15,7 @@ and fall back to changed module/file names when the prompt has no usable text.
 """
 
 import re
+import secrets
 
 # Conversational / boilerplate prefixes to strip from the front of a line.
 _META_PREFIXES = [
@@ -364,6 +365,11 @@ def repair_episode_tasks(tasks, episodes):
         if not isinstance(t, dict):
             out.append(t)
             continue
+        # Intent-graph cards carry a DELIBERATE step title ("read the data", "clean the data" —
+        # which trip is_bad_title's `read the …` heuristic). Never rewrite them from commit text.
+        if t.get("source") == "intent-graph":
+            out.append(t)
+            continue
         is_ep_card = (t.get("source") == "openfde-episode") or (t.get("episodeId") and t.get("commitSha"))
         if not is_ep_card or not is_bad_title(t.get("title") or ""):
             out.append(t)
@@ -472,6 +478,59 @@ def repair_task_commit_shas(tasks, episodes):
         new_sha = ep_shas[0] if len(ep_shas) == 1 else None
         out.append({**t, "commitSha": new_sha, "shortSha": (new_sha[:7] if new_sha else None)})
         changed = True
+    return out, changed
+
+
+def sync_intent_tasks(tasks, *, episode_id, run_id, tag, steps,
+                      committed=False, awaiting_review=False, failed=False, commit_sha=None):
+    """Server-durable OpenPM cards for an intent-graph run — the SOURCE OF TRUTH (tasks.json),
+    which the frontend reducer mirrors. One card per intent step, idempotent by
+    ``<episodeId|runId>:<boxId>``, so re-running the same episode UPDATES the cards in place and
+    never duplicates. Column follows the lifecycle: committed → done (passed); awaiting review or
+    FAILED → testing (failed verification); otherwise doing. Order is the steps' graph order.
+
+    Args:
+        tasks: list[dict] — current task list.
+        episode_id: str — the run's episode id (the stable idempotency key).
+        run_id: str — run id (fallback key when no episode yet).
+        tag: str — sketch label shown on the cards (episode tag).
+        steps: list[dict] — selected intent steps ({boxId, title, files?}), in graph order.
+        committed / awaiting_review / failed: bool — the run outcome.
+        commit_sha: str | None — the landed commit.
+
+    Returns:
+        (list[dict], bool) — (possibly-updated tasks, changed?).
+    """
+    if not isinstance(tasks, list) or not steps:
+        return tasks, False
+    key = episode_id or run_id or ""
+    column = "done" if committed else ("testing" if (awaiting_review or failed) else "doing")
+    vstatus = "passed" if committed else ("failed" if failed else "pending")
+    by_ident = {t.get("intentKey"): i for i, t in enumerate(tasks)
+                if isinstance(t, dict) and t.get("intentKey")}
+    out = list(tasks)
+    changed = False
+    for s in steps:
+        box_id = s.get("boxId")
+        if not box_id:
+            continue
+        ident = f"{key}:{box_id}"
+        fields = {
+            "title": s.get("title") or "intent step", "files": list(s.get("files") or []),
+            "linkedBoxIds": [box_id], "column": column, "verificationStatus": vstatus,
+            "episodeId": episode_id or None, "commitSha": commit_sha,
+            "episodeTag": tag, "promptTitle": tag, "promptLabel": tag,
+            "source": "intent-graph", "intentKey": ident,
+        }
+        if ident in by_ident:
+            idx = by_ident[ident]
+            merged = {**out[idx], **fields}
+            if merged != out[idx]:
+                out[idx] = merged
+                changed = True
+        else:
+            out.append({"id": "task_" + secrets.token_hex(5), "description": "", **fields})
+            changed = True
     return out, changed
 
 
