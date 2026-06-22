@@ -2346,6 +2346,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         healed = prompt_capture.heal_session_cwd(episodes, path)
         for ep in healed:
             persistence.upsert_episode(ep)
+        if healed:
+            # ``heal_session_cwd`` may return corrected copies rather than mutating the
+            # loaded list. Re-read before attribution so a same-tick manual-land repair
+            # sees the watched repo cwd instead of requiring a second HEAD move.
+            episodes = persistence.load_episodes()
         attached = {s for e in episodes for s in (e.get("commitShas") or [])}
         # Candidate = any commit whose sha is not yet on an episode's commitShas — trailer'd commits
         # INCLUDED. A trailer'd commit made outside autoland (manual/external land) still needs its
@@ -2361,7 +2366,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # (manual `git commit`, no trailer, human-authored) is refused by the path above (author +
         # capture-window gates). Attach it when the link is unambiguous — the commit covers ALL the
         # episode's files, lands after capture, and is the single needs_manual_land candidate.
-        manual = episode_commits_mod.reconcile_manual_land(cands, episodes, watched_root=path)
+        attached_now = {s for e in episodes for s in (e.get("commitShas") or [])}
+        manual_cands = [c for c in cands if c.get("sha") not in attached_now]
+        manual = episode_commits_mod.reconcile_manual_land(manual_cands, episodes, watched_root=path)
         for eid, verdicts in manual.items():
             changed.setdefault(eid, []).extend(verdicts)
         for eid in changed:
