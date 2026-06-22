@@ -126,8 +126,10 @@ function pmReducer(state, action) {
     case 'SYNC_INTENT_STEPS': {
       const key = action.episodeId || action.runId || ''
       const tag = action.tag || ''
-      const column = action.committed ? 'done' : (action.awaitingReview ? 'testing' : 'doing')
-      const vstatus = action.committed ? 'passed' : 'pending'
+      // Column follows the run lifecycle: committed → done, awaiting review or FAILED →
+      // testing (failed carries the evidence), otherwise doing (built, pending land).
+      const column = action.committed ? 'done' : (action.awaitingReview || action.failed ? 'testing' : 'doing')
+      const vstatus = action.committed ? 'passed' : (action.failed ? 'failed' : 'pending')
       const byIdent = new Map()
       state.forEach((t, i) => { if (t.intentKey) byIdent.set(t.intentKey, i) })
       let next = null

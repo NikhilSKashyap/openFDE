@@ -645,7 +645,10 @@ def _intent_node(src: dict, episode=None):
         title = s.get("title")
         if title:
             files = list(s.get("files") or [])
-            steps.append({"title": title, "files": files,
+            # boxId links the story beat back to the SAME canvas box (highlight on click);
+            # built mirrors the box lifecycle — a step with grounded files is built.
+            steps.append({"boxId": s.get("boxId"), "title": title, "files": files,
+                          "built": bool(files),
                           "commits": _commits_for_files(episode, files)})
     return {"sketch": src.get("ref"), "steps": steps}
 

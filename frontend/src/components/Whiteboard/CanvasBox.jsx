@@ -21,19 +21,30 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
   const isIntent = box.kind === 'intent'
   const isDotted = type === 'dotted'
 
-  // Intent steps read as plain-English sketch (violet); modules keep the
+  const implFiles = isIntent && Array.isArray(box.implementationFiles) ? box.implementationFiles : []
+
+  // Intent-box lifecycle, IN PLACE: planned → running → built | blocked. The same box
+  // stays on the canvas and changes colour/label as it threads the run. `built` also
+  // falls out of having implementation files, even if runState was never set explicitly.
+  const STATE = {
+    planned: { label: 'Intent step', color: 'var(--accent)' },
+    running: { label: 'running…',    color: 'var(--accent-orange)' },
+    built:   { label: '✓ built',     color: 'var(--solid)' },
+    blocked: { label: 'blocked',     color: 'var(--violation)' },
+  }
+  const runState = isIntent ? (box.runState || (implFiles.length ? 'built' : 'planned')) : null
+  const st = runState ? (STATE[runState] || STATE.planned) : null
+
+  // Intent steps read as plain-English sketch (state colour); modules keep the
   // blue (dotted/editable) / green (solid/protected) architecture palette.
-  const stroke = isIntent ? 'var(--accent)' : (isDotted ? 'var(--dotted)' : 'var(--solid)')
-  const fill   = isIntent ? 'color-mix(in srgb, var(--accent) 9%, transparent)'
+  const stroke = isIntent ? st.color : (isDotted ? 'var(--dotted)' : 'var(--solid)')
+  const fill   = isIntent ? `color-mix(in srgb, ${st.color} 9%, transparent)`
                           : (isDotted ? 'rgba(74,158,255,0.08)' : 'rgba(61,186,110,0.08)')
   const dash   = isIntent ? '2 4' : (isDotted ? '6 3' : undefined)
 
-  const implFiles = isIntent && Array.isArray(box.implementationFiles) ? box.implementationFiles : []
-  const implemented = isIntent && implFiles.length > 0   // the user's plan became software
-
   return (
     <g
-      className={`canvas-box${showPorts ? ' show-ports' : ''}`}
+      className={`canvas-box${showPorts ? ' show-ports' : ''}${runState === 'running' ? ' canvas-box-running' : ''}`}
       transform={`translate(${x},${y})`}
       data-box-id={id}
     >
@@ -73,11 +84,11 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
               <span style={{
                 flexShrink: 0, fontSize: 9, fontWeight: 600, letterSpacing: 0.3,
                 textTransform: 'uppercase',
-                color: implemented ? 'var(--solid)' : 'var(--accent)',
-                border: `1px solid color-mix(in srgb, ${implemented ? 'var(--solid)' : 'var(--accent)'} 50%, var(--border))`,
+                color: st.color,
+                border: `1px solid color-mix(in srgb, ${st.color} 50%, var(--border))`,
                 borderRadius: 4, padding: '1px 4px',
               }}>
-                {implemented ? '✓ built' : 'Intent step'}
+                {st.label}
               </span>
             )}
           </div>

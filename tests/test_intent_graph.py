@@ -344,6 +344,34 @@ class StorySketchTickTest(unittest.TestCase):
         self.assertEqual([t for t in ticks if t["kind"] == "sketch"], [])
 
 
+class IntentLoopStoryNodeTest(unittest.TestCase):
+    """v4 (real intent Run loop): the Story node links each step back to its canvas box (boxId),
+    mirrors the box lifecycle (built = grounded files), and carries the landing commit(s)."""
+
+    def test_intent_node_carries_boxid_built_files_and_commits(self):
+        from openfde import prompt_story
+        ep = {"episodeId": "e9", "files": ["openfde_work/p.py"], "commitShas": ["abc123"],
+              "commitMeta": {"abc123": {"matchedFiles": ["openfde_work/p.py"]}},
+              "intentSource": {"kind": "intent-graph", "ref": "read → train",
+                               "steps": [{"boxId": "box_read", "title": "read",
+                                          "files": ["openfde_work/p.py"]},
+                                         {"boxId": "box_train", "title": "train", "files": []}]}}
+        node = prompt_story._intent_node(ep["intentSource"], ep)
+        self.assertEqual(node["sketch"], "read → train")
+        s0, s1 = node["steps"]
+        # a built step: linked to its box, grounded files, marked built, owns the commit
+        self.assertEqual(s0["boxId"], "box_read")
+        self.assertEqual(s0["files"], ["openfde_work/p.py"])
+        self.assertTrue(s0["built"])
+        self.assertEqual(s0["commits"], ["abc123"])
+        # an un-grounded step: still linked to its box, but not built and no commit
+        self.assertEqual((s1["boxId"], s1["built"], s1["commits"]), ("box_train", False, []))
+
+    def test_intent_node_none_for_non_intent_source(self):
+        from openfde import prompt_story
+        self.assertIsNone(prompt_story._intent_node({"provider": "github"}, {}))
+
+
 class MergeStepFilesTest(unittest.TestCase):
     """Gap 1: an intent-graph episode stores each step's produced files (keyed by boxId),
     computed only after the run, without disturbing the step's other fields."""

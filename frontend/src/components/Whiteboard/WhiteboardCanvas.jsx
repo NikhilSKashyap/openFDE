@@ -29,6 +29,9 @@ function nodeFilePaths(node) {
   ;(node.files || []).forEach(push)
   ;(node.box?.linkedFiles || []).forEach(push)
   ;(node.box?.files || []).forEach(push)
+  // Built intent boxes ground via implementationFiles — include them so a Story episode /
+  // step spotlight (which ambers the episode's files) highlights the SAME intent box.
+  ;(node.box?.implementationFiles || []).forEach(push)
   return out
 }
 

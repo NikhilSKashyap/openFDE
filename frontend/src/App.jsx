@@ -1683,6 +1683,17 @@ export default function App() {
     setPanelMode('Agent')
     const selectedBoxIds   = [...(canvasState.selectedIds ?? [])]
     const selectedArrowIds = [...(canvasState.selectedArrowIds ?? [])]
+    // Box lifecycle, in place: the selected intent boxes go planned → running now, and
+    // settle to built | blocked | planned by the run's outcome below (never replaced).
+    const selectedIntentBoxIds = canvasState.boxes
+      .filter(b => b.kind === 'intent' && selectedBoxIds.includes(b.id))
+      .map(b => b.id)
+    const setIntentRunState = (rs) => {
+      if (selectedIntentBoxIds.length) {
+        _rawCanvasDispatch({ type: 'SET_BOX_RUN_STATE', ids: selectedIntentBoxIds, runState: rs })
+      }
+    }
+    setIntentRunState('running')
     await startSimulatedRun(architectureModuleIds(selectedBoxIds), selectedArrowIds, { hold: true, live: true })
     const stamp = new Date().toISOString()
     setAgentMessages(prev => [...prev, {
@@ -1693,6 +1704,7 @@ export default function App() {
     setExecuting(false)
     if (!res || res.ok === false) {
       finishRun('failed')
+      setIntentRunState('blocked')
       const reason = (res && res.error) ||
         'Agent Council needs Senior Dev in API mode — Anthropic (key + model) or the keyless Echo provider. Open Agent Settings.'
       setAgentMessages(prev => [...prev, {
@@ -1702,6 +1714,9 @@ export default function App() {
       return
     }
     const cancelled = res.status === 'cancelled'
+    // Settle the box lifecycle by outcome: cancelled → planned (re-runnable),
+    // failed → blocked (with evidence in the result), else → built (files attach below).
+    setIntentRunState(cancelled ? 'planned' : res.status === 'failed' ? 'blocked' : 'built')
     finishRun(cancelled ? 'cancelled' : res.status === 'failed' ? 'failed' : 'passed')
     const done = new Date().toISOString()
     // Each council stage → a concise story message (Architect/Sr Dev/Verifier).
@@ -1738,26 +1753,28 @@ export default function App() {
     // Surface the prompt chip + Review Changes affordance (no auto-commit).
     if (!cancelled) { refreshEpisodes(); refreshWorktree() }
     if (res.approval) setApprovals(prev => [res.approval, ...prev])
-    // Sketch-First Intent: link the run's files back onto the intent steps it
-    // implemented (persists via the debounced canvas save → shows a count badge).
-    if (res.intentLinks && Object.keys(res.intentLinks).length) {
-      const links = res.intentLinks
+    // Sketch-First Intent: link the run's files back onto the built intent steps (persists
+    // via the debounced canvas save → grounds the box into files; drives ✓ BUILT).
+    const links = res.intentLinks || {}
+    if (Object.keys(links).length) {
       _rawCanvasDispatch({ type: 'SET_IMPL_FILES', links, runId: res.runId })
-      // Mirror the intent steps into OpenPM — one grouped card per step, linked to
-      // its box + generated files (column reflects committed / pending-land / doing).
-      const steps = canvasState.boxes
-        .filter(b => b.kind === 'intent' && links[b.id])
-        .map(b => ({ boxId: b.id, title: b.title || 'intent step', files: links[b.id].files || [] }))
-      if (steps.length) {
-        pmDispatch({
-          type: 'SYNC_INTENT_STEPS', steps,
-          episodeId: res.episodeId || null, runId: res.runId,
-          tag: steps.map(s => s.title).join(' → '),
-          committed: !!(res.commit && res.commit.committed),
-          commitSha: res.commit ? res.commit.sha : null,
-          awaitingReview: !!res.awaitingReview,
-        })
-      }
+    }
+    // OpenPM: one grouped card per SELECTED intent step — created whether the run built or
+    // failed (failed → testing + failed verification, carrying the result as evidence), in
+    // graph order, tagged by the episode. Cancelled runs leave the board untouched.
+    const intentSteps = canvasState.boxes
+      .filter(b => b.kind === 'intent' && selectedIntentBoxIds.includes(b.id))
+      .map(b => ({ boxId: b.id, title: b.title || 'intent step', files: (links[b.id]?.files) || [] }))
+    if (intentSteps.length && !cancelled) {
+      pmDispatch({
+        type: 'SYNC_INTENT_STEPS', steps: intentSteps,
+        episodeId: res.episodeId || null, runId: res.runId,
+        tag: intentSteps.map(s => s.title).join(' → '),
+        committed: !!(res.commit && res.commit.committed),
+        commitSha: res.commit ? res.commit.sha : null,
+        awaitingReview: !!res.awaitingReview,
+        failed: res.status === 'failed',
+      })
     }
     getBoxSpecs().then(s => { if (s && typeof s === 'object') setBoxSpecs(s) })
   }

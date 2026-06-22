@@ -128,17 +128,31 @@ function reducer(state, action) {
     case 'TOGGLE_INTENT': {
       // Mark/unmark boxes as plain-English intent steps (Sketch-First Intent).
       // Intent boxes carry no linked files; `kind:undefined` reverts to a module.
+      // A fresh intent box starts its lifecycle at `planned`.
       const ids = new Set(action.ids)
       return {
         ...state,
         boxes: state.boxes.map(b =>
-          ids.has(b.id) ? { ...b, kind: b.kind === 'intent' ? undefined : 'intent' } : b
+          ids.has(b.id)
+            ? { ...b, kind: b.kind === 'intent' ? undefined : 'intent',
+                runState: b.kind === 'intent' ? undefined : 'planned' }
+            : b
         ),
+      }
+    }
+    case 'SET_BOX_RUN_STATE': {
+      // Move planned boxes through the run lifecycle IN PLACE — planned → running →
+      // built | blocked. The same box stays on the canvas; it is never replaced.
+      const ids = new Set(action.ids)
+      return {
+        ...state,
+        boxes: state.boxes.map(b => ids.has(b.id) ? { ...b, runState: action.runState } : b),
       }
     }
     case 'SET_IMPL_FILES': {
       // Post-run link-back: attach a council run's changed files to the intent
-      // boxes it implemented. action.links: { boxId: {files, attribution, confidence} }.
+      // boxes it implemented, and mark them `built`. action.links: { boxId:
+      // {files, attribution, confidence} }.
       const links = action.links || {}
       return {
         ...state,
@@ -146,6 +160,7 @@ function reducer(state, action) {
           links[b.id]
             ? {
                 ...b,
+                runState: 'built',
                 implementationFiles: links[b.id].files || [],
                 implementationMeta: {
                   attribution: links[b.id].attribution || 'graph',
@@ -223,11 +238,13 @@ function reducer(state, action) {
       nextArrowIds.delete(action.id)
       return { ...state, arrows: state.arrows.filter(a => a.id !== action.id), selectedArrowIds: nextArrowIds }
     }
-    // Hydrate from backend — replaces boxes and arrows, clears ephemeral selection state
+    // Hydrate from backend — replaces boxes and arrows, clears ephemeral selection state.
+    // `running` is transient: a box persisted mid-run (then reloaded) is no longer
+    // executing, so it falls back to `planned` rather than spinning forever.
     case 'HYDRATE': {
       return {
         ...state,
-        boxes: action.boxes ?? [],
+        boxes: (action.boxes ?? []).map(b => b.runState === 'running' ? { ...b, runState: 'planned' } : b),
         arrows: action.arrows ?? [],
         selectedIds: new Set(),
         selectedArrowIds: new Set(),

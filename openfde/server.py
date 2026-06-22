@@ -3858,6 +3858,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         })
         await manager.broadcast({"type": "event_appended", "event": started})
 
+        # ── Run starts an Episode (Sketch-First loop) ────────────────────────
+        # For an intent-graph run, open the durable episode NOW — carrying its intentSource
+        # and the selected box ids — so the loop's record (Story / OpenPM linkback) exists
+        # whether the run lands, awaits review, OR fails. reconcile_result reuses it by runId
+        # and fills in files/commit on success; on failure it simply stays open.
+        if intent_source:
+            ep0 = _link_episode_for_run(wid, user_prompt, "council", [], [started["id"]], [],
+                                        "", "open", intent_source=intent_source)
+            ep0["boxIds"] = list(box_ids)
+            persistence.upsert_episode(ep0)
+            await manager.broadcast({"type": "episode_updated", "episode": ep0})
+
         # ── Live activity stream (adaptive glow) ─────────────────────────────
         # Announce the planned files now (canvas pre-pulses them + drills in),
         # then stream each write the moment it lands so the glow follows the agent.
