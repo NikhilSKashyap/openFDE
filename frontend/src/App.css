@@ -2061,6 +2061,16 @@
   pointer-events: none;
 }
 .wb-empty-cta .self-map-btn { pointer-events: auto; }
+/* Sketch-First sample — subtle, subordinate to the scan CTA, set off by a hairline. */
+.wb-sketch-demo {
+  pointer-events: auto;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  margin-top: 8px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.wb-sketch-demo-hint { font-size: 12px; color: var(--text-muted); }
+.wb-sketch-demo-btn[disabled] { opacity: 0.6; cursor: default; }
+.wb-sketch-demo-err { font-size: 11px; color: var(--text-muted); }
 .wb-tool-hint-pill {
   position: absolute;
   bottom: 14px;

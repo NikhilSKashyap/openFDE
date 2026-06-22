@@ -25,6 +25,7 @@ import {
   postEvent,
   getEvents,
   postFromArchgraph,
+  postSketchDemo,
   postSpec,
   postProjectLog,
   getBoxSpecs,
@@ -1041,6 +1042,25 @@ export default function App() {
   // ------------------------------------------------------------------ //
   //  Generate canvas from repo (OpenArchitect read)                    //
   // ------------------------------------------------------------------ //
+  // Sketch-First discovery: load the deterministic demo onto an EMPTY canvas so a
+  // fresh user sees the "I sketched intent → here's what it became in code" aha. The
+  // server refuses (409) when the canvas already has boxes; we return the result so
+  // the empty-state can show a gentle note and never overwrite real work.
+  async function onLoadSketchDemo() {
+    if (!backendRef.current) return { ok: false }
+    const res = await postSketchDemo()
+    if (!res.ok || !Array.isArray(res.boxes)) return res     // 409 / error → caller notes it; no overwrite
+    _rawCanvasDispatch({ type: 'HYDRATE', boxes: res.boxes, arrows: res.arrows ?? [] })
+    setActiveView('whiteboard')
+    setExpandedIds(new Set())
+    setArchSel(null)
+    // The demo wrote a file under openfde_work/, invalidating the ArchGraph cache. A single
+    // getArchgraph awaits the (off-loop) rescan and returns with the file's functions, so the
+    // BECAME children populate — one call, not two, to avoid racing a second concurrent scan.
+    getArchgraph().then(g => { if (g && Array.isArray(g.files)) setArchGraph(g) })
+    return res
+  }
+
   async function onGenerateFromRepo() {
     if (!backendRef.current) return
     const result = await postFromArchgraph()
@@ -2205,6 +2225,7 @@ export default function App() {
               canvasDispatch={canvasDispatch}
               onLoadSelfMap={() => canvasDispatch({ type: 'LOAD_SELF_MAP' })}
               onGenerateFromRepo={backendAvailable ? onGenerateFromRepo : null}
+              onLoadSketchDemo={backendAvailable ? onLoadSketchDemo : null}
               onExecute={backendAvailable ? onWorkExecute : null}
               executing={executing}
               repoName={session?.repoName || ''}

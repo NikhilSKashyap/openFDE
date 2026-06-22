@@ -803,6 +803,28 @@ export const postFromArchgraph = () =>
     body: JSON.stringify({}),
   })
 
+/**
+ * Load the deterministic Sketch-First demo fixture onto an EMPTY canvas.
+ *
+ * Unlike the shared apiFetch (which collapses any non-2xx to null), this preserves
+ * the status + body so the caller can tell a 409 (canvas not empty — never overwrite)
+ * apart from a transient error and show a gentle note.
+ *
+ * @returns {Promise<{ok:boolean, status:number, boxes?:object[], arrows?:object[], error?:string}>}
+ */
+export async function postSketchDemo() {
+  try {
+    const res = await fetch('/api/dev/sketch-demo', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    })
+    const body = (res.headers.get('content-type') || '').includes('application/json')
+      ? await res.json() : null
+    return { ok: res.ok, status: res.status, ...(body || {}) }
+  } catch {
+    return { ok: false, status: 0, error: 'network error' }
+  }
+}
+
 // ── Spec ──────────────────────────────────────────────────────────────────────
 
 /**

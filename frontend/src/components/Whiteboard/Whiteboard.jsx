@@ -11,6 +11,7 @@ export default function Whiteboard({
   canvasState, canvasDispatch,
   onLoadSelfMap,
   onGenerateFromRepo,
+  onLoadSketchDemo,
   onExecute,
   executing,
   repoName = '',
@@ -142,6 +143,7 @@ export default function Whiteboard({
           dispatch={canvasDispatch}
           onLoadSelfMap={onLoadSelfMap}
           onGenerateFromRepo={onGenerateFromRepo}
+          onLoadSketchDemo={onLoadSketchDemo}
           onExecute={onExecute}
           executing={executing}
           repoName={repoName}

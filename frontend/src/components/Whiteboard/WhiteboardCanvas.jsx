@@ -140,7 +140,7 @@ function spotlightLabel(spotlight) {
 
 export default function WhiteboardCanvas({
   activeTool, setActiveTool, state, dispatch,
-  onLoadSelfMap, onGenerateFromRepo, onExecute, executing = false, repoName = '',
+  onLoadSelfMap, onGenerateFromRepo, onLoadSketchDemo, onExecute, executing = false, repoName = '',
   // Nesting (Step 16 in-place expansion)
   archGraph = null, expandedIds, onToggleExpand, onSelectArchEntity, archSel = null, onExpandModule = null,
   flowMode = 'focused', story = null,
@@ -176,6 +176,7 @@ export default function WhiteboardCanvas({
   const [contextMenu, setContextMenu] = useState(null)
   // Sketch-First v3: which implemented intent boxes are showing their decomposition (UI-only).
   const [intentExpanded, setIntentExpanded] = useState(() => new Set())
+  const [demoState, setDemoState] = useState('idle')   // empty-state Sketch demo: idle | loading | error
   const toggleIntent = useCallback((id) => setIntentExpanded(s => {
     const n = new Set(s)
     if (n.has(id)) n.delete(id); else n.add(id)
@@ -1479,6 +1480,28 @@ export default function WhiteboardCanvas({
               watching the openfde repo, never as the dominant action elsewhere. */}
           {onLoadSelfMap && repoName === 'openfde' && (
             <button className="self-map-btn" onClick={onLoadSelfMap}>Load OpenFDE self-map</button>
+          )}
+          {/* Sketch-First discovery: a calm, subtle SAMPLE — sketch intent → see what it
+              became in code. Subordinate to the scan action; never a workflow template. */}
+          {onLoadSketchDemo && (
+            <div className="wb-sketch-demo">
+              <span className="wb-sketch-demo-hint">Sketch an intent, then run it.</span>
+              <button
+                className="self-map-btn wb-sketch-demo-btn"
+                disabled={demoState === 'loading'}
+                onClick={async () => {
+                  setDemoState('loading')
+                  const res = await onLoadSketchDemo()
+                  // On success the canvas hydrates and this empty-state unmounts; only a
+                  // refusal/error (e.g. a 409 race) lands back here to show the note.
+                  setDemoState(res && res.ok && Array.isArray(res.boxes) ? 'idle' : 'error')
+                }}>
+                {demoState === 'loading' ? 'Loading sketch demo…' : 'Load sketch demo'}
+              </button>
+              {demoState === 'error' && (
+                <span className="wb-sketch-demo-err">Couldn’t load the demo — the canvas may already have boxes.</span>
+              )}
+            </div>
           )}
         </div>
       )}
