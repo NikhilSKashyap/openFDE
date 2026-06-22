@@ -613,17 +613,40 @@ def _event_tick(ev: dict) -> dict:
             "timestamp": ev.get("timestamp"), "detail": str(payload.get("detail") or "")[:120]}
 
 
-def _intent_node(src: dict):
-    """Story-node 'intent' origin from an intent-graph ``intentSource``: the sketch line plus
-    each step's title AND the files it produced (per-step file links). Returns None when the
-    episode did not come from an intent graph."""
+def _commits_for_files(episode, files) -> list:
+    """The episode's commit shas that touched any of ``files`` — per-step commit attribution for
+    the Story drawer. Uses each commit's recorded ``matchedFiles`` (from reconciliation); a commit
+    with no recorded match falls back to the episode-level file overlap, so a single-commit episode
+    still attributes. Order-preserving + deduped; empty when there are no files or commits."""
+    fset = {str(f) for f in (files or []) if f}
+    if not fset or not isinstance(episode, dict):
+        return []
+    ep_files = {str(f) for f in (episode.get("files") or [])}
+    meta = episode.get("commitMeta") or {}
+    out = []
+    for sha in (episode.get("commitShas") or []):
+        if not sha:
+            continue
+        matched = {str(f) for f in ((meta.get(sha) or {}).get("matchedFiles") or [])}
+        hit = bool(matched & fset) if matched else bool(fset & ep_files)
+        if hit and sha not in out:
+            out.append(sha)
+    return out
+
+
+def _intent_node(src: dict, episode=None):
+    """Story-node 'intent' origin from an intent-graph ``intentSource``: the sketch line plus, per
+    step, its title, the files it produced, AND the commit(s) that landed those files (when the
+    owning ``episode`` is given). Returns None when the episode did not come from an intent graph."""
     if not (isinstance(src, dict) and src.get("kind") == "intent-graph" and src.get("ref")):
         return None
     steps = []
     for s in (src.get("steps") or []):
         title = s.get("title")
         if title:
-            steps.append({"title": title, "files": list(s.get("files") or [])})
+            files = list(s.get("files") or [])
+            steps.append({"title": title, "files": files,
+                          "commits": _commits_for_files(episode, files)})
     return {"sketch": src.get("ref"), "steps": steps}
 
 
@@ -703,7 +726,7 @@ def build_story_timeline(episodes: list, concepts: list, edges: list = None,
             # Sketch-First: the intent graph the episode was born from (origin on the
             # episode itself, so it shows even for a lone episode with no bridge) — with
             # each step's produced files.
-            "intent": _intent_node(src),
+            "intent": _intent_node(src, e),
             "branchesAbove": ups, "branchesBelow": downs, "branchOverflow": overflow,
         })
 
@@ -773,7 +796,7 @@ def _nv_node(ep: dict, lane: str, reason: str, confidence: str) -> dict:
         "issue": ({"number": src.get("issueNumber"), "url": src.get("url")}
                   if src.get("provider") == "github" and src.get("issueNumber") is not None
                   else None),
-        "intent": _intent_node(src),
+        "intent": _intent_node(src, ep),
         "lane": lane, "parentEpisodeId": None, "continuesEpisodeId": None,
         "narrativeReason": reason, "confidence": confidence,
     }

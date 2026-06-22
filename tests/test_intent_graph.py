@@ -376,7 +376,9 @@ class StoryStepFilesTest(unittest.TestCase):
     def test_intent_node_carries_per_step_files(self):
         node = prompt_story._intent_node(self.SRC)
         self.assertEqual(node["sketch"], "read → train")
-        self.assertEqual(node["steps"][0], {"title": "read", "files": ["openfde_work/p.py"]})
+        self.assertEqual(node["steps"][0]["title"], "read")
+        self.assertEqual(node["steps"][0]["files"], ["openfde_work/p.py"])
+        self.assertEqual(node["steps"][0]["commits"], [])   # no episode → no commits
         self.assertEqual(node["steps"][1]["files"], ["openfde_work/p.py", "openfde_work/t.py"])
 
     def test_narrative_node_carries_per_step_files(self):
@@ -399,6 +401,54 @@ class StoryStepFilesTest(unittest.TestCase):
 
     def test_non_intent_episode_has_no_intent_node(self):
         self.assertIsNone(prompt_story._intent_node({"provider": "github"}))
+
+
+class StoryStepCommitsTest(unittest.TestCase):
+    """v3: each Story intent step carries the commit(s) that landed its files, derived from the
+    episode's per-commit matchedFiles (with an episode-level overlap fallback)."""
+
+    SRC = {"kind": "intent-graph", "ref": "read → train",
+           "steps": [{"boxId": "a", "title": "read", "files": ["openfde_work/intent_demo.py"]},
+                     {"boxId": "b", "title": "train", "files": ["other.py"]}]}
+
+    def test_commits_for_files_uses_matched_then_overlap(self):
+        ep = {"files": ["a.py", "b.py"], "commitShas": ["s1", "s2"],
+              "commitMeta": {"s1": {"matchedFiles": ["a.py"]}, "s2": {"matchedFiles": ["b.py"]}}}
+        self.assertEqual(prompt_story._commits_for_files(ep, ["a.py"]), ["s1"])
+        self.assertEqual(prompt_story._commits_for_files(ep, ["b.py"]), ["s2"])
+        self.assertEqual(prompt_story._commits_for_files(ep, ["a.py", "b.py"]), ["s1", "s2"])
+        self.assertEqual(prompt_story._commits_for_files(ep, []), [])
+        self.assertEqual(prompt_story._commits_for_files(None, ["a.py"]), [])
+
+    def test_per_step_commits_via_matched_files(self):
+        ep = {"files": ["openfde_work/intent_demo.py", "other.py"],
+              "commitShas": ["sha_demo", "sha_other"],
+              "commitMeta": {"sha_demo": {"matchedFiles": ["openfde_work/intent_demo.py"]},
+                             "sha_other": {"matchedFiles": ["other.py"]}}}
+        steps = {s["title"]: s for s in prompt_story._intent_node(self.SRC, ep)["steps"]}
+        self.assertEqual(steps["read"]["commits"], ["sha_demo"])
+        self.assertEqual(steps["train"]["commits"], ["sha_other"])
+
+    def test_fallback_to_episode_overlap_when_no_matched(self):
+        ep = {"files": ["openfde_work/intent_demo.py", "other.py"],
+              "commitShas": ["sha1"], "commitMeta": {}}
+        steps = {s["title"]: s for s in prompt_story._intent_node(self.SRC, ep)["steps"]}
+        self.assertEqual(steps["read"]["commits"], ["sha1"])
+        self.assertEqual(steps["train"]["commits"], ["sha1"])
+
+    def test_no_episode_means_no_commits(self):
+        node = prompt_story._intent_node(self.SRC)
+        self.assertTrue(all(s["commits"] == [] for s in node["steps"]))
+
+    def test_narrative_node_carries_per_step_commits(self):
+        ep = {"episodeId": "e1", "tag": "P1", "title": "t",
+              "createdAt": "2026-06-21T00:00:00+00:00", "status": "landed",
+              "files": ["openfde_work/intent_demo.py"], "commitShas": ["sha_demo"],
+              "commitMeta": {"sha_demo": {"matchedFiles": ["openfde_work/intent_demo.py"]}},
+              "intentSource": {"kind": "intent-graph", "ref": "read",
+                               "steps": [{"title": "read", "files": ["openfde_work/intent_demo.py"]}]}}
+        node = prompt_story._nv_node(ep, "now", "reason", "high")
+        self.assertEqual(node["intent"]["steps"][0]["commits"], ["sha_demo"])
 
 
 if __name__ == "__main__":

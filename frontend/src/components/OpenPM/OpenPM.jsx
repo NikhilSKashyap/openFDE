@@ -547,9 +547,19 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
         </div>
       )}
 
-      {/* Title + verification badge */}
+      {/* Title + verification badge. Intent-step cards carry a small violet marker so it
+          reads as "this is the <step> step of the sketch" — the title IS the step label. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6, marginBottom: 3 }}>
         <span style={{ fontSize: 12, color: 'var(--text)', lineHeight: 1.4, fontWeight: 500 }}>
+          {task.source === 'intent-graph' && (
+            <span style={{
+              display: 'inline-block', verticalAlign: 'middle', marginRight: 5,
+              fontSize: 9, fontWeight: 700, letterSpacing: '0.3px', color: 'var(--accent)',
+              background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
+              borderRadius: 5, padding: '0 5px', whiteSpace: 'nowrap',
+            }}>intent step</span>
+          )}
           {task.title}
         </span>
         <span style={{

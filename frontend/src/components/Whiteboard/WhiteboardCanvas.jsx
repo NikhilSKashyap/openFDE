@@ -32,6 +32,73 @@ function nodeFilePaths(node) {
   return out
 }
 
+// Sketch-First v3: a calm decomposition for an implemented intent box — its produced files and
+// (when the archGraph has them) the functions/classes in each. No new source of truth: the files
+// come from box.implementationFiles (persisted), the symbols from the live archGraph. When the
+// generated files aren't in the graph yet (e.g. a fresh openfde_work/ run), it degrades to
+// file-level children only — never language-specific.
+function intentSymbols(box, archGraph) {
+  const files = (box?.kind === 'intent' && Array.isArray(box.implementationFiles))
+    ? box.implementationFiles : []
+  if (!files.length) return null
+  const fnByPath = {}
+  for (const fn of (archGraph?.functions || [])) {
+    if (fn?.path && files.includes(fn.path)) (fnByPath[fn.path] || (fnByPath[fn.path] = [])).push(fn.name)
+  }
+  const fileNodes = files.map(p => ({ path: p, fns: fnByPath[p] || [] }))
+  const fnCount = fileNodes.reduce((s, f) => s + f.fns.length, 0)
+  return { fileNodes, fileCount: files.length, fnCount }
+}
+
+// The expanded "sketch → software" panel drawn below an intent box: a thin connector to a compact
+// card listing each produced file and its top functions. Non-interactive (read-only traceability).
+function IntentDecomposition({ node, sym }) {
+  const GAP = 14
+  const px = node.x
+  const py = node.y + node.h + GAP
+  const pw = Math.max(node.w, 190)
+  const cx = node.x + node.w / 2
+  return (
+    <g pointerEvents="none">
+      <line x1={cx} y1={node.y + node.h} x2={cx} y2={py} stroke="var(--accent)"
+            strokeWidth={1.2} strokeDasharray="2 3" />
+      <foreignObject x={px} y={py} width={pw} height={460}>
+        <div xmlns="http://www.w3.org/1999/xhtml" style={{
+          width: '100%', boxSizing: 'border-box', padding: '7px 9px',
+          background: 'var(--surface)',
+          border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
+          borderRadius: 7, display: 'flex', flexDirection: 'column', gap: 5,
+          fontFamily: 'inherit',
+        }}>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 0.3, textTransform: 'uppercase',
+                        color: 'var(--accent)' }}>became</div>
+          {sym.fileNodes.map(f => (
+            <div key={f.path} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <div title={f.path} style={{
+                fontSize: 11, fontWeight: 600, color: 'var(--text)',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{baseName(f.path)}</div>
+              {f.fns.slice(0, 5).map(fn => (
+                <div key={fn} style={{ fontSize: 10, color: 'var(--text-muted)', paddingLeft: 9,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {fn}()
+                </div>
+              ))}
+              {f.fns.length > 5 && (
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', paddingLeft: 9 }}>
+                  +{f.fns.length - 5} more
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </foreignObject>
+    </g>
+  )
+}
+
 // Centroid label for a spotlight: concept name + occurrence count, or a commit
 // shortSha + a one-line "Changed N files · concepts: X, Y" annotation.
 function spotlightLabel(spotlight) {
@@ -107,6 +174,13 @@ export default function WhiteboardCanvas({
   const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
   const [contextMenu, setContextMenu] = useState(null)
+  // Sketch-First v3: which implemented intent boxes are showing their decomposition (UI-only).
+  const [intentExpanded, setIntentExpanded] = useState(() => new Set())
+  const toggleIntent = useCallback((id) => setIntentExpanded(s => {
+    const n = new Set(s)
+    if (n.has(id)) n.delete(id); else n.add(id)
+    return n
+  }), [])
   const [lensFocusId, setLensFocusId] = useState(null)  // left-clicked lens node → focus its arrows
   const [editOverlay, setEditOverlay] = useState(null)
   const [pendingArrow, setPendingArrow] = useState(null)
@@ -406,6 +480,15 @@ export default function WhiteboardCanvas({
     if (e.button === 2) return
     if (contextMenu) { setContextMenu(null); return }
     if (editOverlay) return
+
+    // Sketch-First v3: the "▾ became" tab on an implemented intent box toggles its
+    // decomposition — a single click, never a drag or a selection.
+    const intentEl = e.target.closest?.('[data-intent-expand]')
+    if (intentEl && activeTool === 'select') {
+      toggleIntent(intentEl.dataset.intentExpand)
+      e.preventDefault()
+      return
+    }
 
     // ── Module drill-in: reliable single-vs-double click ──────────────────
     // Native dblclick is unreliable here because box pointerdown uses
@@ -993,27 +1076,46 @@ export default function WhiteboardCanvas({
               {pendingArrow && <PendingArrow pendingArrow={pendingArrow} boxes={effectiveBoxes} />}
 
               {/* Module nodes — collapsed (CanvasBox) or expanded (nested) */}
-              {nodes.map(node => node.expanded ? (
-                <ExpandedModule
-                  key={node.id}
-                  node={node}
-                  selected={selectedIds.has(node.id)}
-                  archSelId={archSelId}
-                />
-              ) : (
-                <g key={node.id}>
-                  <CanvasBox
-                    box={{ ...node.box, x: node.x, y: node.y, w: node.w, h: node.h }}
-                    selected={selectedIds.has(node.id)}
-                    isEditing={editingBoxId === node.id}
-                    editingField={editingField}
-                    showPorts={showPorts}
-                  />
-                  {node.drillable && (
-                    <Chevron x={node.x + node.w - 20} y={node.y + 8} open={false} nodeId={node.id} kind="module" />
-                  )}
-                </g>
-              ))}
+              {nodes.map(node => {
+                if (node.expanded) return (
+                  <ExpandedModule key={node.id} node={node}
+                    selected={selectedIds.has(node.id)} archSelId={archSelId} />
+                )
+                const sym = node.box?.kind === 'intent' ? intentSymbols(node.box, archGraph) : null
+                return (
+                  <g key={node.id}>
+                    <CanvasBox
+                      box={{ ...node.box, x: node.x, y: node.y, w: node.w, h: node.h }}
+                      selected={selectedIds.has(node.id)}
+                      isEditing={editingBoxId === node.id}
+                      editingField={editingField}
+                      showPorts={showPorts}
+                      implFnCount={sym?.fnCount || 0}
+                    />
+                    {node.drillable && (
+                      <Chevron x={node.x + node.w - 20} y={node.y + 8} open={false} nodeId={node.id} kind="module" />
+                    )}
+                    {sym && (
+                      <g data-intent-expand={node.id} style={{ cursor: 'pointer' }}>
+                        <rect x={node.x + node.w / 2 - 20} y={node.y + node.h - 8} width={40} height={16} rx={8}
+                          fill="var(--surface)" stroke="var(--accent)" strokeWidth={1} />
+                        <text x={node.x + node.w / 2} y={node.y + node.h} dy="0.32em" textAnchor="middle"
+                          fontSize={9} fontWeight={600} fill="var(--accent)"
+                          style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                          {intentExpanded.has(node.id) ? '▴ hide' : '▾ built'}
+                        </text>
+                      </g>
+                    )}
+                  </g>
+                )
+              })}
+
+              {/* Sketch-First v3: the "sketch → software" decomposition under expanded intent boxes */}
+              {nodes.filter(n => !n.expanded && n.box?.kind === 'intent' && intentExpanded.has(n.id))
+                .map(n => {
+                  const sym = intentSymbols(n.box, archGraph)
+                  return sym ? <IntentDecomposition key={`dec:${n.id}`} node={n} sym={sym} /> : null
+                })}
 
               {/* Attention edges — the focused / story flows, ON TOP of boxes so
                   the selected node's 1-hop detail reads; non-interactive so they

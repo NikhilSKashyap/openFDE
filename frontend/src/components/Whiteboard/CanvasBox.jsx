@@ -15,7 +15,8 @@ function portCoords(w, h, port) {
   }
 }
 
-export default function CanvasBox({ box, selected, isEditing, editingField, showPorts }) {
+export default function CanvasBox({ box, selected, isEditing, editingField, showPorts,
+                                    implFnCount = 0 }) {
   const { id, x, y, w, h, type, title, prompt } = box
   const isIntent = box.kind === 'intent'
   const isDotted = type === 'dotted'
@@ -28,6 +29,7 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
   const dash   = isIntent ? '2 4' : (isDotted ? '6 3' : undefined)
 
   const implFiles = isIntent && Array.isArray(box.implementationFiles) ? box.implementationFiles : []
+  const implemented = isIntent && implFiles.length > 0   // the user's plan became software
 
   return (
     <g
@@ -70,11 +72,12 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
             {isIntent && (
               <span style={{
                 flexShrink: 0, fontSize: 9, fontWeight: 600, letterSpacing: 0.3,
-                textTransform: 'uppercase', color: 'var(--accent)',
-                border: '1px solid color-mix(in srgb, var(--accent) 50%, var(--border))',
+                textTransform: 'uppercase',
+                color: implemented ? 'var(--solid)' : 'var(--accent)',
+                border: `1px solid color-mix(in srgb, ${implemented ? 'var(--solid)' : 'var(--accent)'} 50%, var(--border))`,
                 borderRadius: 4, padding: '1px 4px',
               }}>
-                Intent step
+                {implemented ? '✓ built' : 'Intent step'}
               </span>
             )}
           </div>
@@ -100,6 +103,7 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
                 borderRadius: 4, padding: '1px 6px',
               }}>
                 {`${implFiles.length} file${implFiles.length === 1 ? '' : 's'}`}
+                {implFnCount > 0 ? ` · ${implFnCount} fn${implFnCount === 1 ? '' : 's'}` : ''}
               </span>
               <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.35 }}>
                 {implFiles.slice(0, 3).map(f => (

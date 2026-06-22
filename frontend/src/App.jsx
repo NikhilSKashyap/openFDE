@@ -374,6 +374,16 @@ export default function App() {
     })
   }
 
+  // Story drawer: clicking an intent step ambers the files it produced — the SAME canvas
+  // highlight as clicking the intent box (kind:'intent'). Stays in Story; the amber is ready
+  // when the user switches to the canvas (mirrors onSelectConcept).
+  function onSpotlightFiles(files, label) {
+    const fs = Array.isArray(files) ? files.filter(Boolean) : []
+    if (!fs.length) { setCanvasSpotlight(s => (s?.kind === 'intent' ? null : s)); return }
+    setCanvasSpotlight({ kind: 'intent', label: label || 'intent step',
+      count: fs.length, files: [], amberFiles: fs, summary: '' })
+  }
+
   // Click the "Outside OpenFDE" chapter chip → a detail card listing the commits
   // that weren't made through an OpenFDE prompt (manual / foreign). Same card shell
   // as an episode, minus prompt/summary/Land; its commits are clickable.
@@ -2246,6 +2256,7 @@ export default function App() {
               episodes={episodes}
               outsideBucket={outsideBucket}
               onSpotlightEpisode={onSpotlightEpisode}
+              onSpotlightFiles={onSpotlightFiles}
               activeEpisodeId={canvasSpotlight?.kind === 'episode' ? canvasSpotlight.episodeId : null}
               onSpotlightOutside={onSpotlightOutside}
               outsideActive={canvasSpotlight?.kind === 'outside'}

@@ -52,6 +52,7 @@ export default function Whiteboard({
   episodes = [],
   outsideBucket = null,
   onSpotlightEpisode,
+  onSpotlightFiles,
   activeEpisodeId = null,
   onSpotlightOutside,
   outsideActive = false,
@@ -107,6 +108,7 @@ export default function Whiteboard({
         storyNonce={storyNonce}
         onSpotlightEpisode={onSpotlightEpisode}
         onSpotlightCommit={onSpotlightCommit}
+        onSpotlightFiles={onSpotlightFiles}
         onSelectConcept={onSelectConcept}
         setActiveView={setActiveView}
       />

@@ -38,7 +38,7 @@ const LANES = [
 const LEGACY_LIFECYCLE = { active: 'next', mixed: 'next', deferred: 'deferred', abandoned: 'abandoned' }
 const lifecycleOf = c => c.lifecycle || LEGACY_LIFECYCLE[c.status] || 'next'
 
-export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCommit, onSelectConcept, setActiveView, storyNonce = 0 }) {
+export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCommit, onSpotlightFiles, onSelectConcept, setActiveView, storyNonce = 0 }) {
   const [graph, setGraph]     = useState(null)
   // `confirmed` is the law for the empty state: only the FULL endpoint is authoritative, so we show
   // "No concepts yet" only after a confirmed graph comes back empty — never while the cached boot or
@@ -181,6 +181,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
                          onClose={() => setDetail(null)}
                          onSpotlightEpisode={onSpotlightEpisode}
                          onSpotlightCommit={onSpotlightCommit}
+                         onSpotlightFiles={onSpotlightFiles}
                          setActiveView={setActiveView} />
           )}
         </div>
@@ -587,7 +588,7 @@ function RepairCopy({ text }) {
 // ── Inline Story drawer — details open IN the board, never by switching views ──
 // Canvas spotlighting (amber files / commit impact) remains available as explicit
 // "→ canvas" secondary actions; the default click keeps the user in the story.
-function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, onSpotlightCommit, setActiveView }) {
+function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, onSpotlightCommit, onSpotlightFiles, setActiveView }) {
   const node = detail.node || {}
   const ep = epById[node.episodeId]            // enriched episode (commits w/ titles) when loaded
   const showOnCanvas = () => {
@@ -637,14 +638,24 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
             {(node.intent.steps || []).map((s, i) => {
               const title = typeof s === 'string' ? s : (s.title || '')
               const files = (s && s.files) || []
+              const commits = (s && s.commits) || []
+              const clickable = !!(onSpotlightFiles && files.length)
               return (
-                <div key={i} className="tlv3-drawer-row" style={{ display: 'block' }}>
+                <div key={i} className="tlv3-drawer-row"
+                     style={{ display: 'block', cursor: clickable ? 'pointer' : 'default' }}
+                     title={clickable ? 'Highlight this step’s files on the canvas' : undefined}
+                     onClick={clickable ? () => onSpotlightFiles(files, title) : undefined}>
                   <span className="tlv3-drawer-v">{i + 1}. {title}</span>
                   {files.slice(0, 3).map(f => (
                     <div key={f} className="tlv3-drawer-file">{f}</div>
                   ))}
                   {files.length > 3 && (
                     <div className="tlv3-drawer-file">+{files.length - 3} more</div>
+                  )}
+                  {commits.length > 0 && (
+                    <div className="tlv3-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {commits.map(c => String(c).slice(0, 7)).join(', ')}
+                    </div>
                   )}
                 </div>
               )
