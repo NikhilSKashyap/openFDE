@@ -27,6 +27,12 @@ logger = logging.getLogger("openfde.intent_graph")
 
 INTENT_KIND = "intent"
 
+# Safe, repo-local workspace for intent-only sketches that have no real file
+# target yet. A pure intent graph runs here instead of being rejected — the agent
+# may create/edit files ONLY under this prefix (enforced by the runners). Visible
+# and committable for the demo (chosen over .openfde/ deliberately).
+GENERATED_WORKSPACE = "openfde_work/"
+
 _DEFAULT_BOX_PROMPT = "Describe what this module does..."
 _MAX_STEPS = 40           # bound a runaway sketch
 _MAX_SUMMARY_STEPS = 6    # titles shown in the one-line summary
@@ -252,6 +258,34 @@ def render_intent_brief(graph: dict) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def resolve_run_scope(editable: list, protected: list, intent_graph: dict):
+    """Decide the editable/protected scope for a council run (Sketch-First Intent).
+
+    Keeps the permission boundary intact for normal architecture work and only
+    opens a *generated* workspace when there is genuinely nothing else to edit:
+
+    - editable files present (architecture or mixed intent+dotted) → unchanged;
+      the intent brief still rides along but scope is NOT widened.
+    - no editable files + an intent graph → a safe generated workspace
+      (``GENERATED_WORKSPACE``); existing selected solid files stay protected.
+    - no editable files + no intent graph → ``None`` (caller keeps the 400:
+      a pure architecture selection with nothing to edit is still rejected).
+
+    Args:
+        editable: list — editable (dotted) linked file paths from the selection.
+        protected: list — protected (solid) linked file paths from the selection.
+        intent_graph: dict — output of :func:`compile_intent_graph`.
+
+    Returns:
+        (editable, protected, generated) tuple, or None when there's nothing to run.
+    """
+    if editable:
+        return list(editable), list(protected), False
+    if intent_graph and intent_graph.get("present"):
+        return [GENERATED_WORKSPACE], list(protected), True
+    return None
 
 
 def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: str = "") -> dict:

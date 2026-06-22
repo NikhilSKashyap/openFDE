@@ -102,7 +102,13 @@ from openfde.execution import ACTIVE_DEFAULT, compile_workflow, is_valid_backend
 from openfde.git_timeline import changed_paths, commit_files, ensure_baseline, git_commit, git_diff, git_status, git_timeline, worktree_diff, worktree_impact
 from openfde.report import generate_report
 from openfde.spec import compile_spec
-from openfde.intent_graph import attribute_intent_files, is_intent_box, render_intent_brief
+from openfde.intent_graph import (
+    GENERATED_WORKSPACE,
+    attribute_intent_files,
+    is_intent_box,
+    render_intent_brief,
+    resolve_run_scope,
+)
 from openfde.workflow_result import commit_message, source_files, tests_summary, validate_result
 from openfde.filetree import build_file_tree
 from openfde.persistence import Persistence
@@ -3749,17 +3755,28 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                            for f in (b.get("linkedFiles") or [])})
         protected = sorted({f for b in sel_boxes if b.get("type") != "dotted"
                             for f in (b.get("linkedFiles") or [])})
-        if not editable:
-            return web.json_response({"ok": False, "error":
-                "No editable (dotted) in-scope files. Select a dotted box with linked files."}, status=400)
 
-        scope_summary = f"{len(box_ids)} module(s), {len(editable)} editable file(s)"
+        # ── Sketch-First Intent scope resolution ─────────────────────────────
+        # Intent-only sketches (no editable linked files) run in a SAFE generated
+        # workspace (openfde_work/) instead of being rejected; existing selected
+        # solid files stay protected and the permission boundary is NOT widened for
+        # normal architecture work. A pure architecture selection with nothing to
+        # edit (no intent graph) still returns the 400.
+        intent_graph = ctx.get("intentGraph") or {}
+        scope = resolve_run_scope(editable, protected, intent_graph)
+        if scope is None:
+            return web.json_response({"ok": False, "error":
+                "No editable (dotted) in-scope files. Select a dotted box with linked files, "
+                "or draw intent steps to build something new."}, status=400)
+        editable, protected, generated_scope = scope
+
+        scope_summary = (f"intent workspace ({GENERATED_WORKSPACE}) · {len(box_ids)} step(s)"
+                         if generated_scope
+                         else f"{len(box_ids)} module(s), {len(editable)} editable file(s)")
         user_request = (body.get("prompt") or "").strip()
 
-        # ── Sketch-First Intent: an intent-graph selection reframes the run ───
         # The episode/ledger lead with the sketch summary (Story continuity) and
         # the Architect receives the ordered Intent Graph Brief (Part C).
-        intent_graph = ctx.get("intentGraph") or {}
         intent_brief = render_intent_brief(intent_graph)
         intent_source = None
         if intent_graph.get("present"):
@@ -3854,9 +3871,13 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             def senior_dev(brief):
                 ed = ", ".join(editable) or "(none)"
                 pr = ", ".join(protected) or "(none)"
+                scope_line = (f"- This is a NEW build: create files ONLY under {ed} "
+                              "(a fresh workspace; new file paths beneath it are allowed). "
+                              "Implement the intent graph as a small working version; add tests if feasible."
+                              if generated_scope else f"- Edit ONLY these files: {ed}")
                 cc_prompt = (f"{brief}\n\nConstraints:\n"
-                             f"- Edit ONLY these files: {ed}\n"
-                             f"- Do NOT modify these protected files: {pr}\n"
+                             f"{scope_line}\n"
+                             f"- Do NOT modify protected/existing files: {pr}\n"
                              f"- Keep the change minimal and correct. Do not run tests or git.")
                 return run_claude_code(repo_root=path, prompt=cc_prompt,
                                        editable=editable, protected=protected,

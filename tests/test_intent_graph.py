@@ -1,13 +1,18 @@
 """Tests for openfde.intent_graph — Sketch-First Intent compilation + attribution,
 and its integration into the shared compile_spec brief."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
+from openfde.agent_runner import build_system_prompt, path_in_scope, run_agent
 from openfde.intent_graph import (
+    GENERATED_WORKSPACE,
     attribute_intent_files,
     compile_intent_graph,
     is_intent_box,
     render_intent_brief,
+    resolve_run_scope,
 )
 from openfde.spec import compile_spec
 
@@ -171,6 +176,143 @@ class PredicateTest(unittest.TestCase):
         self.assertFalse(is_intent_box({"kind": "module"}))
         self.assertFalse(is_intent_box({}))
         self.assertFalse(is_intent_box(None))
+
+
+# ─── Runnable intent-only graphs (generated workspace) ────────────────────── #
+
+def _ig(present):
+    return {"present": present, "steps": [{"order": 1}] if present else []}
+
+
+class ResolveRunScopeTest(unittest.TestCase):
+    def test_intent_only_opens_generated_workspace(self):
+        # (1) intent-only selection resolves to a runnable workspace scope —
+        # it must NOT be rejected the way a fileless architecture selection is.
+        self.assertEqual(resolve_run_scope([], [], _ig(True)),
+                         ([GENERATED_WORKSPACE], [], True))
+
+    def test_pure_architecture_no_files_still_returns_none(self):
+        # (2) no editable files AND no intent graph → None → caller keeps the 400.
+        self.assertIsNone(resolve_run_scope([], [], _ig(False)))
+
+    def test_mixed_keeps_editable_and_does_not_widen(self):
+        # (3) dotted linked files present → scope unchanged, workspace NOT added,
+        # protected preserved — the permission boundary is not weakened.
+        self.assertEqual(resolve_run_scope(["m/x.py"], ["s/y.py"], _ig(True)),
+                         (["m/x.py"], ["s/y.py"], False))
+
+    def test_architecture_only_with_files_unchanged(self):
+        self.assertEqual(resolve_run_scope(["m/x.py"], [], _ig(False)),
+                         (["m/x.py"], [], False))
+
+
+class SystemPromptScopeTest(unittest.TestCase):
+    def test_generated_workspace_in_system_prompt(self):
+        # (4) the generated scope reaches the Senior Dev prompt as a new-build workspace.
+        sp = build_system_prompt("intent workspace", [GENERATED_WORKSPACE], ["model.py"])
+        self.assertIn(GENERATED_WORKSPACE, sp)
+        self.assertIn("NEW build", sp)
+        self.assertIn("model.py", sp)   # protected file still listed as never-write
+
+    def test_normal_file_scope_prompt_unchanged(self):
+        sp = build_system_prompt("2 files", ["a/b.py"], [])
+        self.assertIn("a/b.py", sp)
+        self.assertNotIn("NEW build", sp)
+
+
+class PathInScopeTest(unittest.TestCase):
+    def test_directory_prefix_matches_paths_beneath(self):
+        self.assertTrue(path_in_scope("openfde_work/pipeline.py", {"openfde_work/"}))
+        self.assertTrue(path_in_scope("openfde_work/sub/m.py", {"openfde_work/"}))
+
+    def test_exact_file_scope_still_matches(self):
+        self.assertTrue(path_in_scope("ingest/reader.py", {"ingest/reader.py"}))
+
+    def test_outside_workspace_rejected(self):
+        self.assertFalse(path_in_scope("model.py", {"openfde_work/"}))
+        # No false-positive on a sibling that merely shares the prefix string.
+        self.assertFalse(path_in_scope("openfde_workX/m.py", {"openfde_work/"}))
+
+
+def _tool_use(name, **inp):
+    return {"id": f"t_{name}", "type": "tool_use", "name": name, "input": inp}
+
+
+def _resp(*blocks):
+    return {"stop_reason": "tool_use", "content": list(blocks)}
+
+
+class _ScriptedTransport:
+    """Replays a fixed list of Anthropic-shaped responses, one per round-trip."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def __call__(self, request):
+        if self._responses:
+            return self._responses.pop(0)
+        return {"stop_reason": "end_turn", "content": []}
+
+
+class WorkspaceWriteEnforcementTest(unittest.TestCase):
+    def test_workspace_allows_new_file_and_rejects_existing(self):
+        # (5) write enforcement: a new file under the generated workspace is written;
+        # a protected existing file and an out-of-scope existing file are both blocked
+        # and left byte-for-byte unchanged.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "model.py").write_text("orig\n", encoding="utf-8")   # protected
+            (root / "other.py").write_text("orig\n", encoding="utf-8")   # out-of-scope
+            responses = [
+                _resp(
+                    _tool_use("write_file", path="openfde_work/pipeline.py", content="print('hi')\n"),
+                    _tool_use("write_file", path="model.py", content="HACKED\n"),
+                    _tool_use("write_file", path="other.py", content="HACKED\n"),
+                ),
+                _resp(_tool_use("submit_result", status="passed", reportSummary="built the pipeline")),
+            ]
+            out = run_agent(
+                _ScriptedTransport(responses), model="m",
+                system=build_system_prompt("intent workspace", ["openfde_work/"], ["model.py"]),
+                user_prompt="build it", root=root,
+                editable_files=["openfde_work/"], protected_files=["model.py"],
+            )
+            rejected = {r["path"]: r["reason"] for r in out["rejected"]}
+            self.assertIn("openfde_work/pipeline.py", out["writes"])
+            self.assertEqual((root / "openfde_work/pipeline.py").read_text(encoding="utf-8"),
+                             "print('hi')\n")
+            self.assertEqual(rejected.get("model.py"), "protected")
+            self.assertEqual((root / "model.py").read_text(encoding="utf-8"), "orig\n")
+            self.assertEqual(rejected.get("other.py"), "out-of-scope")
+            self.assertEqual((root / "other.py").read_text(encoding="utf-8"), "orig\n")
+
+    def test_workspace_scope_blocks_path_traversal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "secret.py").write_text("orig\n", encoding="utf-8")
+            responses = [
+                _resp(_tool_use("write_file", path="openfde_work/../secret.py", content="HACKED\n")),
+                _resp(_tool_use("submit_result", status="passed", reportSummary="x")),
+            ]
+            out = run_agent(
+                _ScriptedTransport(responses), model="m", system="s",
+                user_prompt="x", root=root,
+                editable_files=["openfde_work/"], protected_files=[],
+            )
+            # The '..' canonicalises to secret.py (outside the workspace) → rejected.
+            self.assertEqual((root / "secret.py").read_text(encoding="utf-8"), "orig\n")
+            self.assertNotIn("secret.py", out["writes"])
+
+
+class WorkspaceAttributionTest(unittest.TestCase):
+    def test_generated_files_attach_to_all_intent_steps(self):
+        # (6) intent link-back: files created under the workspace attach to every
+        # selected intent step (the whole sketch shares them, labelled).
+        boxes = [_ibox("a", "read the data"), _ibox("b", "train model")]
+        changed = ["openfde_work/pipeline.py", "openfde_work/test_pipeline.py"]
+        links = attribute_intent_files(boxes, changed)
+        self.assertEqual(set(links["a"]["files"]), set(changed))
+        self.assertEqual(set(links["b"]["files"]), set(changed))
 
 
 if __name__ == "__main__":

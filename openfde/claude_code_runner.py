@@ -40,6 +40,8 @@ import threading
 import time
 from pathlib import Path
 
+from openfde.agent_runner import path_in_scope
+
 logger = logging.getLogger("openfde.claude_code_runner")
 
 _DEFAULT_TIMEOUT = 600
@@ -396,7 +398,7 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
     # invoked, so the user's work is left exactly as it was. The repair hatch
     # opts out (allow_dirty): there the dirty in-scope file IS the subject of
     # the run, and its edits land as reviewable writes on the episode.
-    dirty_in_scope = sorted(pre_dirty & editable_set)
+    dirty_in_scope = sorted(p for p in pre_dirty if path_in_scope(p, editable_set))
     if dirty_in_scope and not allow_dirty:
         return _failed_outcome(
             "Cannot run on file(s) with uncommitted changes in scope — commit, "
@@ -475,17 +477,17 @@ def run_claude_code(*, repo_root, prompt, editable, protected, model=None,
         if rel in pre_dirty and _hash(root, rel) == pre_hashes.get(rel):
             continue  # pre-existing user change Claude did not touch — preserve it
         if rel in pre_dirty:
-            if allow_dirty and rel in editable_set:
+            if allow_dirty and path_in_scope(rel, editable_set):
                 writes.append(rel)   # the requested repair, stacked on the user's
                 continue             # uncommitted state — review-then-land applies
             conflicts.append(rel)  # Claude modified an already-dirty file — never revert
             continue
-        # Newly changed by the Claude run → enforce dotted/solid scope.
-        if rel in protected_set:
+        # Newly changed by the Claude run → enforce dotted/solid (and workspace) scope.
+        if path_in_scope(rel, protected_set):
             protected_attempts.append(rel)
             _revert(root, rel)
             rejected.append({"path": rel, "reason": "protected"})
-        elif rel in editable_set:
+        elif path_in_scope(rel, editable_set):
             writes.append(rel)
         else:
             _revert(root, rel)

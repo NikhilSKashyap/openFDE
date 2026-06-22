@@ -101,18 +101,31 @@ def build_system_prompt(scope_summary: str, editable: list, protected: list) -> 
     Returns:
         str — the system prompt.
     """
-    ed = "\n".join(f"  - {p}" for p in editable) or "  (none)"
+    dirs = [p for p in editable if p.endswith("/")]
+    ed = "\n".join(f"  - {p}{' (directory — create new files here)' if p.endswith('/') else ''}"
+                   for p in editable) or "  (none)"
     pr = "\n".join(f"  - {p}" for p in protected) or "  (none)"
+    # A directory-only scope is a fresh "generated workspace" for an intent sketch:
+    # there are no existing files to edit — the agent builds a small working version.
+    if dirs and not [p for p in editable if not p.endswith("/")]:
+        workspace_rule = (
+            f"- This is a NEW build: create files ONLY under {', '.join(dirs)} "
+            "(new file paths beneath it are allowed).\n"
+            "- Do NOT modify existing project files outside that workspace unless they are "
+            "explicitly listed as editable.\n"
+            "- Implement the intent graph as a small working version; add tests if feasible.\n")
+    else:
+        workspace_rule = "- Do not invent files outside the editable list.\n"
     return (
         "You are the Senior Dev inside OpenFDE. Implement the requested change by editing "
-        "ONLY the editable files listed below, using the provided tools. Keep changes minimal "
+        "ONLY the editable scope listed below, using the provided tools. Keep changes minimal "
         "and correct. When done, call submit_result exactly once.\n\n"
         f"Scope: {scope_summary}\n\n"
-        f"Editable files (you may write these):\n{ed}\n\n"
+        f"Editable scope (you may write here):\n{ed}\n\n"
         f"Protected files (NEVER write these — request approval via your report instead):\n{pr}\n\n"
         "Rules:\n"
         "- write_file replaces the entire file; include the complete new contents.\n"
-        "- Do not invent files outside the editable list.\n"
+        f"{workspace_rule}"
         "- If the task truly requires a protected file, set status to needs_approval and explain.\n"
         "- Be concise; do not narrate."
     )
@@ -123,6 +136,19 @@ def build_system_prompt(scope_summary: str, editable: list, protected: list) -> 
 def _norm(p: str) -> str:
     s = (p or "").strip().strip('"')
     return s[2:] if s.startswith("./") else s
+
+
+def path_in_scope(rel: str, scope) -> bool:
+    """True if a repo-relative path is within an editable/protected scope.
+
+    A scope entry is either an exact file path or a **directory prefix** (an entry
+    ending in ``/``); a directory prefix matches any path strictly beneath it. Callers
+    MUST pass a canonical, repo-relative path (resolved against the repo root) so a
+    ``../`` traversal cannot masquerade as being under a scoped directory.
+    """
+    if rel in scope:
+        return True
+    return any(s.endswith("/") and rel.startswith(s) for s in scope)
 
 
 def _safe_repo_path(root: Path, rel: str):
@@ -192,16 +218,18 @@ def run_agent(transport, *, model, system, user_prompt, root,
         return True, text
 
     def do_write(rel, content):
-        rel_n = _norm(rel)
         target = _safe_repo_path(root, rel)
         if target is None:
-            rejected.append({"path": rel_n or str(rel), "reason": "outside-repo / traversal"})
+            rejected.append({"path": _norm(rel) or str(rel), "reason": "outside-repo / traversal"})
             return False, f"Path '{rel}' is outside the repository — rejected."
-        if rel_n in protected:
+        # Decide scope on the CANONICAL repo-relative path (not the raw string) so a
+        # 'openfde_work/../secret.py' cannot pass the directory-prefix check.
+        rel_n = target.relative_to(root.resolve()).as_posix()
+        if path_in_scope(rel_n, protected):
             protected_attempts.append(rel_n)
             rejected.append({"path": rel_n, "reason": "protected"})
             return False, f"'{rel}' is protected. Do not write it; request approval in submit_result."
-        if rel_n not in editable:
+        if not path_in_scope(rel_n, editable):
             rejected.append({"path": rel_n, "reason": "out-of-scope"})
             return False, f"'{rel}' is not in the editable scope. Editable: {sorted(editable)}"
         if not isinstance(content, str):

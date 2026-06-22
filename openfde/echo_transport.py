@@ -57,6 +57,11 @@ def make_echo_transport(root, editable_files):
     """
     root = Path(root)
     target_rel = editable_files[0] if editable_files else ""
+    # A directory scope (the generated intent workspace) has no file to edit yet —
+    # create a small starter file under it so the keyless demo still produces a
+    # real, committable change instead of trying to write the directory itself.
+    if target_rel.endswith("/"):
+        target_rel = target_rel + "intent_demo.py"
     state = {"i": 0}
 
     def transport(req: dict) -> dict:
