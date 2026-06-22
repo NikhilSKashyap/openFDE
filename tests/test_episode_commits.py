@@ -408,6 +408,37 @@ class ReconcileManualLandTest(unittest.TestCase):
         self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})   # already landed → no change
         self.assertEqual(ep["commitShas"], ["c"])
 
+    def _cnc(self, eid, files, *, created=NOW):
+        return _ep(eid, files, created=created, status="complete_no_changes")
+
+    def test_complete_no_changes_with_unambiguous_commit_lands(self):
+        # The P163 case: a passive-capture episode that ended complete_no_changes WITH files but no
+        # commit, whose landing commit was made outside OpenFDE — attaches and lands.
+        ep = self._cnc("P163", ["a.py", "b.py"])
+        commit = self._human("c1", ["a.py", "b.py", "c.py"], ts=NOW + timedelta(hours=1))
+        changed = ec.reconcile_manual_land([commit], [ep])
+        self.assertEqual(set(changed), {"P163"})
+        self.assertEqual(ep["status"], "landed")
+        self.assertEqual(ep["commitShas"], ["c1"])
+
+    def test_sha_already_on_another_episode_is_never_reused(self):
+        # The invariant: one sha → one episode. A commit already attached to A is not re-claimed by
+        # a stuck B, even if it covers B's files (no duplicate-sha bug).
+        a = _ep("A", ["a.py", "b.py"], created=NOW, status="landed")
+        a["commitShas"] = ["dup"]
+        b = self._cnc("B", ["a.py", "b.py"])
+        commit = self._human("dup", ["a.py", "b.py"], ts=NOW + timedelta(hours=1))
+        self.assertEqual(ec.reconcile_manual_land([commit], [a, b]), {})
+        self.assertEqual(b["status"], "complete_no_changes")
+        self.assertNotIn("commitShas", b)   # never attached
+
+    def test_complete_no_changes_with_existing_commit_is_not_a_candidate(self):
+        # Only files-and-no-commit episodes are repairable; one that already has a commit is skipped.
+        ep = self._cnc("P", ["a.py"])
+        ep["commitShas"] = ["already"]
+        commit = self._human("new", ["a.py"], ts=NOW + timedelta(hours=1))
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep]), {})
+
 
 if __name__ == "__main__":
     unittest.main()

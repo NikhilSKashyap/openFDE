@@ -395,6 +395,10 @@ def reconcile_episodes(commits: list, episodes: list, *, watched_root=None,
 _OPENFDE_AUTHOR_EMAILS = frozenset({"openfde@localhost"})
 # Pre-land statuses: an attached commit IS the land, so the rail stops showing it as in-flight.
 _PRELAND_STATES = frozenset({"open", "reviewing", "needs_manual_land", "complete_no_changes"})
+# Statuses the trailer-less manual-land REPAIR may attach a commit to. Both mean "files captured
+# but no OpenFDE commit": needs_manual_land (the run held for a manual Land) and complete_no_changes
+# (a passive-capture turn that completed with files but whose land happened outside OpenFDE).
+_REPAIRABLE_LAND_STATES = frozenset({"needs_manual_land", "complete_no_changes"})
 
 
 def is_openfde_author(commit: dict) -> bool:
@@ -470,25 +474,30 @@ def reconcile_authored_episodes(commits: list, episodes: list, *, watched_root=N
 
 
 def reconcile_manual_land(commits: list, episodes: list, *, watched_root=None) -> dict:
-    """Repair a ``needs_manual_land`` episode whose landing commit was made OUTSIDE the OpenFDE
-    land path — a plain ``git commit`` with no ``OpenFDE-Episode`` trailer, typically authored by
-    the human (so :func:`reconcile_authored_episodes`'s author + capture-window gates refuse it and
-    the episode is stuck ``needs_manual_land`` even though its work is committed).
+    """Repair a pre-land episode whose landing commit was made OUTSIDE the OpenFDE land path —
+    a plain ``git commit`` with no ``OpenFDE-Episode`` trailer, typically authored by the human (so
+    :func:`reconcile_authored_episodes`'s author + capture-window gates refuse it and the episode
+    stays stuck even though its work is committed). Covers BOTH stuck states (``_REPAIRABLE_LAND_STATES``):
+    ``needs_manual_land`` (held for a manual Land) and ``complete_no_changes`` (a passive-capture turn
+    that completed with files but whose land happened outside OpenFDE).
 
-    This attaches such a commit ONLY when the link is unambiguous and git-provable — it does NOT
-    relax the precision of the main path, it adds a separate, stricter file-coverage rule:
-      - the episode is ``needs_manual_land``, in the watched repo (``sessionCwd``), with files;
-      - the commit carries **no explicit trailer** (a trailer'd commit is the main path's job);
+    Attaches such a commit ONLY when the link is unambiguous and git-provable — it does NOT relax the
+    main path's precision, it adds a separate, stricter file-coverage rule:
+      - the episode is in ``_REPAIRABLE_LAND_STATES``, in the watched repo (``sessionCwd``), with
+        files and **no commit yet**;
+      - the commit carries **no explicit trailer** (a trailer'd commit is the main path's job) and is
+        **not already attached to ANY episode** (the one-sha-one-episode invariant — never double-claim);
       - the commit landed **after** the episode was captured (``createdAt`` − small grace);
       - the commit's changed files **cover all** of the episode's files (``ep_files ⊆ commit_files``)
-        — i.e. the commit landed exactly this turn's work, not a partial/overlapping change;
+        — it landed exactly this turn's work, not a partial/overlapping change;
       - the commit covers **exactly one** such episode (never guess between two candidates).
     Author is intentionally NOT gated (a manual land is human-authored); coverage + uniqueness +
-    same-repo + after-capture carry the confidence. Oldest commit first so the earliest covering
-    commit wins. Mutates ``episodes`` in place; returns ``{episodeId: [verdict]}`` for what changed.
+    same-repo + after-capture + not-already-claimed carry the confidence. Oldest commit first so the
+    earliest covering commit wins. Mutates ``episodes`` in place; returns ``{episodeId: [verdict]}``.
     """
     cands = [e for e in episodes
-             if e.get("status") == "needs_manual_land" and e.get("files")
+             if e.get("status") in _REPAIRABLE_LAND_STATES and e.get("files")
+             and not e.get("commitShas")
              and (watched_root is None or _same_repo(e.get("sessionCwd"), watched_root))]
     if not cands:
         return {}
@@ -498,6 +507,8 @@ def reconcile_manual_land(commits: list, episodes: list, *, watched_root=None) -
         sha = commit.get("sha")
         if not sha or commit.get("episodeIds"):          # trailer'd → main path owns it
             continue
+        if any(sha in (e.get("commitShas") or []) for e in episodes):
+            continue                                     # already claimed by an episode — never reuse
         commit_files = set(commit.get("files") or [])
         if not commit_files:
             continue
@@ -506,10 +517,8 @@ def reconcile_manual_land(commits: list, episodes: list, *, watched_root=None) -
             continue
         matches = []
         for ep in cands:
-            if ep.get("status") != "needs_manual_land":  # landed earlier this pass → skip
-                continue
-            if sha in (ep.get("commitShas") or []):
-                continue
+            if ep.get("status") not in _REPAIRABLE_LAND_STATES or ep.get("commitShas"):
+                continue                                 # landed earlier this pass → skip
             ep_files = set(ep.get("files") or [])
             if not ep_files or not ep_files.issubset(commit_files):
                 continue                                 # commit must land ALL the episode's files
@@ -521,7 +530,7 @@ def reconcile_manual_land(commits: list, episodes: list, *, watched_root=None) -
             continue
         ep, matched = matches[0]
         reason = (f"manual land: commit changed all {len(matched)} of the episode's file(s) "
-                  "after capture (no trailer; unique needs_manual_land match)")
+                  "after capture (no trailer; unique pre-land match)")
         attach_commit(ep, sha, confidence=HIGH_FILE_OVERLAP, reason=reason, matched_files=matched)
         _mark_landed(ep)
         changed.setdefault(ep["episodeId"], []).append(

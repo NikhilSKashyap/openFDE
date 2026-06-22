@@ -369,5 +369,49 @@ class StoryNoiseHelpersTest(unittest.TestCase):
         self.assertIsNone(es.product_title_from_change(["DEMO1.md"], ""))   # no real source to name
 
 
+class RepairTaskCommitShasTest(unittest.TestCase):
+    """OpenPM cards heal stale commit mappings from episode truth (episode commitShas win)."""
+
+    def test_clears_stale_commit_when_episode_has_none(self):
+        # The P162 case: card shows a commit its episode no longer lists → clear it.
+        tasks = [{"id": "t", "episodeId": "P162", "commitSha": "2131a38", "shortSha": "2131a3"}]
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P162", "commitShas": []}])
+        self.assertTrue(changed)
+        self.assertIsNone(out[0]["commitSha"])
+        self.assertIsNone(out[0]["shortSha"])
+
+    def test_adopts_episodes_single_commit(self):
+        # The P163 case: card has a wrong/old sha; the episode now has exactly one → adopt it.
+        tasks = [{"id": "t", "episodeId": "P163", "commitSha": "old", "shortSha": "old"}]
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P163", "commitShas": ["5773a91"]}])
+        self.assertTrue(changed)
+        self.assertEqual(out[0]["commitSha"], "5773a91")
+        self.assertEqual(out[0]["shortSha"], "5773a91")
+
+    def test_valid_mapping_is_untouched(self):
+        tasks = [{"id": "t", "episodeId": "P1", "commitSha": "abc", "shortSha": "abc"}]
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P1", "commitShas": ["abc"]}])
+        self.assertFalse(changed)
+        self.assertEqual(out, tasks)
+
+    def test_unknown_episode_is_left_alone(self):
+        # A card whose episode isn't in the store could be a load-order blip — never destroy data.
+        tasks = [{"id": "t", "episodeId": "GONE", "commitSha": "abc"}]
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P1", "commitShas": ["x"]}])
+        self.assertFalse(changed)
+        self.assertEqual(out[0]["commitSha"], "abc")
+
+    def test_ambiguous_multi_commit_episode_clears_rather_than_guess(self):
+        tasks = [{"id": "t", "episodeId": "P1", "commitSha": "stale"}]
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P1", "commitShas": ["x", "y"]}])
+        self.assertTrue(changed)
+        self.assertIsNone(out[0]["commitSha"])
+
+    def test_non_commit_cards_untouched(self):
+        tasks = [{"id": "t", "episodeId": "P1", "title": "a todo"}]   # no commitSha
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P1", "commitShas": []}])
+        self.assertFalse(changed)
+
+
 if __name__ == "__main__":
     unittest.main()

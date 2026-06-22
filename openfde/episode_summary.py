@@ -435,6 +435,46 @@ def reconcile_task_status(tasks, episodes):
     return changed
 
 
+def repair_task_commit_shas(tasks, episodes):
+    """Heal OpenPM cards whose stored ``commitSha`` is no longer claimed by their owning episode.
+
+    Episode ``commitShas`` is the source of truth: a reconcile can move a commit to its correct
+    episode (or drop it), leaving a card pointing at a stale sha (e.g. a card still showing a commit
+    its episode no longer lists). When a card references an episode (by ``episodeId``) that the store
+    knows but that does NOT list the card's commit, the card adopts the episode's current commit
+    (only when the episode has exactly one — unambiguous) or drops the stale sha entirely. A card
+    whose episode is absent from the store is left untouched (a load-order blip must never destroy
+    data); non-commit cards are untouched. Idempotent — a healed card matches its episode, so a
+    re-run is a no-op. General — keyed on episode truth, never on a specific prompt/commit.
+
+    Args:
+        tasks: list[dict] — persisted OpenPM tasks.
+        episodes: list[dict] — episodes (source of truth).
+
+    Returns:
+        (list[dict], bool) — (possibly-repaired tasks, changed?).
+    """
+    if not isinstance(tasks, list):
+        return tasks, False
+    shas_by_ep = {e["episodeId"]: list(e.get("commitShas") or [])
+                  for e in (episodes or []) if isinstance(e, dict) and e.get("episodeId")}
+    changed = False
+    out = []
+    for t in tasks:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        sha, eid = t.get("commitSha"), t.get("episodeId")
+        if not sha or eid not in shas_by_ep or sha in shas_by_ep[eid]:
+            out.append(t)                 # no commit, unknown episode, or already valid → leave it
+            continue
+        ep_shas = shas_by_ep[eid]
+        new_sha = ep_shas[0] if len(ep_shas) == 1 else None
+        out.append({**t, "commitSha": new_sha, "shortSha": (new_sha[:7] if new_sha else None)})
+        changed = True
+    return out, changed
+
+
 def _scope_names(files) -> list:
     """Up to two distinct top-level dir/module scopes from changed paths."""
     names = []

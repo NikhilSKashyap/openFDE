@@ -90,7 +90,8 @@ from openfde import plugins as plugins_mod
 from openfde import focus as focus_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
-from openfde.episode_summary import commit_display, is_bad_title, reconcile_task_status, repair_episode_tasks
+from openfde.episode_summary import (commit_display, is_bad_title, reconcile_task_status,
+                                     repair_episode_tasks, repair_task_commit_shas)
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
 from openfde import prs as prs_mod
@@ -740,6 +741,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         episodes = episode_llm_summary.ensure_facts(persistence)   # ensure clean episode titles first
         tasks = persistence.load_tasks()
         repaired, changed = repair_episode_tasks(tasks, episodes)
+        # Heal stale commit mappings: a card showing a commit its owning episode no longer claims is
+        # repaired from episode truth (episode commitShas win) — so a re-attributed/dropped commit
+        # can't keep showing on the wrong card.
+        repaired, c2 = repair_task_commit_shas(repaired, episodes)
+        changed = changed or c2
         # Make every episode card mirror its episode's CURRENT verify/landed state
         # — no stale FAILED next to a passed episode (one source of truth).
         if reconcile_task_status(repaired, episodes):
@@ -766,6 +772,37 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         _write_plan_md(persistence, path)
         await manager.broadcast({"type": "tasks_updated"})
         return web.json_response({"ok": True})
+
+    async def post_sketch_demo(request: web.Request) -> web.Response:
+        """Local, demo-only: load a deterministic Sketch-First fixture so the v3 canvas surfaces
+        (``✓ built`` / ``BECAME`` / intent→file highlight) can be verified without depending on
+        stale manual canvas state. Writes one clearly-named file under ``openfde_work/`` (giving the
+        archGraph real function children) plus three connected intent boxes + a module.
+
+        **Non-destructive:** REFUSES (409) when the canvas already has boxes — it never overwrites
+        real work, so hitting it on a live instance is safe. Reload the canvas after to see it.
+        """
+        if persistence.load_state().get("boxes"):
+            return web.json_response({"ok": False, "error":
+                "Canvas is not empty — the Sketch-First demo refuses to overwrite real work. "
+                "Clear the canvas or use a fresh instance."}, status=409)
+        from openfde import sketch_demo
+        demo = sketch_demo.write_demo(path)
+        persistence.save_state(demo)
+        # Make the demo file visible to the archGraph — intent-to-add (NO commit) so it counts as
+        # tracked and shifts the dirty signature — then rebuild now, so the BECAME view shows real
+        # function children immediately rather than file-level only. Best-effort: git is optional and
+        # file-level children still render without it.
+        try:
+            subprocess.run(["git", "add", "-N", "--", sketch_demo.DEMO_FILE],
+                           cwd=str(path), capture_output=True, timeout=10)
+            await _archgraph_async(force=True)
+        except Exception:  # noqa: BLE001 — never let the demo fixture break on a git/scan hiccup
+            logger.debug("sketch demo: archgraph refresh skipped", exc_info=True)
+        logger.info("Loaded Sketch-First demo: %d box(es), %d arrow(s), wrote %s",
+                    len(demo["boxes"]), len(demo["arrows"]), sketch_demo.DEMO_FILE)
+        await manager.broadcast({"type": "state_updated", "payload": {"reason": "sketch_demo"}})
+        return web.json_response({"ok": True, **demo})
 
     # ================================================================== #
     #  REST — /api/issues/github  (durable intent v1)                     #
@@ -4847,6 +4884,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_put( "/api/state",                 put_state)
     app.router.add_get( "/api/tasks",                 get_tasks)
     app.router.add_put( "/api/tasks",                 put_tasks)
+    app.router.add_post("/api/dev/sketch-demo",       post_sketch_demo)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)

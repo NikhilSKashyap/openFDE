@@ -451,5 +451,35 @@ class StoryStepCommitsTest(unittest.TestCase):
         self.assertEqual(node["intent"]["steps"][0]["commits"], ["sha_demo"])
 
 
+class SketchDemoFixtureTest(unittest.TestCase):
+    """The deterministic Sketch-First verification fixture: a connected 3-step intent graph already
+    implemented by a real demo file, so the v3 ✓ built / BECAME / highlight surfaces are testable."""
+
+    def test_demo_state_shape(self):
+        from openfde import sketch_demo
+        st = sketch_demo.sketch_first_demo_state()
+        intent = [b for b in st["boxes"] if b.get("kind") == "intent"]
+        self.assertEqual([b["title"] for b in intent],
+                         ["read the data", "drop nan values", "train a classifier"])
+        for b in intent:                                   # each step is "built" (has impl files)
+            self.assertEqual(b["implementationFiles"], [sketch_demo.DEMO_FILE])
+        self.assertEqual(len(st["arrows"]), 2)             # connected pipeline read→clean→train
+        mod = [b for b in st["boxes"] if b.get("kind") != "intent"]
+        self.assertEqual(mod[0]["linkedFiles"], [sketch_demo.DEMO_FILE])   # a real node to amber
+
+    def test_write_demo_creates_function_bearing_file(self):
+        import tempfile
+        from pathlib import Path
+        from openfde import sketch_demo
+        with tempfile.TemporaryDirectory() as d:
+            st = sketch_demo.write_demo(d)
+            f = Path(d) / sketch_demo.DEMO_FILE
+            self.assertTrue(f.exists())
+            body = f.read_text()
+            for fn in ("read_data", "drop_nans", "train_model"):   # → BECAME function children
+                self.assertIn(f"def {fn}", body)
+            self.assertEqual(len([b for b in st["boxes"] if b.get("kind") == "intent"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
