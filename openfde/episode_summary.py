@@ -583,6 +583,41 @@ def derive_title_summary(prompt: str, files=None):
     return title, summary
 
 
+def is_intent_graph_episode(episode: dict) -> bool:
+    """True when an episode was born from a Sketch-First intent graph (a user-drawn sketch the
+    Council ran). Such an episode is a PRODUCT build by construction — never operational."""
+    return (isinstance(episode, dict)
+            and (episode.get("intentSource") or {}).get("kind") == "intent-graph")
+
+
+def intent_title_summary(episode: dict):
+    """``(title, summary)`` for an intent-run episode, derived from the STRUCTURED intent steps
+    rather than the flattened ``Intent: …`` prompt.
+
+    Why not reuse ``derive_title_summary``: a sketch step like *"read the data"* begins with a
+    scaffolding word (``read``) that the shell/boilerplate heuristics strip, so the flattened
+    prompt collapses to nothing and the episode is mislabelled operational + "Update <scope>".
+    The steps are clean structured data, so we title from them directly and keep the run product.
+
+    Returns ``None`` when the episode did not come from an intent graph.
+    """
+    if not is_intent_graph_episode(episode):
+        return None
+    src = episode.get("intentSource") or {}
+    steps = [s.strip() for s in (_strip_meta(st.get("title") or "")
+                                 for st in (src.get("steps") or []) if st.get("title")) if s.strip()]
+    if steps:
+        flow = " → ".join(steps)
+        title = _cap_title(flow, 58)
+        title = (title[:1].upper() + title[1:]) if title else title
+        summary = "Built from a sketch: " + ", ".join(steps) + "."
+        return title, summary
+    ref = (src.get("ref") or "").strip()
+    if ref:
+        return _cap_title(ref), f"Built from a sketch: {ref}."
+    return "Sketch-First intent run", "Built from a sketch on the canvas."
+
+
 def enrich_episode(ep: dict, max_seq: int) -> int:
     """Assign ``sequence``/``tag``/``title``/``summary`` in place when missing.
 
@@ -603,14 +638,18 @@ def enrich_episode(ep: dict, max_seq: int) -> int:
         ep["sequence"] = max_seq
     if not ep.get("tag"):
         ep["tag"] = f"P{ep['sequence']}"
+    # Sketch-First intent runs title from their steps and are product by construction (see
+    # intent_title_summary); everything else uses the deterministic prompt/file derivation.
+    intent = intent_title_summary(ep)
     if not ep.get("title") or not ep.get("summary"):
-        title, summary = derive_title_summary(ep.get("prompt") or "", ep.get("files"))
+        title, summary = intent or derive_title_summary(ep.get("prompt") or "", ep.get("files"))
         if not ep.get("title"):
             ep["title"] = title
         if not ep.get("summary"):
             ep["summary"] = summary
     if not ep.get("signal"):
         # Product/build prompt vs operational chatter (shell/status/file-list) — the
-        # Story keeps operational episodes out of the active concepts.
-        ep["signal"] = "operational" if is_operational(ep.get("prompt") or "") else "product"
+        # Story keeps operational episodes out of the active concepts. An intent run is product.
+        ep["signal"] = "product" if intent else (
+            "operational" if is_operational(ep.get("prompt") or "") else "product")
     return max_seq

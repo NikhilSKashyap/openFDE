@@ -288,3 +288,34 @@ def land_on_verify(root, persistence, episode: dict, *, run_verify=None,
     # Green: hand to the scoped lander; inject the receipt so it does not re-run verify.
     return land_episode(root, persistence, episode, auto=True, allow_llm=allow_llm,
                         run_verify=lambda _r: evidence)
+
+
+def reclassify_landed(episode: dict) -> bool:
+    """Evidence overrides classification: an episode that carries real commits is product work,
+    whatever the summarizer guessed. Mirrors the in-line rule in :func:`land_episode`. Returns
+    True iff the episode changed. (Shared so the read-time heal and the lander agree.)"""
+    if episode.get("signal") == "operational" or (episode.get("storyFacts") or {}).get("operational"):
+        episode["signal"] = "product"
+        if isinstance(episode.get("storyFacts"), dict):
+            episode["storyFacts"]["operational"] = False
+        episode["reclassifiedBy"] = "landed-commits"
+        return True
+    return False
+
+
+def heal_landing_status(episode: dict) -> bool:
+    """Settle an episode left in the TRANSIENT ``auto_landing`` state.
+
+    ``land_episode`` flips an auto-land to ``auto_landing``, makes the scoped commit, then flips
+    it to ``landed`` — three writes. A crash/cancel in the executor BETWEEN the commit and the
+    final write (or a reconciliation that re-attaches the trailer'd commit afterwards) can leave
+    the episode stuck at ``auto_landing`` with commit shas attached. Coherent lifecycle requires
+    it settle: promote any ``auto_landing`` episode that already carries commit shas to
+    ``landed`` and apply the same evidence-overrides-classification rule. Returns True iff changed.
+    """
+    if episode.get("status") != AUTO_LANDING or not (episode.get("commitShas") or []):
+        return False
+    episode["status"] = LANDED
+    reclassify_landed(episode)
+    episode["updatedAt"] = _now()
+    return True

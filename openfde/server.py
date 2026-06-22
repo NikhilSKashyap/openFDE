@@ -2130,6 +2130,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         """
         persistence.backfill_episode_meta()                    # title/tag/seq/signal
         episodes = episode_llm_summary.ensure_facts(persistence)  # storyFacts (deterministic; no subprocess)
+        # Settle any episode stuck in the transient ``auto_landing`` (a land interrupted between
+        # its commit and the final ``landed`` write) so the rail never shows it landing forever.
+        from openfde import autoland as _autoland
+        for _e in episodes:
+            if _autoland.heal_landing_status(_e):
+                persistence.upsert_episode(_e)
         commits = git_timeline(path, limit=200)
 
         # Shared changed-files cache + a bounded fetch (one `git show --name-only` per sha) so the
@@ -2411,7 +2417,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             ep = next((e for e in episodes if e.get("episodeId") == eid), None)
             if ep is not None:
                 persistence.upsert_episode(ep)
-        return bool(changed) or bool(healed)
+        # Settle any episode stuck at the transient ``auto_landing`` now that its trailer'd commit
+        # has been (re)attached above — promote it to landed so the lifecycle is coherent.
+        from openfde import autoland as _autoland
+        settled = False
+        for ep in persistence.load_episodes():
+            if _autoland.heal_landing_status(ep):
+                persistence.upsert_episode(ep)
+                settled = True
+        return bool(changed) or bool(healed) or settled
 
     _rail_refresh = {"running": False, "again": False, "mtime": 0.0, "head": None}
 

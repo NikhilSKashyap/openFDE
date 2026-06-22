@@ -223,9 +223,13 @@ def summarize_episode(episode: dict, *, invoke=None, providers=None, timeout: in
 
 def deterministic_story_facts(episode: dict) -> dict:
     """Story facts from the deterministic signal extraction (the guaranteed fallback)."""
-    from openfde.episode_summary import is_operational
+    from openfde.episode_summary import is_operational, is_intent_graph_episode
     from openfde.prompt_story import _signals
-    operational = bool(episode.get("signal") == "operational" or is_operational(episode.get("prompt") or ""))
+    # A Sketch-First intent run is a product build by construction — its step text ("read the
+    # data") trips the operational heuristics, so never let the deterministic pass bury it.
+    operational = (False if is_intent_graph_episode(episode)
+                   else bool(episode.get("signal") == "operational"
+                             or is_operational(episode.get("prompt") or "")))
     deferred, abandoned = [], []
     # storyFacts carry only the strong lanes; next/watch (and the deferred revisit
     # trigger) are re-derived from the raw text by build_prompt_graph at read time.
@@ -316,6 +320,32 @@ def enrich(episode: dict, *, invoke=None, providers=None, timeout: int = 30, all
             episode["summaryConfidence"] = clean["confidence"]
             episode["signal"] = "operational" if clean["operational"] else "product"
             logger.info("LLM-summarized %s via %s → %r", episode.get("episodeId"), clean["summarySource"], clean["title"])
+
+    # 3) Sketch-First law (authoritative, after every other pass): an intent-graph run is a
+    # PRODUCT build. Its step text trips the operational/scaffolding heuristics, so the
+    # deterministic pass mislabels it operational + "Update <scope>". Enforce product here so
+    # neither that fallback nor a stray LLM verdict can bury the run; replace ONLY a generic
+    # deterministic title (a real LLM upgrade is kept).
+    from openfde.episode_summary import intent_title_summary
+    intent = intent_title_summary(episode)
+    if intent:
+        if episode.get("signal") != "product":
+            episode["signal"] = "product"
+            changed = True
+        sf = episode.get("storyFacts")
+        if isinstance(sf, dict) and sf.get("operational"):
+            sf["operational"] = False
+            if not sf.get("concepts"):
+                sf["concepts"] = [episode.get("title") or intent[0]]
+            changed = True
+        if episode.get("summarySource") in (None, "deterministic"):
+            t, s = intent
+            if episode.get("title") != t:
+                episode["title"] = t
+                changed = True
+            if episode.get("summary") != s:
+                episode["summary"] = s
+                changed = True
     return changed
 
 

@@ -372,6 +372,70 @@ class IntentLoopStoryNodeTest(unittest.TestCase):
         self.assertIsNone(prompt_story._intent_node({"provider": "github"}, {}))
 
 
+class IntentEpisodeClassificationTest(unittest.TestCase):
+    """An intent-graph run is a PRODUCT build, titled from its steps — NOT operational
+    'Update <scope>'. The flattened 'Intent: read the data → …' prompt trips the
+    shell/scaffolding heuristics ('read' is a scaffolding word), so the title/summary/signal
+    must come from the structured steps, deterministically (no LLM required)."""
+
+    def _intent_ep(self, **over):
+        ep = {"episodeId": "e_int", "prompt": "Intent: read the data → drop nan values → train a classifier",
+              "files": ["openfde_work/intent_demo.py"],
+              "intentSource": {"kind": "intent-graph",
+                               "ref": "read the data → drop nan values → train a classifier",
+                               "steps": [{"boxId": "a", "title": "read the data"},
+                                         {"boxId": "b", "title": "drop nan values"},
+                                         {"boxId": "c", "title": "train a classifier"}]}}
+        ep.update(over)
+        return ep
+
+    def test_intent_title_summary_from_steps(self):
+        from openfde.episode_summary import intent_title_summary, is_intent_graph_episode
+        title, summary = intent_title_summary(self._intent_ep())
+        self.assertTrue(is_intent_graph_episode(self._intent_ep()))
+        self.assertIn("Read the data", title)
+        self.assertIn("train a classifier", title)
+        self.assertIn("read the data", summary)
+        self.assertIsNone(intent_title_summary({"prompt": "git log"}))
+
+    def test_deterministic_story_facts_never_operational_for_intent(self):
+        from openfde.episode_llm_summary import deterministic_story_facts
+        self.assertFalse(deterministic_story_facts(self._intent_ep())["operational"])
+
+    def test_enrich_corrects_a_deterministically_mislabelled_intent_episode(self):
+        # The exact bad state the deterministic fallback produced before the fix.
+        from openfde.episode_llm_summary import enrich
+        ep = self._intent_ep(title="Update openfde_work", summary="Changes under openfde_work.",
+                             signal="operational", summarySource="deterministic", summaryLlmTried=True,
+                             storyFacts={"operational": True, "concepts": []})
+        changed = enrich(ep, allow_llm=False)
+        self.assertTrue(changed)
+        self.assertEqual(ep["signal"], "product")
+        self.assertNotEqual(ep["title"], "Update openfde_work")
+        self.assertIn("Read the data", ep["title"])
+        self.assertFalse(ep["storyFacts"]["operational"])
+
+    def test_enrich_preserves_a_real_llm_title(self):
+        # A settled, persisted LLM upgrade (summarySource is a provider, fingerprint fresh) is
+        # kept across a re-enrich — we only replace the generic deterministic fallback title.
+        from openfde.episode_llm_summary import enrich, fingerprint
+        ep = self._intent_ep(title="Classifier Training Pipeline", summary="A real summary.",
+                             signal="product", summarySource="codex-local", summaryLlmTried=True,
+                             summaryConfidence=0.9,
+                             storyFacts={"operational": False, "concepts": ["Classifier Training Pipeline"]})
+        ep["summaryFingerprint"] = fingerprint(ep)     # fresh → a re-enrich must not reset it
+        enrich(ep, allow_llm=False)
+        self.assertEqual(ep["title"], "Classifier Training Pipeline")
+        self.assertEqual(ep["signal"], "product")
+
+    def test_enrich_episode_first_paint_is_product(self):
+        from openfde.episode_summary import enrich_episode
+        ep = self._intent_ep()
+        enrich_episode(ep, 0)
+        self.assertEqual(ep["signal"], "product")
+        self.assertIn("Read the data", ep["title"])
+
+
 class MergeStepFilesTest(unittest.TestCase):
     """Gap 1: an intent-graph episode stores each step's produced files (keyed by boxId),
     computed only after the run, without disturbing the step's other fields."""

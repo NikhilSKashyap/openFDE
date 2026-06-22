@@ -323,5 +323,31 @@ class LandOnVerifyTest(unittest.TestCase):
         self.assertNotIn(".openfde/FLOW.md", self._landed_files())
 
 
+class HealLandingStatusTest(unittest.TestCase):
+    """A land interrupted between its commit and the final `landed` write leaves the episode
+    stuck at the transient `auto_landing`; once the commit is (re)attached, the read-time heal
+    must settle it to `landed` so the lifecycle is coherent (and reclassify it product)."""
+
+    def test_stuck_autolanding_with_commits_promotes_to_landed(self):
+        ep = {"status": "auto_landing", "commitShas": ["abc123"],
+              "signal": "operational", "storyFacts": {"operational": True}}
+        self.assertTrue(autoland.heal_landing_status(ep))
+        self.assertEqual(ep["status"], "landed")
+        self.assertEqual(ep["signal"], "product")            # evidence overrides classification
+        self.assertFalse(ep["storyFacts"]["operational"])
+        self.assertEqual(ep["reclassifiedBy"], "landed-commits")
+
+    def test_autolanding_without_commits_is_left_alone(self):
+        # No commit yet → still genuinely landing; do not force a premature `landed`.
+        ep = {"status": "auto_landing", "commitShas": []}
+        self.assertFalse(autoland.heal_landing_status(ep))
+        self.assertEqual(ep["status"], "auto_landing")
+
+    def test_already_landed_is_idempotent(self):
+        ep = {"status": "landed", "commitShas": ["abc123"], "signal": "product"}
+        self.assertFalse(autoland.heal_landing_status(ep))
+        self.assertEqual(ep["status"], "landed")
+
+
 if __name__ == "__main__":
     unittest.main()

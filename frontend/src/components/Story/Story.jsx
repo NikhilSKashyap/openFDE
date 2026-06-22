@@ -816,6 +816,20 @@ function EpisodeBox({ node, isNow, cont, lane, selected, onClick }) {
         <span className="tellmap-title">{node.title || 'Untitled'}</span>
         {isNow && <span className="tellmap-now-pill">now</span>}
       </div>
+      {/* Sketch-First: a compact one-line trail of the intent steps (the drawer is the rich
+          view). Violet, like the intent boxes the run grounded. */}
+      {(node.intent?.steps || []).length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 4, margin: '1px 0 2px',
+          fontSize: 10, color: 'var(--accent)', lineHeight: 1.3,
+          overflow: 'hidden', whiteSpace: 'nowrap',
+        }} title={node.intent.steps.map(s => (typeof s === 'string' ? s : s.title)).join('  →  ')}>
+          <span style={{ flexShrink: 0, opacity: 0.85 }}>✎ sketch</span>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {node.intent.steps.map(s => (typeof s === 'string' ? s : s.title)).join(' → ')}
+          </span>
+        </div>
+      )}
       <div className="tellmap-summary">{node.summary || '—'}</div>
       <div className="tellmap-foot">
         {node.commitCount > 0 && <span className="tellmap-chip" title={`${node.commitCount} commit(s)`}>⎇ {node.commitCount}</span>}
