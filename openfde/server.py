@@ -3782,8 +3782,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         if intent_graph.get("present"):
             summary = intent_graph.get("summary") or "intent graph"
             user_prompt = f"Intent: {summary}" + (f" — {user_request}" if user_request else "")
+            steps = intent_graph.get("steps") or []
             intent_source = {"kind": "intent-graph", "ref": summary,
-                             "stepCount": len(intent_graph.get("steps") or [])}
+                             "stepCount": len(steps),
+                             "steps": [{"boxId": s.get("boxId"), "title": s.get("title")}
+                                       for s in steps]}
         else:
             user_prompt = user_request or "Implement the selected architecture scope."
 
@@ -4000,6 +4003,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             "verifier": outcome.get("verifier"),
             "filesChanged": changed_files,
             "intentLinks": intent_links,
+            # Sketch-First v2: tell the UI this ran in the generated workspace (a
+            # correct path for intent-only sketches, not an error/fallback).
+            "generatedScope": generated_scope,
+            "workspace": GENERATED_WORKSPACE if generated_scope else None,
         })
 
     async def post_council_cancel(request: web.Request) -> web.Response:

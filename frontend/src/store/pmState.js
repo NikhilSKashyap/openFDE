@@ -118,6 +118,40 @@ function pmReducer(state, action) {
       if (additions.length) clone().push(...additions)
       return next || state          // same reference when nothing changed → no churn
     }
+    // Sketch-First v2: mirror each intent step into one OpenPM card, grouped by the
+    // sketch tag and linked to its intent box + generated files. Idempotent by
+    // (episode|run + boxId) so a re-run advances the SAME cards (doing → testing →
+    // done) instead of duplicating. Column reflects real state — never fake "done":
+    //   committed → done · files but not yet landed → testing · else → doing.
+    case 'SYNC_INTENT_STEPS': {
+      const key = action.episodeId || action.runId || ''
+      const tag = action.tag || ''
+      const column = action.committed ? 'done' : (action.awaitingReview ? 'testing' : 'doing')
+      const vstatus = action.committed ? 'passed' : 'pending'
+      const byIdent = new Map()
+      state.forEach((t, i) => { if (t.intentKey) byIdent.set(t.intentKey, i) })
+      let next = null
+      const clone = () => (next || (next = state.slice()))
+      const additions = []
+      for (const s of action.steps || []) {
+        const ident = `${key}:${s.boxId}`
+        const fields = {
+          title: s.title || 'intent step', files: s.files || [], linkedBoxIds: [s.boxId],
+          column, verificationStatus: vstatus,
+          episodeId: action.episodeId || null, commitSha: action.commitSha || null,
+          episodeTag: tag, promptTitle: tag, promptLabel: tag,
+          source: 'intent-graph', intentKey: ident,
+        }
+        if (byIdent.has(ident)) {
+          const idx = byIdent.get(ident)
+          clone()[idx] = { ...state[idx], ...fields }
+        } else {
+          additions.push({ id: makeId(), description: '', ...fields })
+        }
+      }
+      if (additions.length) clone().push(...additions)
+      return next || state
+    }
     case 'UPDATE_TASK': {
       return state.map(t => t.id === action.id ? { ...t, ...action.fields } : t)
     }

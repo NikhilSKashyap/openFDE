@@ -1326,6 +1326,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowMode, storySelKey, storyArchKey])
 
+  // Sketch-First: selecting a single intent box spotlights the files it produced —
+  // amber on the canvas, unrelated dimmed — using the existing spotlight language.
+  // Only ever sets/clears the 'intent' spotlight, so commit/episode spotlights stand.
+  const intentSelKey = [...(canvasState.selectedIds ?? [])].join(',')
+  useEffect(() => {
+    const ids = [...(canvasState.selectedIds ?? [])]
+    const box = ids.length === 1 ? canvasState.boxes.find(b => b.id === ids[0]) : null
+    const files = (box?.kind === 'intent' && Array.isArray(box.implementationFiles))
+      ? box.implementationFiles : []
+    // Syncing shared spotlight state from selection — only ever touches the 'intent'
+    // spotlight (returns the same ref otherwise, so commit/episode spotlights stand).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCanvasSpotlight(s => (
+      files.length
+        ? { kind: 'intent', label: box.title || 'intent step',
+            count: files.length, files: [], amberFiles: files, summary: '' }
+        : (s?.kind === 'intent' ? null : s)
+    ))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intentSelKey])
+
   // ("Explain this" retired — replaced by canvas-native Ask Concept, Step 37a.)
 
   // Select (or clear) the inspected file/function entity. Passing a null kind
@@ -1672,6 +1693,10 @@ export default function App() {
       commitSha: res.commit ? res.commit.sha : null,
       approval: res.approval || null,
       fromRun: res.runId,
+      // Sketch-First v2: the generated workspace is the correct path for an
+      // intent-only sketch — surfaced calmly in the result, not as an error.
+      generatedScope: !!res.generatedScope,
+      workspace: res.workspace || null,
     }
     setAgentMessages(prev => [...prev, ...stageMsgs, resultMsg])
     if (res.commit && res.commit.committed) {
@@ -1688,7 +1713,23 @@ export default function App() {
     // Sketch-First Intent: link the run's files back onto the intent steps it
     // implemented (persists via the debounced canvas save → shows a count badge).
     if (res.intentLinks && Object.keys(res.intentLinks).length) {
-      _rawCanvasDispatch({ type: 'SET_IMPL_FILES', links: res.intentLinks, runId: res.runId })
+      const links = res.intentLinks
+      _rawCanvasDispatch({ type: 'SET_IMPL_FILES', links, runId: res.runId })
+      // Mirror the intent steps into OpenPM — one grouped card per step, linked to
+      // its box + generated files (column reflects committed / pending-land / doing).
+      const steps = canvasState.boxes
+        .filter(b => b.kind === 'intent' && links[b.id])
+        .map(b => ({ boxId: b.id, title: b.title || 'intent step', files: links[b.id].files || [] }))
+      if (steps.length) {
+        pmDispatch({
+          type: 'SYNC_INTENT_STEPS', steps,
+          episodeId: res.episodeId || null, runId: res.runId,
+          tag: steps.map(s => s.title).join(' → '),
+          committed: !!(res.commit && res.commit.committed),
+          commitSha: res.commit ? res.commit.sha : null,
+          awaitingReview: !!res.awaitingReview,
+        })
+      }
     }
     getBoxSpecs().then(s => { if (s && typeof s === 'object') setBoxSpecs(s) })
   }

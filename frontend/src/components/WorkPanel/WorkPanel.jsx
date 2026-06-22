@@ -160,6 +160,11 @@ export default function WorkPanel({
               {lastResult?.reportSummary && !lastResult?.cancelled && (
                 <p className="work-sub">{lastResult.reportSummary}</p>
               )}
+              {lastResult?.generatedScope && lastResult?.workspace && !lastResult?.cancelled && (
+                <div className="work-scope">
+                  Generated workspace: <code>{lastResult.workspace}</code>
+                </div>
+              )}
               {(lastResult?.writes?.length > 0) && (
                 <div className="work-files">
                   {lastResult.writes.slice(0, 8).map(f => <code key={f} className="work-file">{f}</code>)}

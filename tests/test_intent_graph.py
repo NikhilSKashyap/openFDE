@@ -315,5 +315,32 @@ class WorkspaceAttributionTest(unittest.TestCase):
         self.assertEqual(set(links["b"]["files"]), set(changed))
 
 
+class StorySketchTickTest(unittest.TestCase):
+    """v2: an intent-graph episode carries its sketch into Story as an origin tick."""
+
+    def _ep(self, intent_source):
+        return {"episodeId": "e1", "createdAt": "2026-06-21T00:00:00+00:00",
+                "updatedAt": "2026-06-21T00:00:00+00:00",
+                "files": ["openfde_work/pipeline.py"], "commitShas": [],
+                "intentSource": intent_source}
+
+    def test_intent_graph_episode_emits_sketch_origin_tick(self):
+        from openfde import prompt_story
+        ep = self._ep({"kind": "intent-graph", "ref": "read data → clean → train",
+                       "steps": [{"boxId": "a", "title": "read data"},
+                                 {"boxId": "b", "title": "clean"},
+                                 {"boxId": "c", "title": "train"}]})
+        ticks = prompt_story._episode_ticks(ep)
+        sketch = [t for t in ticks if t["kind"] == "sketch"]
+        self.assertEqual(len(sketch), 1)
+        self.assertIn("read data → clean → train", sketch[0]["label"])
+        self.assertIn("read data", sketch[0]["detail"])
+
+    def test_non_intent_episode_has_no_sketch_tick(self):
+        from openfde import prompt_story
+        ticks = prompt_story._episode_ticks(self._ep({"provider": "github", "issueNumber": 5}))
+        self.assertEqual([t for t in ticks if t["kind"] == "sketch"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

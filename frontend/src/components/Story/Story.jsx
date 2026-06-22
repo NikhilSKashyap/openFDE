@@ -508,6 +508,7 @@ const TICK_KIND = {
   issue:  { color: 'var(--accent-orange)' },
   files:  { color: 'var(--text-muted)' },
   event:  { color: 'var(--accent-orange)' },
+  sketch: { color: 'var(--accent)' },   // intent-graph origin (violet, like intent boxes)
 }
 
 function BridgeTick({ tick, selected, onClick }) {
@@ -629,6 +630,17 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
         )}
         {node.pr && row('pull request', <a href={node.pr.url} target="_blank" rel="noreferrer">PR #{node.pr.number} ↗</a>)}
         {node.issue && row('issue', <a href={node.issue.url} target="_blank" rel="noreferrer">#{node.issue.number} ↗</a>)}
+        {node.intent && (
+          <div className="tlv3-drawer-section">
+            <div className="tlv3-drawer-k">sketched</div>
+            <div className="tlv3-drawer-summary">User sketched: {node.intent.sketch}</div>
+            {(node.intent.steps || []).map((s, i) => (
+              <div key={i} className="tlv3-drawer-row">
+                <span className="tlv3-drawer-v">{i + 1}. {s}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {commits.length > 0 && (
           <div className="tlv3-drawer-section">
             <div className="tlv3-drawer-k">commits</div>
@@ -705,6 +717,17 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
         {detail.tick.detail && <div className="tlv3-drawer-summary">{detail.tick.detail}</div>}
         {row('episode', `${node.tag} · ${node.title}`)}
         {detail.tick.url && row('link', <a href={detail.tick.url} target="_blank" rel="noreferrer">open on GitHub ↗</a>)}
+      </>
+    )
+  } else if (detail.kind === 'sketch') {
+    const sFiles = node.files || []
+    body = (
+      <>
+        {head('sketch')}
+        <div className="tlv3-drawer-title">{detail.tick.label}</div>
+        {detail.tick.detail && <div className="tlv3-drawer-summary">User sketched: {detail.tick.detail}</div>}
+        {row('episode', `${node.tag} · ${node.title}`)}
+        {sFiles.length > 0 && row('linked files', `${sFiles.length}: ${sFiles.slice(0, 6).join(', ')}`)}
       </>
     )
   } else if (detail.kind === 'verify') {

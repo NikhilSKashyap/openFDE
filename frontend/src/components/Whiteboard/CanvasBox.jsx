@@ -1,5 +1,11 @@
 const PORTS = ['n', 'e', 's', 'w']
 
+function baseName(p) {
+  const s = String(p || '')
+  const i = s.lastIndexOf('/')
+  return i >= 0 ? s.slice(i + 1) : s
+}
+
 function portCoords(w, h, port) {
   switch (port) {
     case 'n': return { cx: w / 2, cy: 0 }
@@ -85,14 +91,30 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
             {prompt}
           </div>
           {implFiles.length > 0 && (
-            <div style={{
-              flexShrink: 0, alignSelf: 'flex-start',
-              fontSize: 10, fontWeight: 600, color: 'var(--accent)',
-              background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
-              border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
-              borderRadius: 4, padding: '1px 6px',
-            }}>
-              {`Implemented by ${implFiles.length} file${implFiles.length === 1 ? '' : 's'}`}
+            <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{
+                alignSelf: 'flex-start',
+                fontSize: 10, fontWeight: 600, color: 'var(--accent)',
+                background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
+                borderRadius: 4, padding: '1px 6px',
+              }}>
+                {`${implFiles.length} file${implFiles.length === 1 ? '' : 's'}`}
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.35 }}>
+                {implFiles.slice(0, 3).map(f => (
+                  <span key={f} title={f} style={{
+                    fontSize: 10, color: 'var(--text-muted)',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{baseName(f)}</span>
+                ))}
+                {implFiles.length > 3 && (
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    +{implFiles.length - 3} more
+                  </span>
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -591,6 +591,13 @@ def _episode_ticks(ep: dict) -> list:
         ticks.append({"kind": "issue", "label": f"issue #{src['issueNumber']}",
                       "url": src.get("url") or "", "timestamp": ep.get("createdAt"),
                       "detail": src.get("title") or ""})
+    # Sketch-First: an episode born from an intent graph carries its sketch as origin.
+    if src.get("kind") == "intent-graph" and src.get("ref"):
+        steps = [s.get("title", "") for s in (src.get("steps") or []) if s.get("title")]
+        ticks.append({"kind": "sketch",
+                      "label": f"sketched: {src['ref']}"[:60],
+                      "timestamp": ep.get("createdAt"),
+                      "detail": (" → ".join(steps) or src["ref"])[:200]})
     nfiles = len(ep.get("files") or [])
     if nfiles:
         ticks.append({"kind": "files", "label": f"{nfiles} file{'s' if nfiles != 1 else ''}",
@@ -679,6 +686,11 @@ def build_story_timeline(episodes: list, concepts: list, edges: list = None,
             "issue": ({"number": src.get("issueNumber"), "url": src.get("url")}
                       if src.get("provider") == "github" and src.get("issueNumber") is not None
                       else None),
+            # Sketch-First: the intent graph the episode was born from (origin on the
+            # episode itself, so it shows even for a lone episode with no bridge).
+            "intent": ({"sketch": src.get("ref"),
+                        "steps": [s.get("title") for s in (src.get("steps") or []) if s.get("title")]}
+                       if src.get("kind") == "intent-graph" and src.get("ref") else None),
             "branchesAbove": ups, "branchesBelow": downs, "branchOverflow": overflow,
         })
 
@@ -748,6 +760,9 @@ def _nv_node(ep: dict, lane: str, reason: str, confidence: str) -> dict:
         "issue": ({"number": src.get("issueNumber"), "url": src.get("url")}
                   if src.get("provider") == "github" and src.get("issueNumber") is not None
                   else None),
+        "intent": ({"sketch": src.get("ref"),
+                    "steps": [s.get("title") for s in (src.get("steps") or []) if s.get("title")]}
+                   if src.get("kind") == "intent-graph" and src.get("ref") else None),
         "lane": lane, "parentEpisodeId": None, "continuesEpisodeId": None,
         "narrativeReason": reason, "confidence": confidence,
     }
