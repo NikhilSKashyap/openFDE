@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from openfde.prompt_capture import (
-    capture_key_exists, claude_multirepo_context_guard,
+    attributed_session_cwd, capture_key_exists, claude_multirepo_context_guard,
     codex_prompt_text, codex_session_id_from_path, edit_files_under, repo_file_evidence,
     is_codex_human_prompt, is_human_prompt, read_new_lines, same_repo, _claude_transcripts,
     _codex_init_ctx, codex_transcripts, _prompt_record,
@@ -164,7 +164,10 @@ def _historical_episode(root, prompt: dict, edited: list, commit, kind: str) -> 
         status, files, confidence = "needs_manual_land", sorted(edited), "needs_review"
     else:
         status, files, confidence = "open", [], "discussion"
-    return {
+    # Same cross-cwd attribution as live capture: trust the watched repo when the prompt's
+    # files are repo-relative under it, even if the transcript cwd points elsewhere.
+    session_cwd, source_cwd = attributed_session_cwd(root, prompt.get("cwd"), files)
+    ep = {
         "episodeId": "episode_" + secrets.token_hex(6),
         "createdAt": prompt.get("timestamp") or _now(), "updatedAt": _now(),
         "prompt": prompt.get("text", ""), "kind": kind, "status": status,
@@ -172,9 +175,12 @@ def _historical_episode(root, prompt: dict, edited: list, commit, kind: str) -> 
         "commitShas": ([commit["sha"]] if commit else []),
         "files": files, "summary": "", "source": "openfde-backfill",
         "captureKey": prompt.get("key"), "sessionId": prompt.get("sessionId"),
-        "sessionCwd": prompt.get("cwd"), "historical": True,
+        "sessionCwd": session_cwd, "historical": True,
         "historicalSource": kind, "backfillConfidence": confidence,
     }
+    if source_cwd:
+        ep["sourceCwd"] = source_cwd
+    return ep
 
 
 def backfill_historical(root, persistence, *, home=None, max_import: int = _MAX_IMPORT) -> dict:

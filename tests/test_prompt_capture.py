@@ -441,5 +441,116 @@ class _NullManager:
         return None
 
 
+# ── sessionCwd attribution: trust the watched repo over the transcript cwd ────
+_R = "/Users/x/Downloads/openfde"
+_FOREIGN = "/Users/x/Downloads/interview"
+
+
+class AttributedSessionCwdTest(unittest.TestCase):
+    """attributed_session_cwd follows the WORK (files under the watched repo), not the cwd of
+    the agent process (which can run from a sibling dir)."""
+
+    def test_same_repo_keeps_cwd(self):
+        self.assertEqual(pc.attributed_session_cwd(_R, _R, []), (_R, None))
+
+    def test_foreign_cwd_with_repo_relative_files_trusts_repo(self):
+        sc, src = pc.attributed_session_cwd(_R, _FOREIGN, ["frontend/src/App.jsx", "openfde/server.py"])
+        self.assertEqual((sc, src), (_R, _FOREIGN))
+
+    def test_foreign_cwd_without_files_keeps_cwd(self):
+        self.assertEqual(pc.attributed_session_cwd(_R, _FOREIGN, []), (_FOREIGN, None))
+
+    def test_foreign_cwd_with_absolute_file_keeps_cwd(self):
+        self.assertEqual(pc.attributed_session_cwd(_R, _FOREIGN, ["/elsewhere/x.py"]), (_FOREIGN, None))
+
+    def test_mixed_files_one_outside_keeps_cwd(self):
+        # ANY file that escapes the repo makes it ambiguous → never guess.
+        self.assertEqual(pc.attributed_session_cwd(_R, _FOREIGN, ["frontend/App.jsx", "/abs/y.py"]),
+                         (_FOREIGN, None))
+
+
+class HealSessionCwdTest(unittest.TestCase):
+    def _ep(self, **kw):
+        e = {"episodeId": "P159", "status": "needs_manual_land", "sessionCwd": _FOREIGN,
+             "files": ["frontend/src/App.jsx", "openfde/server.py"],
+             "createdAt": "2026-06-21T00:00:00+00:00"}
+        e.update(kw)
+        return e
+
+    def test_heals_repo_relative_and_preserves_raw(self):
+        ep = self._ep()
+        healed = pc.heal_session_cwd([ep], _R)
+        self.assertEqual([e["episodeId"] for e in healed], ["P159"])
+        self.assertEqual(ep["sessionCwd"], _R)
+        self.assertEqual(ep["sourceCwd"], _FOREIGN)
+
+    def test_does_not_heal_absolute_file_episode(self):
+        ep = self._ep(files=["/elsewhere/x.py"])
+        self.assertEqual(pc.heal_session_cwd([ep], _R), [])
+        self.assertEqual(ep["sessionCwd"], _FOREIGN)
+        self.assertNotIn("sourceCwd", ep)
+
+    def test_does_not_heal_mixed_files(self):
+        ep = self._ep(files=["frontend/App.jsx", "/abs/y.py"])
+        self.assertEqual(pc.heal_session_cwd([ep], _R), [])
+        self.assertEqual(ep["sessionCwd"], _FOREIGN)
+
+    def test_does_not_heal_fileless_episode(self):
+        ep = self._ep(files=[])
+        self.assertEqual(pc.heal_session_cwd([ep], _R), [])
+
+    def test_leaves_already_correct_episode(self):
+        ep = self._ep(sessionCwd=_R)
+        self.assertEqual(pc.heal_session_cwd([ep], _R), [])
+        self.assertNotIn("sourceCwd", ep)
+
+    def test_idempotent_second_pass_no_change(self):
+        ep = self._ep()
+        pc.heal_session_cwd([ep], _R)
+        self.assertEqual(pc.heal_session_cwd([ep], _R), [])
+        self.assertEqual(ep["sourceCwd"], _FOREIGN)
+
+
+class CaptureEpisodeAttributionTest(unittest.TestCase):
+    def test_cross_cwd_capture_trusts_watched_repo(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            prompt = {"text": "do it", "cwd": "/foreign/dir", "key": "k", "sessionId": "s",
+                      "timestamp": "2026-06-21T00:00:00Z"}
+            ep = pc.make_capture_episode(root, prompt, files=["frontend/App.jsx"])
+            self.assertEqual(ep["sessionCwd"], str(root))
+            self.assertEqual(ep["sourceCwd"], "/foreign/dir")
+
+    def test_same_repo_capture_keeps_cwd_without_sourceCwd(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            prompt = {"text": "x", "cwd": str(root), "key": "k2", "sessionId": "s"}
+            ep = pc.make_capture_episode(root, prompt, files=[])
+            self.assertEqual(ep["sessionCwd"], str(root))
+            self.assertNotIn("sourceCwd", ep)
+
+
+class HealThenReconcileTest(unittest.TestCase):
+    """The episode reconciles ONLY because its sessionCwd was corrected — the same-repo gate in
+    reconcile_manual_land is unchanged (refuses before heal, accepts after)."""
+
+    def test_reconcile_only_succeeds_after_heal(self):
+        from openfde import episode_commits as ec
+        ep = {"episodeId": "P159", "status": "needs_manual_land", "sessionCwd": _FOREIGN,
+              "files": ["frontend/src/App.jsx", "openfde/server.py"],
+              "createdAt": "2026-06-21T00:00:00+00:00"}
+        commit = {"sha": "deadbee", "timestamp": "2026-06-21T02:00:00+00:00",
+                  "files": ["frontend/src/App.jsx", "openfde/server.py", "x.py"]}
+        # Before healing: foreign sessionCwd → the same-repo gate correctly refuses.
+        self.assertEqual(ec.reconcile_manual_land([commit], [ep], watched_root=_R), {})
+        self.assertEqual(ep["status"], "needs_manual_land")
+        # Heal the attribution, then reconcile — now it attaches through the SAME gate.
+        pc.heal_session_cwd([ep], _R)
+        changed = ec.reconcile_manual_land([commit], [ep], watched_root=_R)
+        self.assertEqual(set(changed), {"P159"})
+        self.assertEqual(ep["status"], "landed")
+        self.assertEqual(ep["commitShas"], ["deadbee"])
+
+
 if __name__ == "__main__":
     unittest.main()

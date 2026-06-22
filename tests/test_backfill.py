@@ -262,5 +262,26 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(self._backfilled(), [])
 
 
+class BackfillAttributionTest(unittest.TestCase):
+    """A backfilled episode follows the same cross-cwd attribution as live capture: edits under
+    the watched repo win over a foreign transcript cwd, raw cwd preserved as sourceCwd."""
+
+    def test_cross_cwd_backfill_trusts_watched_repo(self):
+        from openfde.backfill import _historical_episode
+        prompt = {"text": "x", "cwd": "/foreign", "key": "k", "sessionId": "s",
+                  "timestamp": "2026-06-21T00:00:00Z"}
+        ep = _historical_episode("/repo", prompt, ["frontend/App.jsx"], None, "claude-code")
+        self.assertEqual(ep["sessionCwd"], "/repo")
+        self.assertEqual(ep["sourceCwd"], "/foreign")
+        self.assertEqual(ep["status"], "needs_manual_land")
+
+    def test_absolute_file_backfill_keeps_cwd(self):
+        from openfde.backfill import _historical_episode
+        prompt = {"text": "x", "cwd": "/foreign", "key": "k", "sessionId": "s"}
+        ep = _historical_episode("/repo", prompt, ["/elsewhere/x.py"], None, "claude-code")
+        self.assertEqual(ep["sessionCwd"], "/foreign")
+        self.assertNotIn("sourceCwd", ep)
+
+
 if __name__ == "__main__":
     unittest.main()

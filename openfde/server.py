@@ -2338,6 +2338,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         rail-attribution path — independent of the heavy, sometimes-starved full-rail read — so a
         trailer-less land (the P119 gap) shows its commit + lands the episode without it."""
         episodes = persistence.load_episodes()
+        # Heal polluted sessionCwd FIRST — an episode whose transcript cwd points outside the
+        # watched repo but whose files are repo-relative under it provably belongs to this repo
+        # (a cross-cwd agent session). Correcting the attribution is what lets the same-repo gate
+        # below accept its manual commit; healing itself never attaches a commit.
+        from openfde import prompt_capture
+        healed = prompt_capture.heal_session_cwd(episodes, path)
+        for ep in healed:
+            persistence.upsert_episode(ep)
         attached = {s for e in episodes for s in (e.get("commitShas") or [])}
         # Candidate = any commit whose sha is not yet on an episode's commitShas — trailer'd commits
         # INCLUDED. A trailer'd commit made outside autoland (manual/external land) still needs its
@@ -2347,7 +2355,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                  for c in git_timeline(path, limit=40)[:20]
                  if c.get("sha") and c["sha"] not in attached]
         if not cands:
-            return False
+            return bool(healed)
         changed = episode_commits_mod.reconcile_authored_episodes(cands, episodes, watched_root=path)
         # A needs_manual_land episode whose landing commit was made OUTSIDE the OpenFDE land path
         # (manual `git commit`, no trailer, human-authored) is refused by the path above (author +
@@ -2360,7 +2368,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             ep = next((e for e in episodes if e.get("episodeId") == eid), None)
             if ep is not None:
                 persistence.upsert_episode(ep)
-        return bool(changed)
+        return bool(changed) or bool(healed)
 
     _rail_refresh = {"running": False, "again": False, "mtime": 0.0, "head": None}
 

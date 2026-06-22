@@ -206,6 +206,74 @@ def same_repo(cwd, root) -> bool:
     return bool(a) and a == canonical_repo_root(root)
 
 
+def _repo_relative_under(f, root) -> bool:
+    """True when ``f`` is a RELATIVE path (not absolute, no ``..`` escape) that resolves to a
+    location under ``root`` — i.e. a repo-relative episode file like ``frontend/src/App.jsx``.
+    An absolute path or one that escapes the repo returns False (the cross-repo ambiguity guard)."""
+    s = str(f or "").strip()
+    if not s or os.path.isabs(s):
+        return False
+    root_real = os.path.realpath(str(root))
+    target = os.path.realpath(os.path.join(root_real, s))
+    try:
+        return os.path.commonpath([target, root_real]) == root_real
+    except ValueError:                       # different drives / unrelated roots
+        return False
+
+
+def attributed_session_cwd(repo_root, raw_cwd, files):
+    """Decide an episode's ``sessionCwd``, trusting the WATCHED repo over the transcript cwd.
+
+    Claude Code records the cwd of the agent *process* — which may run from a sibling directory
+    (e.g. an agent launched in ``/Downloads/interview`` whose edits land in the watched
+    ``/Downloads/openfde``). Attribution must follow the WORK, not the process, so a captured
+    prompt that edited files under the watched repo is not mis-attributed to a foreign cwd:
+
+      - cwd already resolves to the watched repo → keep it (the working path is unchanged);
+      - cwd is foreign BUT the prompt's files are ALL repo-relative under the watched repo (strong
+        edit evidence) → use the watched repo, and hand back the raw cwd to store as ``sourceCwd``;
+      - cwd is foreign with NO under-repo file evidence → keep the raw cwd (no proof — never guess).
+
+    Returns ``(sessionCwd, sourceCwd | None)``. Pure; never weakens the same-repo gate downstream.
+    """
+    if same_repo(raw_cwd, repo_root):
+        return raw_cwd, None
+    if files and all(_repo_relative_under(f, repo_root) for f in files):
+        return str(repo_root), (raw_cwd or None)
+    return raw_cwd, None
+
+
+def heal_session_cwd(episodes, watched_root) -> list:
+    """Idempotently repair episodes whose ``sessionCwd`` was polluted by the transcript cwd.
+
+    An episode stored in the watched repo's ``episodes.json`` whose ``sessionCwd`` is foreign but
+    whose files are ALL repo-relative under the watched repo provably belongs to that repo (the
+    edits are here; only the agent's process ran elsewhere). Rewrite ``sessionCwd`` → the watched
+    repo and preserve the old value as ``sourceCwd``. Left untouched: episodes with no files, an
+    already-correct ``sessionCwd``, or ANY absolute / escaping file (ambiguous cross-repo capture
+    stays behind the gate). This NEVER attaches a commit — :func:`reconcile_manual_land` does that
+    afterward, through its unchanged same-repo + coverage + uniqueness gates.
+
+    Mutates matching episodes in place; returns the list of changed episodes.
+    """
+    root_str = str(watched_root)
+    changed = []
+    for ep in episodes:
+        files = ep.get("files") or []
+        if not files:
+            continue                                   # no file evidence → don't guess
+        sc = ep.get("sessionCwd")
+        if sc and same_repo(sc, watched_root):
+            continue                                   # already attributed to the watched repo
+        if not all(_repo_relative_under(f, watched_root) for f in files):
+            continue                                   # absolute/foreign file → ambiguous, leave it
+        if sc and not ep.get("sourceCwd"):
+            ep["sourceCwd"] = sc                        # preserve the raw transcript cwd
+        ep["sessionCwd"] = root_str
+        changed.append(ep)
+    return changed
+
+
 def claude_multirepo_context_guard(prompt: dict, file_evidence, root) -> bool:
     """REMOVABLE compatibility shim. Claude Code can expose MULTIPLE repo contexts in a
     single session (especially under ~/Claude/Projects), so a prompt's cwd or a turn's
@@ -334,7 +402,10 @@ def make_capture_episode(repo_root, prompt: dict, files=None, status="open",
     """
     now = _now()
     files = sorted(files or [])
-    return {
+    # Trust the watched repo over the transcript cwd when the prompt's edits are under it
+    # (a cross-cwd agent session) — see attributed_session_cwd.
+    session_cwd, source_cwd = attributed_session_cwd(repo_root, prompt.get("cwd"), files)
+    ep = {
         "episodeId": "episode_" + secrets.token_hex(6),
         "createdAt": prompt.get("timestamp") or now, "updatedAt": now,
         "prompt": prompt.get("text", ""), "kind": kind,
@@ -342,8 +413,11 @@ def make_capture_episode(repo_root, prompt: dict, files=None, status="open",
         "runIds": [], "eventIds": [], "projectEntryIds": [], "commitShas": [],
         "files": files, "summary": "", "source": "openfde-capture",
         "initialHead": _head(repo_root), "captureKey": prompt.get("key"),
-        "sessionId": prompt.get("sessionId"), "sessionCwd": prompt.get("cwd"),
+        "sessionId": prompt.get("sessionId"), "sessionCwd": session_cwd,
     }
+    if source_cwd:
+        ep["sourceCwd"] = source_cwd
+    return ep
 
 
 # ── Codex adapter ───────────────────────────────────────────────────────
