@@ -435,6 +435,34 @@ class IntentEpisodeClassificationTest(unittest.TestCase):
         self.assertEqual(ep["signal"], "product")
         self.assertIn("Read the data", ep["title"])
 
+    def test_story_concept_uses_intent_title_not_filepath_fallback(self):
+        # The visible Story concept (column card + narrative) must read the intent title, never
+        # the "Update openfde_work" file-path fallback the bad-title repair leaves in
+        # storyFacts.concepts (and which build_prompt_graph would otherwise prefer + then drop
+        # via is_bad_title, leaving NO concept at all).
+        from openfde import prompt_story
+        from openfde.episode_summary import enrich_episode
+        from openfde.episode_llm_summary import enrich
+        ep = self._intent_ep(status="landed", commitShas=["abc1234"], sequence=1, tag="P1")
+        enrich_episode(ep, 0)
+        enrich(ep, allow_llm=False)
+        self.assertEqual((ep.get("storyFacts") or {}).get("concepts"), ["Update openfde_work"])  # stale, ignored
+        g = prompt_story.build_prompt_graph([ep])
+        titles = [c["title"] for c in g["concepts"]]
+        self.assertIn("Read the data → drop nan values → train a classifier", titles)
+        self.assertNotIn("Update openfde_work", titles)
+        # id is derived from the stable title (not the file fallback)
+        self.assertTrue(any("read_the_data" in c["id"] for c in g["concepts"]))
+
+    def test_story_concept_falls_back_to_intent_ref_when_no_title(self):
+        from openfde import prompt_story
+        ep = self._intent_ep(title="", signal="product", sequence=1, tag="P1", status="landed",
+                             storyFacts={"operational": False, "concepts": ["Update openfde_work"]})
+        g = prompt_story.build_prompt_graph([ep])
+        titles = [c["title"] for c in g["concepts"]]
+        self.assertIn("read the data → drop nan values → train a classifier", titles)
+        self.assertNotIn("Update openfde_work", titles)
+
 
 class MergeStepFilesTest(unittest.TestCase):
     """Gap 1: an intent-graph episode stores each step's produced files (keyed by boxId),

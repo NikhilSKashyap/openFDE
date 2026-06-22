@@ -352,12 +352,23 @@ def build_prompt_graph(episodes: list, events: list = None) -> dict:
         if is_operational_episode(ep):
             continue
         from openfde.episode_summary import is_bad_title
-        active_titles = sf.get("concepts") if sf.get("concepts") else (
-            [ep.get("title")] if (ep.get("title") or "").strip() else [])
+        # Sketch-First: an intent-graph run's concept IS the sketch — the curated episode title
+        # (the ordered step flow) or the graph ref — never the deterministic file-path fallback
+        # that can linger in storyFacts.concepts ("Update openfde_work", computed from a bad-title
+        # re-derive). The title is curated, so it also bypasses the is_bad_title / concept-phrase
+        # guards (a step flow like "Read the data → …" trips is_bad_title's "read the" heuristic).
+        intent_src = ep.get("intentSource") or {}
+        is_intent = intent_src.get("kind") == "intent-graph"
+        if is_intent:
+            name = (ep.get("title") or "").strip() or (intent_src.get("ref") or "").strip()
+            active_titles = [name] if name else []
+        else:
+            active_titles = sf.get("concepts") if sf.get("concepts") else (
+                [ep.get("title")] if (ep.get("title") or "").strip() else [])
         primary = None
         for ct in active_titles:
             ct = (ct or "").strip()
-            if is_bad_title(ct) or _is_bad_concept_phrase(ct):
+            if not ct or (not is_intent and (is_bad_title(ct) or _is_bad_concept_phrase(ct))):
                 continue
             c = _ensure(concepts, ct, "active")
             if not c["summary"]:
