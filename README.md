@@ -175,6 +175,14 @@ Two settings, both from the command palette (`⌘K`):
 2. **Assign providers**: `⌘K` → **Open Agent Settings**, then set each role
    (Architect / Senior Dev / Verifier).
 
+The **autonomous council relay** records durable handoff deliveries between
+roles, exposes pending work through `openfde council status --role codex|claude`,
+and treats native wakeup as best-effort only — durable delivery, not the wakeup,
+is the source of truth. See `AGENTS.md` for the full protocol. _Verify:_ running
+`openfde council status --role codex` (or `--role claude`) should print a
+`▶ Resume council handoff ...` / inbox banner when work is pending, or
+`No active council handoff.` on a clean checkout.
+
 ### Codex (local CLI): keyless thinking roles
 
 Set **Architect** and/or **Verifier** to provider **Codex (local CLI)**.
