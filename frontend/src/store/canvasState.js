@@ -9,6 +9,15 @@ function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
+// A module-ish title from a generated file path: 'a/b/ingest.py' -> 'ingest/'. Mirrors the
+// backend's intent_graph.module_title_from_file so live and reloaded canvases agree.
+function moduleTitleFromFile(path) {
+  const base = String(path || '').replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() || ''
+  let stem = base.includes('.') ? base.slice(0, base.lastIndexOf('.')) : base
+  stem = stem.replace(/^_+|_+$/g, '') || stem
+  return stem ? `${stem}/` : (base || 'module/')
+}
+
 const initialState = {
   boxes: [],
   arrows: [],
@@ -150,26 +159,41 @@ function reducer(state, action) {
       }
     }
     case 'SET_IMPL_FILES': {
-      // Post-run link-back: attach a council run's changed files to the intent
-      // boxes it implemented, and mark them `built`. action.links: { boxId:
-      // {files, attribution, confidence} }.
+      // Post-run link-back. action.links: { boxId: {files, attribution, confidence} }.
+      // Intent → architecture IN PLACE: a step with a clear single generated file (per-step
+      // `matched` attribution) BECOMES a module box — drops kind/runState, gains a module title +
+      // linked files, and remembers its sketch in `originIntent`. A step without clear per-step
+      // attribution stays a built intent box (the honest, unchanged path). Mirrors the backend
+      // (intent_graph.architecturize_intent_box) so live and reloaded canvases agree.
       const links = action.links || {}
+      const runId = action.runId || null
+      const episodeId = action.episodeId || null
       return {
         ...state,
-        boxes: state.boxes.map(b =>
-          links[b.id]
-            ? {
-                ...b,
-                runState: 'built',
-                implementationFiles: links[b.id].files || [],
-                implementationMeta: {
-                  attribution: links[b.id].attribution || 'graph',
-                  confidence: links[b.id].confidence ?? null,
-                  runId: action.runId || null,
-                },
-              }
-            : b
-        ),
+        boxes: state.boxes.map(b => {
+          const link = links[b.id]
+          if (!link) return b
+          const files = link.files || []
+          const meta = { attribution: link.attribution || 'graph', confidence: link.confidence ?? null, runId }
+          if (link.attribution === 'matched' && files.length === 1) {
+            // Intent scaffolding → architecture artifact: drop kind/runState (undefined keys are
+            // dropped on save), gain a module title + linked files, remember the sketch.
+            return {
+              ...b,
+              kind: undefined,
+              runState: undefined,
+              title: moduleTitleFromFile(files[0]),
+              linkedFiles: files,
+              implementationFiles: files,
+              implementationMeta: meta,
+              originIntent: {
+                boxId: b.id, title: b.title, prompt: b.prompt,
+                episodeId, runId, files,
+              },
+            }
+          }
+          return { ...b, runState: 'built', implementationFiles: files, implementationMeta: meta }
+        }),
       }
     }
     case 'FREEZE_SELECTED': {

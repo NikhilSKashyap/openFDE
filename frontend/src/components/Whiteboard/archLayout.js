@@ -39,13 +39,13 @@ const SEP_GAP = 56
 export const fileId = (path) => `box:file:${path}`
 export const fnId = (path, name) => `box:function:${path}:${name}`
 
-// Sketch-First: a BUILT intent box is architecture-backed — it grounds into the files the
-// Council wrote (box.implementationFiles). It drills in IN PLACE exactly like a module
-// (chevron + nested file/function children); the only difference is where its file list comes
-// from. `built` mirrors CanvasBox: an explicit runState, or implied by having produced files.
+// A GROUNDED box drills into the specific files the Council wrote (box.implementationFiles), in
+// place, exactly like a module (chevron + nested file/function children) — even before those files
+// are reassimilated into the ArchGraph. This covers BOTH a built intent step AND an intent step that
+// has been transformed into an architecture module (which keeps its implementationFiles + drops its
+// `kind`). Distinct from an ArchGraph-backed module, whose files live in the graph keyed by moduleId.
 export const isIntentDrillBox = (box) =>
-  !!box && box.kind === 'intent'
-  && Array.isArray(box.implementationFiles) && box.implementationFiles.length > 0
+  !!box && Array.isArray(box.implementationFiles) && box.implementationFiles.length > 0
   && (box.runState === 'built' || !box.runState)
 
 const _LANG = { py: 'python', js: 'javascript', jsx: 'javascript', ts: 'typescript',

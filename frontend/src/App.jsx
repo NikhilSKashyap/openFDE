@@ -1774,7 +1774,9 @@ export default function App() {
     // via the debounced canvas save → grounds the box into files; drives ✓ BUILT).
     const links = res.intentLinks || {}
     if (Object.keys(links).length) {
-      _rawCanvasDispatch({ type: 'SET_IMPL_FILES', links, runId: res.runId })
+      // Carries episodeId so a per-step-grounded box that transforms into an architecture module
+      // can record its originIntent (the sketch it came from) for Story/OpenPM traceability.
+      _rawCanvasDispatch({ type: 'SET_IMPL_FILES', links, runId: res.runId, episodeId: res.episodeId })
     }
     // OpenPM: one grouped card per SELECTED intent step — created whether the run built or
     // failed (failed → testing + failed verification, carrying the result as evidence), in

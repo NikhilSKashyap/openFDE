@@ -20,8 +20,12 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
   const { id, x, y, w, h, type, title, prompt } = box
   const isIntent = box.kind === 'intent'
   const isDotted = type === 'dotted'
+  // An intent step transformed into an architecture module after its Run (intent_graph
+  // .architecturize_intent_box). It renders as architecture but remembers its sketch.
+  const origin = box.originIntent
 
-  const implFiles = isIntent && Array.isArray(box.implementationFiles) ? box.implementationFiles : []
+  // Linked implementation files — shown for a built intent box AND for a transformed module box.
+  const implFiles = Array.isArray(box.implementationFiles) ? box.implementationFiles : []
 
   // Intent-box lifecycle, IN PLACE: planned → running → built | blocked. The same box
   // stays on the canvas and changes colour/label as it threads the run. `built` also
@@ -94,7 +98,26 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
                 {st.label}
               </span>
             )}
+            {!isIntent && origin && (
+              <span style={{
+                flexShrink: 0, fontSize: 9, fontWeight: 600, letterSpacing: 0.3,
+                textTransform: 'uppercase', color: 'var(--solid)',
+                border: '1px solid color-mix(in srgb, var(--solid) 50%, var(--border))',
+                borderRadius: 4, padding: '1px 4px',
+              }}>
+                module
+              </span>
+            )}
           </div>
+          {/* Provenance: a transformed module remembers the sketched intent it came from. */}
+          {!isIntent && origin && origin.title && (
+            <div title={`Built from the sketched intent: ${origin.title}`} style={{
+              fontSize: 9.5, color: 'var(--text-muted)', fontStyle: 'italic', flexShrink: 0,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              ↳ {origin.title}
+            </div>
+          )}
           <div style={{ width: '100%', height: 1, background: 'var(--border)', flexShrink: 0 }} />
           <div style={{
             fontSize: 11, color: 'var(--text-muted)',

@@ -105,6 +105,7 @@ from openfde.report import generate_report
 from openfde.spec import compile_spec
 from openfde.intent_graph import (
     GENERATED_WORKSPACE,
+    architecturize_intent_box,
     attribute_intent_files,
     is_intent_box,
     merge_step_files,
@@ -4154,10 +4155,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     continue
                 link = intent_links.get(b["id"])
                 if landed_ok and link:
-                    b["runState"] = "built"
-                    b["implementationFiles"] = link.get("files") or []
-                    b["implementationMeta"] = {"runId": wid, "attribution": link.get("attribution"),
-                                               "confidence": link.get("confidence")}
+                    # Intent → architecture in place: a step with a clear single generated file
+                    # BECOMES a module box (originIntent remembers the sketch). Steps without clear
+                    # per-step attribution stay built intent boxes — the honest, unchanged path.
+                    if architecturize_intent_box(b, link, episode_id, wid) is None:
+                        b["runState"] = "built"
+                        b["implementationFiles"] = link.get("files") or []
+                        b["implementationMeta"] = {"runId": wid, "attribution": link.get("attribution"),
+                                                   "confidence": link.get("confidence")}
                     g_changed = True
                 elif failed:
                     b["runState"] = "blocked"

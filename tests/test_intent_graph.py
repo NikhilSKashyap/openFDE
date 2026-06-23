@@ -9,10 +9,12 @@ from openfde import prompt_story
 from openfde.agent_runner import build_system_prompt, path_in_scope, run_agent
 from openfde.intent_graph import (
     GENERATED_WORKSPACE,
+    architecturize_intent_box,
     attribute_intent_files,
     compile_intent_graph,
     is_intent_box,
     merge_step_files,
+    module_title_from_file,
     render_intent_brief,
     resolve_run_scope,
 )
@@ -169,6 +171,49 @@ class AttributeIntentFilesTest(unittest.TestCase):
         links = attribute_intent_files(boxes, changed)
         self.assertEqual(links["a"]["files"], ["openfde_work/ingest.py"])      # specific match
         self.assertEqual(set(links["b"]["files"]), set(changed))              # coarse fallback
+
+
+class ArchitecturizeIntentBoxTest(unittest.TestCase):
+    """Intent → architecture in place: a built step with clear single-file attribution becomes a
+    module box, remembering its origin; an unclear one stays a built intent box."""
+
+    def test_module_title_from_file(self):
+        self.assertEqual(module_title_from_file("openfde_work/support_inbox/ingest.py"), "ingest/")
+        self.assertEqual(module_title_from_file("a/b/classify.py"), "classify/")
+        self.assertEqual(module_title_from_file("x/__init__.py"), "init/")
+
+    def test_matched_single_file_becomes_architecture(self):
+        box = _ibox("inbox_ingest", "ingest customer messages", "pull new customer messages")
+        box["runState"] = "built"
+        link = {"files": ["openfde_work/support_inbox/ingest.py"], "attribution": "matched", "confidence": 0.75}
+        out = architecturize_intent_box(box, link, episode_id="ep1", run_id="run1")
+        self.assertIs(out, box)                                  # mutated in place
+        self.assertEqual(box["title"], "ingest/")               # module-ish title
+        self.assertNotIn("kind", box)                           # no longer an intent box
+        self.assertNotIn("runState", box)                       # no intent lifecycle
+        self.assertEqual(box["linkedFiles"], ["openfde_work/support_inbox/ingest.py"])
+        self.assertEqual(box["implementationFiles"], ["openfde_work/support_inbox/ingest.py"])
+        # Origin preserved: id, original title/prompt, episode/run, files.
+        origin = box["originIntent"]
+        self.assertEqual(origin["boxId"], "inbox_ingest")
+        self.assertEqual(origin["title"], "ingest customer messages")
+        self.assertEqual(origin["prompt"], "pull new customer messages")
+        self.assertEqual(origin["episodeId"], "ep1")
+        self.assertEqual(origin["runId"], "run1")
+        self.assertEqual(origin["files"], ["openfde_work/support_inbox/ingest.py"])
+
+    def test_coarse_attribution_stays_intent(self):
+        box = _ibox("a", "read the data")
+        link = {"files": ["openfde_work/intent_demo.py"], "attribution": "graph", "confidence": 0.4}
+        self.assertIsNone(architecturize_intent_box(box, link))
+        self.assertEqual(box["kind"], "intent")                 # untouched → still intent
+        self.assertNotIn("originIntent", box)
+
+    def test_multi_file_match_stays_intent(self):
+        box = _ibox("a", "ingest customer messages")
+        link = {"files": ["openfde_work/a.py", "openfde_work/b.py"], "attribution": "matched"}
+        self.assertIsNone(architecturize_intent_box(box, link))  # not a clean single file
+        self.assertEqual(box["kind"], "intent")
 
 
 class SpecIntegrationTest(unittest.TestCase):

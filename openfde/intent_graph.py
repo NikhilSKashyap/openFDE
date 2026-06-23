@@ -375,9 +375,12 @@ def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: 
         named = bool(title) and len(title) > 2 and title.lower() in hay
         specific = _files_for_step(title, files)        # per-step name match (e.g. ingest.py)
         if specific:
+            # A clean per-step file match is always "matched" — the unambiguous signal that this
+            # step OWNS this file (so it can transform into an architecture module). Being named in
+            # the report only raises confidence; it must NOT relabel a real match as coarse "named".
             links[b["id"]] = {
                 "files": sorted(specific),
-                "attribution": "named" if named else "matched",
+                "attribution": "matched",
                 "confidence": 0.85 if named else 0.75,
             }
         else:
@@ -387,3 +390,54 @@ def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: 
                 "confidence": 0.6 if named else 0.4,
             }
     return links
+
+
+def module_title_from_file(path: str) -> str:
+    """A module-ish title from a generated file path: ``a/b/ingest.py`` → ``ingest/``."""
+    base = str(path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    stem = stem.strip("_") or stem                      # __init__ → init; never empty
+    return f"{stem}/" if stem else (base or "module/")
+
+
+def architecturize_intent_box(box: dict, link: dict, episode_id: str = "", run_id: str = "") -> dict:
+    """Transform a built intent box into an architecture module box IN PLACE — *intent is the
+    scaffolding, architecture is the artifact* — but only when the run produced a clear, single,
+    per-step file (``attribution == "matched"`` with exactly one file). The intent's history is not
+    lost: ``originIntent`` records the original box id / title / prompt / episode / run / files so
+    Story, OpenPM, and a curious FDE can always trace the module back to the sketch that produced it.
+
+    The box keeps its id and position (so every Story/OpenPM/episode link by boxId still resolves)
+    and its ``implementationFiles`` (so it drills in and stays Story-highlightable), but drops its
+    ``kind: "intent"`` and ``runState`` so it renders and behaves as architecture, editable like any
+    module. Generic — the module title is derived from the file name, not any specific demo.
+
+    Args:
+        box: dict — the built intent box (mutated in place).
+        link: dict — its attribution link ({files, attribution, confidence}).
+        episode_id: str — the owning episode id (for provenance).
+        run_id: str — the council run id (for provenance).
+
+    Returns:
+        dict — the mutated (now architecture) box, or None when it is not eligible (then the caller
+        leaves it a built intent box).
+    """
+    files = [f for f in (link.get("files") or []) if f]
+    if link.get("attribution") != "matched" or len(files) != 1:
+        return None
+    box["originIntent"] = {
+        "boxId": box.get("id"),
+        "title": box.get("title"),
+        "prompt": box.get("prompt"),
+        "episodeId": episode_id or "",
+        "runId": run_id or "",
+        "files": list(files),
+    }
+    box["title"] = module_title_from_file(files[0])
+    box["linkedFiles"] = list(files)
+    box["implementationFiles"] = list(files)
+    box["implementationMeta"] = {"runId": run_id, "attribution": link.get("attribution"),
+                                 "confidence": link.get("confidence")}
+    box.pop("kind", None)            # intent scaffolding → architecture artifact
+    box.pop("runState", None)        # no longer an intent lifecycle card
+    return box
