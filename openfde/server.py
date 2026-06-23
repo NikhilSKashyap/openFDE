@@ -90,7 +90,8 @@ from openfde import plugins as plugins_mod
 from openfde import focus as focus_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
-from openfde.episode_summary import (commit_display, is_bad_title, reconcile_intent_tasks,
+from openfde.episode_summary import (commit_display, is_bad_title,
+                                     merge_tasks_preserving_receipts, reconcile_intent_tasks,
                                      reconcile_task_status, repair_episode_tasks,
                                      repair_task_commit_shas, sync_intent_tasks)
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
@@ -774,9 +775,16 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             web.Response — JSON {ok: true}
         """
         data = await request.json()
-        if data == persistence.load_tasks():
+        existing = persistence.load_tasks()
+        # The server is authoritative for an intent-graph run's OpenPM representation: never let a
+        # client copy with MISSING receipt fields overwrite the server's receipts (merge by stable
+        # identity), and never persist a duplicate episode card for an episode already covered by its
+        # step cards. A degraded PUT thus collapses to a no-op instead of corrupting tasks.json.
+        merged = merge_tasks_preserving_receipts(data, existing)
+        merged, _ = reconcile_intent_tasks(merged, persistence.load_episodes())
+        if merged == existing:
             return web.json_response({"ok": True, "unchanged": True})
-        persistence.save_tasks(data)
+        persistence.save_tasks(merged)
         _write_plan_md(persistence, path)
         await manager.broadcast({"type": "tasks_updated"})
         return web.json_response({"ok": True})

@@ -549,6 +549,70 @@ def reconcile_intent_tasks(tasks, episodes):
     return out, changed
 
 
+# Receipt fields an intent run (or a land) authored onto an OpenPM card — never let a client copy
+# that is missing them overwrite a server copy that has them.
+_RECEIPT_FIELDS = ("files", "commitSha", "shortSha", "episodeId", "linkedBoxIds",
+                   "intentKey", "source", "verificationStatus", "column")
+
+
+def _empty_receipt(v) -> bool:
+    return v is None or v == "" or v == [] or v == {}
+
+
+def _task_identity(t):
+    """A task's STABLE identity for matching it across a hydrate/persist round-trip: its
+    ``intentKey`` (intent-graph step), else its ``commitSha`` (episode/commit card), else its
+    ``id``. Generic — independent of any domain/title/path."""
+    if not isinstance(t, dict):
+        return None
+    if t.get("intentKey"):
+        return ("intent", t["intentKey"])
+    if t.get("commitSha"):
+        return ("commit", t["commitSha"])
+    if t.get("id"):
+        return ("id", t["id"])
+    return None
+
+
+def merge_tasks_preserving_receipts(incoming, existing):
+    """Merge a client's PUT task list onto the server's BY STABLE IDENTITY, never letting a client
+    copy with MISSING receipt fields clobber receipts the server already holds.
+
+    For each incoming task matched to a server task (by ``intentKey``, else ``commitSha``, else
+    ``id``), any receipt field (:data:`_RECEIPT_FIELDS`) that is absent/empty on the incoming copy is
+    filled from the server copy. Tasks the client added (no server match) are kept as-is; tasks the
+    client dropped are honoured as deletions; a non-empty field the client changed (a real edit —
+    e.g. dragging a card to another column) is preserved, since the guard only fills EMPTY fields.
+
+    Generic and idempotent: keyed on identity + field-emptiness, with no domain specifics — works
+    for any intent graph (support inbox, insurance, hotel booking, data pipeline, …).
+
+    Args:
+        incoming: list[dict] — the client's PUT body.
+        existing: list[dict] — the server's current task list.
+
+    Returns:
+        list — the merged list (same shape/order as ``incoming``).
+    """
+    if not isinstance(incoming, list):
+        return incoming
+    by_ident = {}
+    for t in (existing or []):
+        k = _task_identity(t)
+        if k is not None:
+            by_ident[k] = t
+    out = []
+    for t in incoming:
+        srv = by_ident.get(_task_identity(t)) if isinstance(t, dict) else None
+        if srv:
+            t = dict(t)
+            for f in _RECEIPT_FIELDS:
+                if _empty_receipt(t.get(f)) and not _empty_receipt(srv.get(f)):
+                    t[f] = srv.get(f)
+        out.append(t)
+    return out
+
+
 def sync_intent_tasks(tasks, *, episode_id, run_id, tag, steps,
                       committed=False, awaiting_review=False, failed=False, commit_sha=None):
     """Server-durable OpenPM cards for an intent-graph run — the SOURCE OF TRUTH (tasks.json),

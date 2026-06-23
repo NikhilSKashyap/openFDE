@@ -421,37 +421,56 @@ class RepairTaskCommitShasTest(unittest.TestCase):
         self.assertEqual(out[0]["commitSha"], "run_sha")
 
 
+# ── Generic intent-graph fixtures (NO domain hardcoding) ─────────────────────
+# The OpenPM receipt rules must hold for ANY intent graph — support inbox, insurance, hotel
+# booking, data pipeline, WebXR app, … — so the fixtures are parameterised by arbitrary
+# box ids / titles / paths, and several unrelated domains are exercised by the same code path.
+def _intent_episode(eid, steps, shas=("c0ffee0",)):
+    """steps: list of (boxId, title, [files]). A landed intent-graph episode."""
+    return {"episodeId": eid, "commitShas": list(shas),
+            "intentSource": {"kind": "intent-graph",
+                             "steps": [{"boxId": b, "title": t, "files": list(f)} for b, t, f in steps]}}
+
+
+def _intent_card(eid, box, *, files, sha="c0ffee0", **extra):
+    return {"id": "t_" + box, "source": "intent-graph", "episodeId": eid,
+            "intentKey": f"{eid}:{box}", "linkedBoxIds": [box], "files": list(files),
+            "commitSha": sha, "shortSha": (sha[:7] if sha else None), "column": "done",
+            "verificationStatus": "passed", **extra}
+
+
+# Three unrelated domains — same lifecycle, different ids/titles/paths.
+_DOMAINS = [
+    ("ep_alpha", [("a1", "first step", ["work/alpha_one.py"]), ("a2", "second step", ["work/alpha_two.py"])]),
+    ("ep_ins",   [("q", "quote risk", ["policy/quote.py"]),    ("b", "bind policy", ["policy/bind.py"])]),
+    ("ep_hotel", [("s", "search rooms", ["booking/search.py"]), ("r", "reserve room", ["booking/reserve.py"])]),
+]
+
+
 class ReconcileIntentTasksTest(unittest.TestCase):
     """Intent-graph step cards are the operational source of truth: their receipts survive UI
-    hydration, and no duplicate episode/commit card is left for the same episode."""
-
-    def _episode(self):
-        return {"episodeId": "ep1", "commitShas": ["sha1"],
-                "intentSource": {"kind": "intent-graph", "steps": [
-                    {"boxId": "b1", "title": "ingest customer messages", "files": ["support_inbox/ingest.py"]},
-                    {"boxId": "b2", "title": "classify issue", "files": ["support_inbox/classify.py"]},
-                ]}}
+    hydration, and no duplicate episode/commit card is left for the same episode. Domain-agnostic."""
 
     def test_drops_duplicate_episode_card(self):
+        ep = _intent_episode("epX", [("bx", "some step", ["gen/thing.py"])])
         tasks = [
-            {"id": "i1", "source": "intent-graph", "episodeId": "ep1", "linkedBoxIds": ["b1"],
-             "commitSha": "sha1", "files": ["support_inbox/ingest.py"]},
-            {"id": "e1", "source": "openfde-episode", "episodeId": "ep1", "commitSha": "sha1",
-             "title": "AI Support Inbox"},
+            _intent_card("epX", "bx", files=["gen/thing.py"]),
+            {"id": "dup", "source": "openfde-episode", "episodeId": "epX",
+             "commitSha": "c0ffee0", "title": "Whatever The LLM Named It"},
         ]
-        out, changed = es.reconcile_intent_tasks(tasks, [self._episode()])
+        out, changed = es.reconcile_intent_tasks(tasks, [ep])
         self.assertTrue(changed)
-        self.assertEqual([t["id"] for t in out], ["i1"])          # episode card dropped, step kept
+        self.assertEqual([t["id"] for t in out], ["t_bx"])        # episode card dropped, step kept
 
     def test_heals_dropped_files_and_sha(self):
-        # A hydrate→PUT round-trip cleared the step card's receipts → restore from episode truth.
-        tasks = [{"id": "i1", "source": "intent-graph", "episodeId": "ep1", "linkedBoxIds": ["b1"],
-                  "commitSha": None, "files": []}]
-        out, changed = es.reconcile_intent_tasks(tasks, [self._episode()])
+        ep = _intent_episode("epX", [("bx", "some step", ["gen/thing.py"])])
+        tasks = [_intent_card("epX", "bx", files=[], sha=None)]   # receipts cleared by a bad hydrate
+        tasks[0]["shortSha"] = None
+        out, changed = es.reconcile_intent_tasks(tasks, [ep])
         self.assertTrue(changed)
-        self.assertEqual(out[0]["commitSha"], "sha1")
-        self.assertEqual(out[0]["shortSha"], "sha1"[:7])
-        self.assertEqual(out[0]["files"], ["support_inbox/ingest.py"])
+        self.assertEqual(out[0]["commitSha"], "c0ffee0")
+        self.assertEqual(out[0]["shortSha"], "c0ffee0"[:7])
+        self.assertEqual(out[0]["files"], ["gen/thing.py"])
 
     def test_keeps_episode_card_when_no_step_tasks(self):
         # An ordinary episode (no intent-graph step cards) keeps its episode/commit card.
@@ -461,11 +480,72 @@ class ReconcileIntentTasksTest(unittest.TestCase):
         self.assertEqual([t["id"] for t in out], ["e1"])
 
     def test_idempotent(self):
-        tasks = [{"id": "i1", "source": "intent-graph", "episodeId": "ep1", "linkedBoxIds": ["b1"],
-                  "commitSha": "sha1", "files": ["support_inbox/ingest.py"]}]
-        out1, c1 = es.reconcile_intent_tasks(tasks, [self._episode()])
-        out2, c2 = es.reconcile_intent_tasks(out1, [self._episode()])
+        ep = _intent_episode("epX", [("bx", "some step", ["gen/thing.py"])])
+        tasks = [_intent_card("epX", "bx", files=["gen/thing.py"])]
+        out1, _ = es.reconcile_intent_tasks(tasks, [ep])
+        out2, c2 = es.reconcile_intent_tasks(out1, [ep])
         self.assertFalse(c2)               # already healed → no further change
+
+    def test_holds_across_unrelated_domains(self):
+        # The SAME rule across support-inbox-like / insurance / hotel flows — proves no hardcoding.
+        for eid, steps in _DOMAINS:
+            ep = _intent_episode(eid, steps)
+            tasks = [_intent_card(eid, b, files=[], sha=None) for b, _t, _f in steps]   # receipts wiped
+            tasks.append({"id": "dup_" + eid, "source": "openfde-episode", "episodeId": eid,
+                          "commitSha": "c0ffee0", "title": "Some Episode Title"})
+            out, changed = es.reconcile_intent_tasks(tasks, [ep])
+            self.assertTrue(changed)
+            self.assertNotIn("openfde-episode", [t.get("source") for t in out])   # dup dropped
+            self.assertEqual(len(out), len(steps))                                # exactly the steps
+            for t, (b, _title, files) in zip(out, steps):
+                self.assertEqual(t["commitSha"], "c0ffee0")                       # sha healed
+                self.assertEqual(t["files"], files)                              # per-step files healed
+
+
+class MergeTasksPreservingReceiptsTest(unittest.TestCase):
+    """A client PUT can never clobber server receipts: merge by stable identity, fill only EMPTY
+    fields from the server copy, honour real edits / adds / deletes. Domain-agnostic."""
+
+    def test_missing_receipts_filled_from_server(self):
+        server = [_intent_card("epX", "bx", files=["gen/thing.py"], sha="c0ffee0")]
+        # The client PUTs the same card but with its receipts stripped (the regression).
+        incoming = [{**server[0], "files": [], "commitSha": None, "shortSha": None}]
+        out = es.merge_tasks_preserving_receipts(incoming, server)
+        self.assertEqual(out[0]["files"], ["gen/thing.py"])
+        self.assertEqual(out[0]["commitSha"], "c0ffee0")
+
+    def test_real_edit_is_preserved(self):
+        # A non-empty changed field (the user dragged the card to Doing) is a real edit — keep it.
+        server = [_intent_card("epX", "bx", files=["gen/thing.py"], column="done")]
+        incoming = [{**server[0], "column": "doing"}]
+        out = es.merge_tasks_preserving_receipts(incoming, server)
+        self.assertEqual(out[0]["column"], "doing")            # not overwritten
+        self.assertEqual(out[0]["files"], ["gen/thing.py"])    # receipts intact
+
+    def test_new_task_kept_and_deletion_honored(self):
+        server = [_intent_card("epX", "bx", files=["gen/thing.py"]),
+                  _intent_card("epX", "by", files=["gen/two.py"])]
+        incoming = [server[0], {"id": "user1", "title": "a manual todo", "column": "todo"}]  # drops 'by', adds one
+        out = es.merge_tasks_preserving_receipts(incoming, server)
+        self.assertEqual([t["id"] for t in out], ["t_bx", "user1"])   # deletion + add honoured
+
+    def test_matches_by_commit_then_id(self):
+        server = [{"id": "s1", "source": "openfde-episode", "commitSha": "abc", "files": ["x.py"]},
+                  {"id": "plain", "title": "t", "column": "doing", "files": ["y.py"]}]
+        incoming = [{"id": "DIFFERENT", "commitSha": "abc", "files": []},   # matched by commitSha
+                    {"id": "plain", "files": []}]                          # matched by id
+        out = es.merge_tasks_preserving_receipts(incoming, server)
+        self.assertEqual(out[0]["files"], ["x.py"])            # filled via commitSha identity
+        self.assertEqual(out[1]["files"], ["y.py"])            # filled via id identity
+
+    def test_holds_across_unrelated_domains(self):
+        for eid, steps in _DOMAINS:
+            server = [_intent_card(eid, b, files=f) for b, _t, f in steps]
+            incoming = [{**c, "files": [], "commitSha": None} for c in server]   # receipts wiped
+            out = es.merge_tasks_preserving_receipts(incoming, server)
+            for t, (_b, _title, files) in zip(out, steps):
+                self.assertEqual(t["files"], files)            # restored from server, any domain
+                self.assertEqual(t["commitSha"], "c0ffee0")
 
 
 class SyncIntentTasksTest(unittest.TestCase):
