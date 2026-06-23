@@ -131,6 +131,64 @@ class ExternalCouncilTest(unittest.TestCase):
         self.assertIn(res["episodeId"], snap)
         self.assertEqual(snap[res["episodeId"]]["status"], "READY_FOR_CC")
 
+    # ── Self-orienting session inbox ──────────────────────────────────────────
+    def _handback(self, commit="abc1234"):
+        items = council_bus.parse_work_items(council_bus.read_bus_file(self.root, "tasks"))
+        h = items[0]["header"]
+        h["status"], h["latestCommit"] = "READY_FOR_CODEX_VERIFICATION", commit
+        council_bus.write_bus_file(self.root, "tasks", council_bus.render_front_matter(h, items[0]["body"]))
+
+    def test_inbox_empty_bus_is_calm(self):
+        self.assertIn("No active council handoff", ec.render_session_inbox(self.root, "codex"))
+        self.assertIn("Claude Code Inbox", ec.render_session_inbox(self.root, "claude"))
+        self.assertIn("No active council handoff", ec.render_session_inbox(self.root, "claude"))
+
+    def test_inbox_preserves_ids_and_invents_none(self):
+        res = self._start(box_ids=["box_a"], task_titles=["t1", "t2"])
+        text = ec.render_session_inbox(self.root, "claude")
+        self.assertIn(res["episodeId"], text)
+        for t in res["taskIds"]:
+            self.assertIn(t, text)
+        self.assertIn("box_a", text)
+        self.assertNotIn("councilId", text)
+        self.assertNotIn("workItemId", text)
+
+    def test_codex_inbox_says_verify_on_ready_for_verification(self):
+        self._start()
+        self._handback(commit="abc1234")
+        text = ec.render_session_inbox(self.root, "codex")
+        self.assertIn("Codex Inbox", text)
+        self.assertIn("Verify the latest Claude Code commit", text)
+        self.assertIn("abc1234", text)                        # latestCommit shown
+
+    def test_claude_inbox_says_implement_with_trailers_on_ready_for_cc(self):
+        res = self._start(box_ids=["box_a"])
+        text = ec.render_session_inbox(self.root, "claude")
+        self.assertIn("Claude Code Inbox", text)
+        self.assertIn("Implement this task", text)
+        self.assertIn("OpenFDE-Episode: " + res["episodeId"], text)   # exact trailers to stamp
+        self.assertIn("OpenFDE-Role: senior_dev", text)
+
+    def test_claude_inbox_includes_codex_change_request(self):
+        res = self._start()
+        ec.record_codex_verdict(self.root, episode_id=res["episodeId"], commit_sha="abc",
+                                status="CHANGES_REQUESTED", findings="add a test for the 500 path")
+        text = ec.render_session_inbox(self.root, "claude")
+        self.assertIn("Latest from Codex", text)
+        self.assertIn("add a test for the 500 path", text)
+        self.assertIn("Fix Codex findings", text)
+        self.assertIn("OpenFDE-Role: senior_dev", text)       # CHANGES_REQUESTED → CC re-commits
+
+    def test_cli_council_status_returns_inbox(self):
+        import subprocess
+        import sys
+        self._start()
+        r = subprocess.run([sys.executable, "-m", "openfde", "council", "status",
+                            "--role", "codex", "--path", str(self.root)],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Codex Inbox", r.stdout)
+
 
 def _view(status, *, episode="ep1", commit="", tasks=("task_a",), boxes=("box_x",), run=""):
     return {"episodeId": episode, "status": status, "taskIds": list(tasks), "runId": run,

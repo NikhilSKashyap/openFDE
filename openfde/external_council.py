@@ -344,3 +344,89 @@ def render_inbox(repo_root) -> dict:
     if not active:
         return {"active": False, "event": None}
     return {"active": True, "event": detect_council_bus_event(None, active[-1])}
+
+
+# ── Self-orienting session inbox — `openfde council status --role <codex|claude>` ────────────────
+# A role checks "what's addressed to me right now?" with no native chat injection: read the bus,
+# render one screen. The next-action text is fixed per role × status (the protocol, spelled out).
+_CODEX_NEXT = {
+    council_bus.STATUS_READY_FOR_CC:                 "Waiting for Claude Code.",
+    council_bus.STATUS_CLAUDE_WORKING:               "Claude Code is working.",
+    council_bus.STATUS_READY_FOR_CODEX_VERIFICATION: "Verify the latest Claude Code commit.",
+    council_bus.STATUS_CHANGES_REQUESTED:            "Waiting for Claude Code to address your findings.",
+    council_bus.STATUS_VERIFIED:                     "No action. Verified.",
+    council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT:      "Architecture decision needed.",
+    council_bus.STATUS_BLOCKED_NEEDS_HUMAN:          "Human decision needed.",
+}
+_CLAUDE_NEXT = {
+    council_bus.STATUS_READY_FOR_CC:                 "Implement this task, run checks, commit with OpenFDE trailers.",
+    council_bus.STATUS_CLAUDE_WORKING:               "You are currently marked working.",
+    council_bus.STATUS_READY_FOR_CODEX_VERIFICATION: "Waiting for Codex verification.",
+    council_bus.STATUS_CHANGES_REQUESTED:            "Fix Codex findings, run checks, commit again.",
+    council_bus.STATUS_VERIFIED:                     "No action. Verified.",
+    council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT:      "Waiting for Codex architecture decision.",
+    council_bus.STATUS_BLOCKED_NEEDS_HUMAN:          "Waiting for a human decision.",
+}
+# Statuses where Claude Code still owes a commit → show the exact trailers to stamp.
+_CLAUDE_NEEDS_TRAILERS = (council_bus.STATUS_READY_FOR_CC, council_bus.STATUS_CLAUDE_WORKING,
+                          council_bus.STATUS_CHANGES_REQUESTED)
+
+
+def _pick_work_item(repo_root):
+    """The work item a session should orient on: the latest ACTIVE one, else the latest overall,
+    else None (empty/absent bus). Never invents an item."""
+    views = [v for v in bus_snapshot(repo_root).values() if v["episodeId"]]
+    if not views:
+        return None
+    active = [v for v in views if v["status"] in ACTIVE_STATUSES]
+    return active[-1] if active else views[-1]
+
+
+def render_session_inbox(repo_root, role: str) -> str:
+    """One-screen plain-text inbox for a role (``codex`` | ``claude``) — what's addressed to it on
+    the bus right now, with the role/status next action (and, for Claude on a pending commit, the
+    exact ``OpenFDE-*`` trailers). Pure read of the gitignored bus; shows only existing OpenFDE ids,
+    never a new one. ``No active council handoff.`` when the bus is empty/absent."""
+    role = "codex" if (role or "").strip().lower() == "codex" else "claude"
+    title = "Codex Inbox" if role == "codex" else "Claude Code Inbox"
+    bar = "━" * 58
+    v = _pick_work_item(repo_root)
+    if not v:
+        return f"{bar}\n  {title}\n{bar}\n  No active council handoff.\n{bar}\n"
+
+    status = v["status"] or "—"
+    out = [bar, f"  {title}", bar,
+           f"  {'status':<10} {status}",
+           f"  {'episode':<10} {v['episodeId'] or '—'}"]
+    if v["taskIds"]:
+        out.append(f"  {'tasks':<10} {', '.join(v['taskIds'])}")
+    if v["runId"]:
+        out.append(f"  {'run':<10} {v['runId']}")
+    if v["boxIds"]:
+        out.append(f"  {'boxes':<10} {', '.join(v['boxIds'])}")
+    if v["latestCommit"]:
+        out.append(f"  {'commit':<10} {v['latestCommit']}")
+    if v["objective"]:
+        out += ["", "  Objective", f"    {v['objective']}"]
+    if v["acceptance"]:
+        out += ["", "  Acceptance"] + [f"    - {a}" for a in v["acceptance"]]
+
+    # Cross-channel context: Codex reads CC's latest handoff; Claude reads Codex's latest verdict.
+    other_key, other_label = ("claude", "Latest from Claude Code") if role == "codex" \
+        else ("codex", "Latest from Codex")
+    entry = _last_entry(council_bus.read_bus_file(repo_root, other_key))
+    if entry:
+        out += ["", f"  {other_label}"] + [f"    {ln}" for ln in entry.splitlines()[:8]]
+
+    nxt = (_CODEX_NEXT if role == "codex" else _CLAUDE_NEXT).get(v["status"], "")
+    out += ["", f"  → Next: {nxt}"]
+
+    if role == "claude" and v["status"] in _CLAUDE_NEEDS_TRAILERS and v["episodeId"]:
+        tr = council_bus.build_trailers(episode_id=v["episodeId"], task_ids=v["taskIds"],
+                                        run_id=v["runId"] or None, role="senior_dev",
+                                        handoff="ready_for_codex_verification")
+        out += ["", "  Commit trailers (stamp these on your commit)"]
+        out += [f"    {k}: {val}" for k, val in tr.items()]
+
+    out.append(bar)
+    return "\n".join(out) + "\n"

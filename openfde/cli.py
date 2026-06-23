@@ -66,6 +66,16 @@ def main() -> None:
         wp.add_argument("--path", default=".", help="Repository path (default: current directory)")
         wp.add_argument("--model", default=None, help="Optional model override")
 
+    # ── External council inbox: a session self-orients (no native chat injection) ──
+    #    `openfde council status --role codex`   ·   `openfde council status --role claude`
+    council_parser = sub.add_parser("council", help="External Codex + Claude Code council")
+    council_sub = council_parser.add_subparsers(dest="council_command", metavar="<action>")
+    status_parser = council_sub.add_parser("status", help="Show this role's current council inbox")
+    status_parser.add_argument("--role", choices=["codex", "claude"], required=True,
+                               help="Whose inbox to render")
+    status_parser.add_argument("--path", default=".",
+                               help="Repository path (default: current directory)")
+
     args = parser.parse_args()
 
     if args.command == "watch":
@@ -84,6 +94,13 @@ def main() -> None:
         print(out["message"])
         # Non-zero exit only when the agent truly failed with no useful change.
         sys.exit(0 if out["episode"]["status"] in ("reviewing", "complete_no_changes") else 1)
+    elif args.command == "council":
+        if getattr(args, "council_command", None) == "status":
+            from openfde.external_council import render_session_inbox
+            print(render_session_inbox(args.path, args.role), end="")
+        else:
+            council_parser.print_help()
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)

@@ -139,7 +139,12 @@ def render_council_md(project_log: list) -> str:
         buckets[bucket].append((ts, text))
     lines = ["# COUNCIL — role ledger", "",
              "*Generated from `.openfde/project_log.jsonl` by OpenFDE. Do not hand-edit — "
-             "your changes will be overwritten. Put durable notes in DECISIONS / FLOW / TASTE.*", ""]
+             "your changes will be overwritten. Put durable notes in DECISIONS / FLOW / TASTE.*", "",
+             "**External council session start:** before working, orient with your inbox —",
+             "`openfde council status --role codex` (Architect+Verifier) or "
+             "`openfde council status --role claude` (Senior Dev). It shows the current handoff "
+             "addressed to you: status, episode/task ids, objective, next action, and (for Claude) "
+             "the exact commit trailers to stamp.", ""]
     for b in _COUNCIL_ORDER:
         lines.append(f"## {b}")
         rows = buckets[b][-_MAX_LEDGER_PER_ROLE:]
