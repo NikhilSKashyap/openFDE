@@ -4010,7 +4010,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                                        on_read=lambda r: emit_progress(r, "read"))
         else:
             if sd_backend == "echo":
-                sd_transport, sd_model = make_echo_transport(path, editable), (sd.get("model") or "echo-1")
+                # Pass the selected intent step titles so the offline echo can recognize a
+                # SaaS-shaped sketch (e.g. the support inbox) and scaffold credible per-step
+                # files instead of a single generic marker — the demo payoff.
+                sd_transport = make_echo_transport(path, editable, steps=intent_graph.get("steps"))
+                sd_model = sd.get("model") or "echo-1"
             else:  # anthropic
                 sd_transport, sd_model = make_transport(sd["apiKey"], sd.get("baseUrl", "")), sd["model"]
             sd_system = build_system_prompt(scope_summary, editable, protected)

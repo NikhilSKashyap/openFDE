@@ -145,6 +145,31 @@ class AttributeIntentFilesTest(unittest.TestCase):
     def test_modules_are_ignored(self):
         self.assertEqual(attribute_intent_files([_module("m", "mod", ["x.py"])], ["x.py"]), {})
 
+    def test_role_named_files_map_per_step(self):
+        # Demo payoff: each box grounds into its OWN file when the run's filenames echo the step
+        # titles (ingest customer messages -> ingest.py). Generic — by filename↔title word overlap,
+        # prefix-tolerant so "log resolution" -> logging.py.
+        boxes = [_ibox("inbox_ingest", "ingest customer messages"),
+                 _ibox("inbox_classify", "classify issue"),
+                 _ibox("inbox_log", "log resolution")]
+        changed = ["openfde_work/support_inbox/__init__.py",
+                   "openfde_work/support_inbox/classify.py",
+                   "openfde_work/support_inbox/ingest.py",
+                   "openfde_work/support_inbox/logging.py"]
+        links = attribute_intent_files(boxes, changed)
+        self.assertEqual(links["inbox_ingest"]["files"], ["openfde_work/support_inbox/ingest.py"])
+        self.assertEqual(links["inbox_classify"]["files"], ["openfde_work/support_inbox/classify.py"])
+        self.assertEqual(links["inbox_log"]["files"], ["openfde_work/support_inbox/logging.py"])
+        self.assertEqual(links["inbox_ingest"]["attribution"], "matched")
+
+    def test_unmatched_step_keeps_coarse_share(self):
+        # A step whose title echoes no filename falls back to the honest whole-sketch set.
+        boxes = [_ibox("a", "ingest customer messages"), _ibox("b", "do something else")]
+        changed = ["openfde_work/ingest.py", "openfde_work/helpers.py"]
+        links = attribute_intent_files(boxes, changed)
+        self.assertEqual(links["a"]["files"], ["openfde_work/ingest.py"])      # specific match
+        self.assertEqual(set(links["b"]["files"]), set(changed))              # coarse fallback
+
 
 class SpecIntegrationTest(unittest.TestCase):
     EMPTY_GRAPH = {"files": [], "functions": [], "warnings": []}

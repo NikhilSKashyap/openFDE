@@ -21,6 +21,7 @@ Honesty contract:
 """
 
 import logging
+import re
 from collections import defaultdict
 
 logger = logging.getLogger("openfde.intent_graph")
@@ -311,13 +312,48 @@ def merge_step_files(steps: list, intent_links: dict) -> list:
     return out
 
 
-def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: str = "") -> dict:
-    """Attribute a run's changed files back to the selected intent steps (v1 heuristic).
+# Generic, content-free words that must not force a per-step file match on their own.
+_ATTR_STOP = {"the", "a", "an", "of", "to", "and", "or", "for", "with", "from", "into",
+              "this", "that", "your", "our", "all", "new", "get", "set", "run"}
 
-    v1 is deliberately coarse and honest: the whole sketch shares the run's files.
-    A step whose title is named in the plan/report is flagged ``"named"`` (higher
-    confidence); otherwise the attribution is ``"graph"``. We never fake per-step
-    file precision — the label and confidence carry that uncertainty.
+
+def _attr_words(text: str) -> set:
+    """Distinctive lowercase words (≥3 chars, non-stop) in a title or filename stem."""
+    return {w for w in re.findall(r"[a-z]+", (text or "").lower())
+            if len(w) >= 3 and w not in _ATTR_STOP}
+
+
+def _stem_words(path: str) -> set:
+    """Distinctive words in a file's basename stem (``a/b/ingest.py`` → {ingest})."""
+    base = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    return _attr_words(stem)
+
+
+def _files_for_step(title: str, files: list) -> list:
+    """Files whose basename stem shares a distinctive word with the step title — prefix-tolerant
+    so ``log resolution`` ↔ ``logging.py`` and ``ingest customer messages`` ↔ ``ingest.py``.
+    Returns [] when nothing matches, so the caller falls back to the honest coarse set."""
+    tw = _attr_words(title)
+    if not tw:
+        return []
+    out = []
+    for f in files:
+        sw = _stem_words(f)
+        if any(a == b or a.startswith(b) or b.startswith(a) for a in tw for b in sw):
+            out.append(f)
+    return out
+
+
+def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: str = "") -> dict:
+    """Attribute a run's changed files back to the selected intent steps.
+
+    Per-step first: a file whose name echoes a step's title (``ingest customer messages`` →
+    ``ingest.py``) is attributed to THAT step alone — so role-named generated files (e.g. the
+    support-inbox demo backend) map one-to-one and each box shows its OWN file. When a step has
+    no name match, it falls back to the honest coarse v1 (the whole sketch shares the run's
+    files). A step whose title also appears in the plan/report is flagged ``"named"`` (higher
+    confidence). Generic — keyed on filename↔title word overlap, not any specific demo.
 
     Args:
         intent_boxes: list — the selected intent boxes ({id, title}).
@@ -325,7 +361,7 @@ def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: 
         named_text: str — architect plan + report text (for the name-match flag).
 
     Returns:
-        dict — {boxId: {files: [str], attribution: "named"|"graph", confidence: float}}.
+        dict — {boxId: {files: [str], attribution: "named"|"matched"|"graph", confidence: float}}.
         Empty when there are no intent boxes or no changed files.
     """
     files = sorted({str(f) for f in (changed_files or []) if f})
@@ -337,9 +373,17 @@ def attribute_intent_files(intent_boxes: list, changed_files: list, named_text: 
     for b in boxes:
         title = (b.get("title") or "").strip()
         named = bool(title) and len(title) > 2 and title.lower() in hay
-        links[b["id"]] = {
-            "files": files,
-            "attribution": "named" if named else "graph",
-            "confidence": 0.6 if named else 0.4,
-        }
+        specific = _files_for_step(title, files)        # per-step name match (e.g. ingest.py)
+        if specific:
+            links[b["id"]] = {
+                "files": sorted(specific),
+                "attribution": "named" if named else "matched",
+                "confidence": 0.85 if named else 0.75,
+            }
+        else:
+            links[b["id"]] = {
+                "files": files,
+                "attribution": "named" if named else "graph",
+                "confidence": 0.6 if named else 0.4,
+            }
     return links
