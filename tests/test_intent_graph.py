@@ -612,5 +612,41 @@ class SketchDemoFixtureTest(unittest.TestCase):
         self.assertEqual(st1, st2)                          # deterministic
 
 
+class SaasDemoFixtureTest(unittest.TestCase):
+    """The SaaS example seed ("AI support inbox"): five connected PLANNED intent steps meant to be
+    RUN — not a static showcase. Pure canvas state; the steps compile into an ordered intent graph
+    so the EXISTING run machinery grounds them in place (proving the full loop on a realistic case)."""
+
+    _TITLES = ["ingest customer messages", "classify issue", "draft response",
+               "review approval", "log resolution"]
+
+    def test_demo_state_shape(self):
+        from openfde import saas_demo
+        st = saas_demo.support_inbox_demo_state()
+        intent = [b for b in st["boxes"] if b.get("kind") == "intent"]
+        self.assertEqual([b["title"] for b in intent], self._TITLES)
+        # PLANNED on purpose: NO implementationFiles up front — a Run grounds them. This is what
+        # makes the example exercise the real intent→architecture loop, not fake a built state.
+        for b in intent:
+            self.assertNotIn("implementationFiles", b)
+            self.assertTrue(b.get("prompt"))                # each step carries a plain-English prompt
+        self.assertEqual(len(st["arrows"]), 4)              # ingest→classify→draft→review→log
+
+    def test_compiles_into_ordered_intent_graph(self):
+        from openfde import saas_demo
+        st = saas_demo.support_inbox_demo_state()
+        g = compile_intent_graph(st["boxes"], st["arrows"])
+        self.assertTrue(g["present"])
+        self.assertEqual([s["title"] for s in g["steps"]], self._TITLES)   # flow order preserved
+        self.assertIn("ingest customer messages", g["summary"])
+        self.assertIn("log resolution", g["summary"])
+
+    def test_fixture_is_deterministic_and_side_effect_free(self):
+        from openfde import saas_demo
+        self.assertFalse(hasattr(saas_demo, "write_demo"))   # no file-I/O entrypoint
+        self.assertEqual(saas_demo.support_inbox_demo_state(),
+                         saas_demo.support_inbox_demo_state())
+
+
 if __name__ == "__main__":
     unittest.main()

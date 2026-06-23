@@ -12,6 +12,7 @@ export default function Whiteboard({
   onLoadSelfMap,
   onGenerateFromRepo,
   onLoadSketchDemo,
+  onLoadSaasDemo,
   onExecute,
   executing,
   repoName = '',
@@ -144,6 +145,7 @@ export default function Whiteboard({
           onLoadSelfMap={onLoadSelfMap}
           onGenerateFromRepo={onGenerateFromRepo}
           onLoadSketchDemo={onLoadSketchDemo}
+          onLoadSaasDemo={onLoadSaasDemo}
           onExecute={onExecute}
           executing={executing}
           repoName={repoName}

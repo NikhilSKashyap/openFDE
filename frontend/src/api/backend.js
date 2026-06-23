@@ -825,6 +825,26 @@ export async function postSketchDemo() {
   }
 }
 
+/**
+ * Seed the deterministic SaaS example ("AI support inbox") onto an EMPTY canvas — five connected
+ * PLANNED intent steps meant to be RUN (intent → Run → architecture/files → tasks → episode → Story).
+ * Same 409-vs-error semantics as {@link postSketchDemo}.
+ *
+ * @returns {Promise<{ok:boolean, status:number, boxes?:object[], arrows?:object[], error?:string}>}
+ */
+export async function postSaasDemo() {
+  try {
+    const res = await fetch('/api/dev/saas-demo', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    })
+    const body = (res.headers.get('content-type') || '').includes('application/json')
+      ? await res.json() : null
+    return { ok: res.ok, status: res.status, ...(body || {}) }
+  } catch {
+    return { ok: false, status: 0, error: 'network error' }
+  }
+}
+
 // ── Spec ──────────────────────────────────────────────────────────────────────
 
 /**

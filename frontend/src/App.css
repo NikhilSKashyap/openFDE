@@ -2067,6 +2067,7 @@
   border-top: 1px solid var(--border);
 }
 .wb-sketch-demo-hint { font-size: 12px; color: var(--text-muted); }
+.wb-sketch-demo-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .wb-sketch-demo-btn[disabled] { opacity: 0.6; cursor: default; }
 .wb-sketch-demo-err { font-size: 11px; color: var(--text-muted); }
 .wb-tool-hint-pill {

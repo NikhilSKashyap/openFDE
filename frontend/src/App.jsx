@@ -27,6 +27,7 @@ import {
   getEvents,
   postFromArchgraph,
   postSketchDemo,
+  postSaasDemo,
   postSpec,
   postProjectLog,
   getBoxSpecs,
@@ -1047,18 +1048,24 @@ export default function App() {
   // fresh user sees the "I sketched intent → here's what it became in code" aha. The
   // server refuses (409) when the canvas already has boxes; we return the result so
   // the empty-state can show a gentle note and never overwrite real work.
-  async function onLoadSketchDemo() {
+  // Shared loader for the deterministic empty-canvas demos. Both seed pure canvas state (no file
+  // write / scan) and hydrate the board; a 409/error is returned so the caller can note it.
+  async function _loadDemo(post) {
     if (!backendRef.current) return { ok: false }
-    const res = await postSketchDemo()
+    const res = await post()
     if (!res.ok || !Array.isArray(res.boxes)) return res     // 409 / error → caller notes it; no overwrite
     _rawCanvasDispatch({ type: 'HYDRATE', boxes: res.boxes, arrows: res.arrows ?? [] })
     setActiveView('whiteboard')
     setExpandedIds(new Set())
     setArchSel(null)
-    // No ArchGraph refresh: the demo writes no file, so there is nothing new to scan. The boxes'
-    // implementationFiles drive ✓ BUILT + file-level BECAME directly — instant and side-effect-free.
     return res
   }
+  // The Sketch-First fixture: boxes already carry implementationFiles → ✓ BUILT + file-level BECAME
+  // directly, no scan (a static showcase).
+  function onLoadSketchDemo() { return _loadDemo(postSketchDemo) }
+  // The SaaS example ("AI support inbox"): five PLANNED steps meant to be RUN — select them, press
+  // Run, and the Council grounds them into files in place (the full intent→architecture loop).
+  function onLoadSaasDemo() { return _loadDemo(postSaasDemo) }
 
   async function onGenerateFromRepo() {
     if (!backendRef.current) return
@@ -2251,6 +2258,7 @@ export default function App() {
               onLoadSelfMap={() => canvasDispatch({ type: 'LOAD_SELF_MAP' })}
               onGenerateFromRepo={backendAvailable ? onGenerateFromRepo : null}
               onLoadSketchDemo={backendAvailable ? onLoadSketchDemo : null}
+              onLoadSaasDemo={backendAvailable ? onLoadSaasDemo : null}
               onExecute={backendAvailable ? onWorkExecute : null}
               executing={executing}
               repoName={session?.repoName || ''}

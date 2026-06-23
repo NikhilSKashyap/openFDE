@@ -803,6 +803,29 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         await manager.broadcast({"type": "state_updated", "payload": {"reason": "sketch_demo"}})
         return web.json_response({"ok": True, **demo})
 
+    async def post_saas_demo(request: web.Request) -> web.Response:
+        """Local, demo-only: seed a realistic, product-shaped SaaS example — an "AI support inbox" —
+        as five connected **planned** intent steps (ingest → classify → draft → review → log).
+
+        Unlike the Sketch-First fixture, these boxes are PLANNED (no implementationFiles): the example
+        is meant to be RUN, so the user selects the steps, presses Run, and the Agent Council grounds
+        them into files in place — exercising the real loop (intent → Run → architecture/files →
+        OpenPM tasks → episode/commit → Story). Seeding itself is pure canvas state — NO repo file
+        write, NO scan (only ``.openfde/state.json``). REFUSES (409) when the canvas already has boxes
+        so it never overwrites real work.
+        """
+        if persistence.load_state().get("boxes"):
+            return web.json_response({"ok": False, "error":
+                "Canvas is not empty — the support-inbox example refuses to overwrite real work. "
+                "Clear the canvas or use a fresh instance."}, status=409)
+        from openfde import saas_demo
+        demo = saas_demo.support_inbox_demo_state()
+        persistence.save_state(demo)
+        logger.info("Loaded support-inbox SaaS example: %d planned step(s), %d arrow(s)",
+                    len(demo["boxes"]), len(demo["arrows"]))
+        await manager.broadcast({"type": "state_updated", "payload": {"reason": "saas_demo"}})
+        return web.json_response({"ok": True, **demo})
+
     # ================================================================== #
     #  REST — /api/issues/github  (durable intent v1)                     #
     # ================================================================== #
@@ -4964,6 +4987,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_get( "/api/tasks",                 get_tasks)
     app.router.add_put( "/api/tasks",                 put_tasks)
     app.router.add_post("/api/dev/sketch-demo",       post_sketch_demo)
+    app.router.add_post("/api/dev/saas-demo",          post_saas_demo)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)
