@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, getCouncilTranscript } from '../../api/backend'
 
 /**
  * CouncilChat — the read-only brain of Orient, as a real chat thread (not a single answer card).
@@ -38,12 +38,25 @@ const busyText = (roles) => {
   return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} mid-work — read-only chat stays available.`
 }
 
-export default function CouncilChat({ onOpenAgentSettings = null }) {
+export default function CouncilChat({ onOpenAgentSettings = null, councilNonce = 0 }) {
   const [target, setTarget]       = useState('auto')
   const [question, setQuestion]   = useState('')
   const [messages, setMessages]   = useState([])   // {id, role, text, label?, contributorsLabel?, provider?, state?, retry?}
   const [asking, setAsking]       = useState(false)
   const [busyRoles, setBusyRoles] = useState([])
+  const [transcript, setTranscript] = useState(null)   // durable council conversation (Orient inbox)
+
+  // The persistent council transcript — refreshed on load, on each council websocket event
+  // (councilNonce bumps in App), and after an Ask. Never blocks the Ask thread.
+  const refreshTranscript = useCallback(async () => {
+    const t = await getCouncilTranscript()
+    if (t?.ok) setTranscript(t)
+  }, [])
+  useEffect(() => {
+    let alive = true
+    getCouncilTranscript().then(t => { if (alive && t?.ok) setTranscript(t) })
+    return () => { alive = false }
+  }, [councilNonce])
 
   const idRef    = useRef(0)
   const abortRef = useRef(null)
@@ -122,10 +135,11 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
         contributorsLabel: res.contributorsLabel, provider: res.provider, brief: res.brief,
       })
       setBusyRoles(res.workBusyRoles || [])
+      refreshTranscript()
     } else {
       patch(pendingId, { state: 'error', text: 'Could not reach the council — is the backend running?', retry: query })
     }
-  }, [question, asking, target, patch])
+  }, [question, asking, target, patch, refreshTranscript])
 
   const cancel = () => abortRef.current?.abort()
 
@@ -143,11 +157,12 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
       patch(m.id, { startState: 'created', startError: null, startHandoffId: res.handoff?.id })
       setMessages(ms => [...ms, { id: nextId(), role: 'assistant',
         text: res.message || 'Implementation handoff created.' }])
+      refreshTranscript()
     } else {
       patch(m.id, { startState: 'error',
         startError: 'Could not create the handoff — the brief is unchanged. Try again.' })
     }
-  }, [patch])
+  }, [patch, refreshTranscript])
 
   // Enter sends; Shift+Enter inserts a newline; Cmd/Ctrl+Enter also sends.
   const onKeyDown = (e) => {
@@ -169,6 +184,10 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
         ))}
       </div>
       {busy && <div className="council-busy subtle">{busy}</div>}
+
+      {/* Persistent council inbox — the durable handoff conversation (orange-box transcript),
+          above the read-only Ask thread. Refreshes on council websocket events. */}
+      <CouncilTranscript data={transcript} />
 
       {/* Scrolling conversation — grows; composer below stays docked. */}
       <div className="council-thread" ref={threadRef}>
@@ -266,6 +285,70 @@ export default function CouncilChat({ onOpenAgentSettings = null }) {
       {onOpenAgentSettings && (
         <button className="council-settings-link" onClick={onOpenAgentSettings}>Agent Settings →</button>
       )}
+    </div>
+  )
+}
+
+// ── Council inbox transcript ─────────────────────────────────────────────────
+// The durable council conversation (architect → sr dev → verifier …), normalized server-side.
+// Compact role rows; summary first; chips for ids/commit/checks; expand for the body. Honest about
+// pending wakeups — never claims the agent was woken.
+const ROLE_ACCENT = {
+  user: 'var(--text-muted)', architect: 'var(--accent)',
+  sr_dev: 'var(--accent-orange)', system: 'var(--accent-orange)',
+}
+function rowAccent(it) {
+  if (it.role === 'verifier') return it.kind === 'verified' ? 'var(--solid)' : 'var(--violation)'
+  return ROLE_ACCENT[it.role] || 'var(--text-muted)'
+}
+
+function CouncilTranscript({ data }) {
+  const [open, setOpen] = useState({})
+  if (!data) return null
+  const items = data.items || []
+  return (
+    <div className="ctx">
+      <div className="ctx-head">
+        <span className="ctx-title">Council inbox</span>
+        {data.activeStatus && <span className="ctx-status">{data.activeStatus}</span>}
+        {!data.active && <span className="ctx-idle">idle</span>}
+      </div>
+      {items.length === 0 ? (
+        <div className="ctx-empty">No active external handoff — start council work, or ask below.</div>
+      ) : items.map(it => {
+        const accent = rowAccent(it)
+        const expandable = !!(it.body || (it.findings || []).length)
+        const sha = it.latestCommit ? String(it.latestCommit).slice(0, 7) : ''
+        return (
+          <div key={it.id} className={'ctx-row' + (it.kind === 'pending' ? ' ctx-pending' : '')}
+               style={{ borderLeftColor: accent }}>
+            <div className="ctx-row-head"
+                 onClick={expandable ? () => setOpen(o => ({ ...o, [it.id]: !o[it.id] })) : undefined}
+                 style={{ cursor: expandable ? 'pointer' : 'default' }}>
+              <span className="ctx-role" style={{ color: accent }}>{it.label}</span>
+              <span className="ctx-summary">{it.summary}</span>
+              {expandable && <span className="ctx-caret">{open[it.id] ? '▾' : '▸'}</span>}
+            </div>
+            <div className="ctx-chips">
+              {sha && <span className="ctx-chip mono" title={it.latestCommit}>⎇ {sha}</span>}
+              {it.checks && <span className="ctx-chip">✓ {it.checks}</span>}
+              {it.episodeId && <span className="ctx-chip mono" title={it.episodeId}>{String(it.episodeId).slice(0, 16)}</span>}
+              {(it.taskIds || []).length > 0 &&
+                <span className="ctx-chip mono">{it.taskIds.length} task{it.taskIds.length === 1 ? '' : 's'}</span>}
+              {it.kind === 'pending' && it.nativeWakeup &&
+                <span className="ctx-chip">native {it.nativeWakeup === 'native_unavailable' ? 'unavailable' : it.nativeWakeup}</span>}
+            </div>
+            {open[it.id] && expandable && (
+              <div className="ctx-body">
+                {(it.findings || []).length > 0 && (
+                  <ul className="ctx-findings">{it.findings.map((f, i) => <li key={i}>{f}</li>)}</ul>
+                )}
+                {it.body && <div className="ctx-pre">{it.body}</div>}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

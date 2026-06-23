@@ -109,6 +109,8 @@ export default function App() {
   const [activeView, setActiveView] = useState('whiteboard')
   // Latest LIVE external-council handoff event (or null) → the council handoff bubble.
   const [councilHandoff, setCouncilHandoff] = useState(null)
+  // Bumps on every council websocket event → the Orient council transcript refetches.
+  const [councilNonce, setCouncilNonce] = useState(0)
   const [canvasState, _rawCanvasDispatch] = useCanvasState()
   // Live mirror of boxes so WS handlers (stable closures) can map file→module.
   const boxesRef = useRef(canvasState.boxes)
@@ -949,6 +951,7 @@ export default function App() {
       else if (msg?.type === 'external_council_handoff' || msg?.type === 'external_council_verdict'
                || msg?.type === 'external_council_status') {
         setCouncilHandoff(msg)
+        setCouncilNonce(n => n + 1)                    // refresh the Orient council transcript
         if (msg.taskIds?.length) refetchTasks()       // OpenPM moved on a verdict
       }
       // A commit landed (the only commit path) — refresh the rail's nested beats,
@@ -2429,6 +2432,7 @@ export default function App() {
             {rightOpen && rightView === 'work' && (
               <WorkPanel
                 moment={currentMoment}
+                councilNonce={councilNonce}
                 selectionContext={selectionContext}
                 story={flowMode === 'story' ? story : null}
                 specMarkdown={specMarkdown}

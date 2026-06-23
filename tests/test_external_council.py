@@ -280,6 +280,53 @@ class ExternalCouncilTest(unittest.TestCase):
         self.assertIn("Resume council handoff", handoff_broker.delivery_banner(self.root, "codex"))
         self.assertEqual(handoff_broker.delivery_banner(self.root, "claude"), "")  # not for claude
 
+    # ── Orient council transcript ─────────────────────────────────────────────
+    def test_transcript_no_bus_is_inactive_not_error(self):
+        t = ec.build_council_transcript(self.root)
+        self.assertTrue(t["ok"])
+        self.assertFalse(t["active"])
+        self.assertEqual(t["items"], [])                          # a list, never an error
+
+    def test_transcript_normalizes_the_full_conversation(self):
+        from openfde import handoff_broker
+        res = self._start(box_ids=["box_a"])
+        # architect proposal, with ids preserved
+        prop = next(x for x in ec.build_council_transcript(self.root)["items"] if x["kind"] == "proposal")
+        self.assertEqual((prop["role"], prop["label"]), ("architect", "architect (Codex)"))
+        self.assertEqual(prop["episodeId"], res["episodeId"])
+        self.assertEqual(prop["taskIds"], res["taskIds"])
+        # sr-dev handoff from CLAUDE.md
+        ec.record_claude_handoff(self.root, commit_sha="abc1234", summary="did it", checks="tests passed")
+        ho = next(x for x in ec.build_council_transcript(self.root)["items"] if x["role"] == "sr_dev")
+        self.assertEqual((ho["kind"], ho["label"]), ("handoff", "sr dev (Claude Code)"))
+        self.assertEqual(ho["latestCommit"], "abc1234")
+        self.assertEqual(ho["summary"], "did it")
+        self.assertEqual(ho["checks"], "tests passed")
+        self.assertEqual(ho["episodeId"], res["episodeId"])
+        # verifier change-request from CODEX.md
+        ec.record_codex_verdict(self.root, episode_id=res["episodeId"], commit_sha="abc1234",
+                                status="CHANGES_REQUESTED", findings="handle the empty case")
+        vd = next(x for x in ec.build_council_transcript(self.root)["items"] if x["role"] == "verifier")
+        self.assertEqual((vd["kind"], vd["label"]), ("changes_requested", "verifier (Codex)"))
+        self.assertIn("handle the empty case", vd["findings"])
+        # pending delivery (the watcher would create it on the CHANGES_REQUESTED transition)
+        handoff_broker.process_transition(self.root, ec.bus_snapshot(self.root)[res["episodeId"]])
+        t = ec.build_council_transcript(self.root)
+        pend = next((x for x in t["items"] if x["kind"] == "pending"), None)
+        self.assertIsNotNone(pend)
+        self.assertEqual(pend["role"], "system")
+        self.assertIn("Waiting for", pend["summary"])
+        self.assertTrue(t["active"])
+        self.assertEqual(t["pendingDelivery"]["toRole"], "claude")
+
+    def test_transcript_opens_with_user_turn_from_council_chat(self):
+        self._start()
+        t = ec.build_council_transcript(self.root, council_chat=[{"role": "user", "text": "add a /healthz endpoint"}])
+        user = next((x for x in t["items"] if x["role"] == "user"), None)
+        self.assertIsNotNone(user)
+        self.assertEqual(user["kind"], "prompt")
+        self.assertIn("healthz", user["body"])
+
 
 def _view(status, *, episode="ep1", commit="", tasks=("task_a",), boxes=("box_x",), run=""):
     return {"episodeId": episode, "status": status, "taskIds": list(tasks), "runId": run,

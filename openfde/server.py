@@ -902,6 +902,14 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         from openfde import external_council
         return web.json_response({"ok": True, **external_council.read_status(path)})
 
+    async def get_external_council_transcript(request: web.Request) -> web.Response:
+        """The durable council CONVERSATION for Orient — a normalized chronological role transcript
+        (user → architect proposal → sr-dev handoffs → verifier verdicts → pending wakeup) built from
+        the bus + deliveries + council_chat. Never invents turns; ``active: false`` when no bus."""
+        from openfde import external_council
+        return web.json_response(external_council.build_council_transcript(
+            path, council_chat=persistence.load_council_chat()))
+
     # ================================================================== #
     #  REST — /api/issues/github  (durable intent v1)                     #
     # ================================================================== #
@@ -5078,6 +5086,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/external-council/work",    post_external_council_work)
     app.router.add_post("/api/external-council/verdict", post_external_council_verdict)
     app.router.add_get( "/api/external-council/status",  get_external_council_status)
+    app.router.add_get( "/api/external-council/transcript", get_external_council_transcript)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)

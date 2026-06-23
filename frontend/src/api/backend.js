@@ -105,6 +105,9 @@ export const getState = () => apiFetch('/api/state')
 // (`inbox`) for restoring the bubble on page load without showing stale/done ones.
 export const getExternalCouncilStatus = () => apiFetch('/api/external-council/status')
 
+// The durable council conversation transcript for the Orient inbox (normalized role turns).
+export const getCouncilTranscript = () => apiFetch('/api/external-council/transcript')
+
 /**
  * Persist the canvas state (boxes and arrows only; Sets are not serialisable).
  *
