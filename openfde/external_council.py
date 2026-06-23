@@ -265,6 +265,157 @@ def record_codex_verdict_cli(repo_root, *, status, summary="", findings=""):
                                 status=status, findings=text)
 
 
+# ── Council transcript — the durable Orient conversation log ──────────────────
+def _parse_channel_entries(md_text: str) -> list:
+    """Parse an append-log channel (CLAUDE.md / CODEX.md) into entries — one per ``## heading``
+    block. The heading is ``<episodeId> · <STATUS> · <shortSha>``; ``body`` is the lines under it."""
+    entries, cur = [], None
+    for line in (md_text or "").splitlines():
+        if line.startswith("## "):
+            if cur:
+                entries.append(cur)
+            cur = {"heading": line[3:].strip(), "_lines": []}
+        elif cur is not None:
+            cur["_lines"].append(line)
+    if cur:
+        entries.append(cur)
+    for e in entries:
+        e["body"] = "\n".join(e.pop("_lines")).strip()
+        parts = [p.strip() for p in e["heading"].split("·")]
+        e["episodeId"] = parts[0] if parts else ""
+        e["statusTok"] = parts[1] if len(parts) > 1 else ""
+        e["shortSha"] = parts[2] if len(parts) > 2 else ""
+    return entries
+
+
+def _body_field(body: str, key: str) -> str:
+    for ln in (body or "").splitlines():
+        if ln.strip().lower().startswith(key.lower() + ":"):
+            return ln.split(":", 1)[1].strip()
+    return ""
+
+
+def _commit_or_none(*candidates):
+    """First real commit among the candidates, or None — '(none)' is the bus sentinel for none."""
+    for c in candidates:
+        if c and c != "(none)":
+            return c
+    return None
+
+
+def _body_freeform(body: str) -> list:
+    """Body lines that are NOT ``key: value`` receipt fields → the freeform findings / notes."""
+    out = []
+    for ln in (body or "").splitlines():
+        s = ln.strip()
+        if s and not any(s.lower().startswith(k + ":") for k in ("commit", "summary", "checks")):
+            out.append(s)
+    return out
+
+
+def build_council_transcript(repo_root, *, council_chat=None) -> dict:
+    """Normalize the durable council records into ONE chronological role transcript for Orient:
+    the architect proposal (``TASKS.md`` objective), the sr-dev handoffs (``CLAUDE.md``), the
+    verifier verdicts (``CODEX.md``), and the pending session-wakeup ``delivery`` — plus the user's
+    latest Orient question (``council_chat``) as the opening turn. No fabricated turns; existing ids
+    (episode / task / run / box / commit) are preserved. When there is no council bus, returns
+    ``active: false`` with an empty transcript — the caller shows 'No active external handoff.'"""
+    from openfde import handoff_broker
+
+    tasks_md = council_bus.read_bus_file(repo_root, "tasks")
+    claude_md = council_bus.read_bus_file(repo_root, "claude")
+    codex_md = council_bus.read_bus_file(repo_root, "codex")
+    has_bus = bool(tasks_md.strip() or claude_md.strip() or codex_md.strip())
+
+    views = [work_item_view(it) for it in council_bus.parse_work_items(tasks_md)
+             if (it.get("header") or {}).get("episodeId")]
+    by_episode = {v["episodeId"]: v for v in views}
+    active_view = next((v for v in reversed(views) if v["status"] in ACTIVE_STATUSES),
+                       views[-1] if views else None)
+
+    deliveries = handoff_broker.load_deliveries(repo_root)
+    at_for = {(d.get("episodeId"), d.get("status")): d.get("createdAt") for d in deliveries}
+
+    def _ids(eid):
+        v = by_episode.get(eid) or {}
+        return {"taskIds": v.get("taskIds") or [], "runId": v.get("runId") or "",
+                "boxIds": v.get("boxIds") or []}
+
+    items = []
+
+    # 0. The user's latest Orient question (a real record) opens the conversation.
+    last_user = next((t for t in reversed(council_chat or [])
+                      if isinstance(t, dict) and t.get("role") == "user" and (t.get("text") or "").strip()), None)
+    if last_user:
+        txt = last_user["text"].strip()
+        items.append({"id": "user:last", "at": last_user.get("at", ""), "role": "user",
+                      "label": "user", "kind": "prompt", "episodeId": "", "taskIds": [],
+                      "summary": txt[:140], "body": txt})
+
+    # 1. Architect proposal — the active/latest work item's objective + acceptance.
+    if active_view:
+        v = active_view
+        body = (("Objective: " + v["objective"] + "\n\n") if v["objective"] else "") + \
+               (("Acceptance:\n" + "\n".join("- " + a for a in v["acceptance"])) if v["acceptance"] else "")
+        items.append({
+            "id": "proposal:" + v["episodeId"], "at": at_for.get((v["episodeId"], v["status"]), ""),
+            "role": "architect", "label": "architect (Codex)", "kind": "proposal",
+            "episodeId": v["episodeId"], "taskIds": v["taskIds"], "runId": v["runId"],
+            "boxIds": v["boxIds"], "latestCommit": v["latestCommit"] or None,
+            "summary": v["objective"] or "Architecture proposal", "body": body.strip(),
+        })
+
+    # 2. Interleave sr-dev handoffs (CLAUDE.md) and verifier verdicts (CODEX.md) in protocol order.
+    cc, cx = _parse_channel_entries(claude_md), _parse_channel_entries(codex_md)
+    for i in range(max(len(cc), len(cx))):
+        if i < len(cc):
+            e = cc[i]
+            items.append({
+                "id": "claude:" + str(i), "at": at_for.get((e["episodeId"], e["statusTok"]), ""),
+                "role": "sr_dev", "label": "sr dev (Claude Code)", "kind": "handoff",
+                "episodeId": e["episodeId"], **_ids(e["episodeId"]),
+                "latestCommit": _commit_or_none(_body_field(e["body"], "commit"), e["shortSha"]),
+                "summary": _body_field(e["body"], "summary") or "Implementation handoff",
+                "checks": _body_field(e["body"], "checks"), "body": e["body"],
+            })
+        if i < len(cx):
+            e = cx[i]
+            kind = "verified" if e["statusTok"] == council_bus.STATUS_VERIFIED else "changes_requested"
+            findings = _body_freeform(e["body"])
+            items.append({
+                "id": "codex:" + str(i), "at": at_for.get((e["episodeId"], e["statusTok"]), ""),
+                "role": "verifier", "label": "verifier (Codex)", "kind": kind,
+                "episodeId": e["episodeId"], **_ids(e["episodeId"]),
+                "latestCommit": _commit_or_none(_body_field(e["body"], "commit"), e["shortSha"]),
+                "summary": findings[0] if findings else ("Verified" if kind == "verified" else "Changes requested"),
+                "findings": findings, "body": e["body"],
+            })
+
+    # 3. Pending session-wakeup delivery — the current "waiting on" state, prominent + last.
+    pending = handoff_broker.active_delivery(deliveries)
+    pending = pending if (pending and not pending.get("acknowledgedAt")) else None
+    if pending:
+        to = pending.get("toRole")
+        to_label = {"codex": "Codex", "claude": "Claude Code", "human": "you"}.get(to, to or "")
+        native = next((w["status"] for w in (pending.get("wake") or [])
+                       if str(w.get("adapter", "")).endswith("-session")), "native_unavailable")
+        items.append({
+            "id": "pending:" + (pending.get("deliveryId") or ""), "at": pending.get("createdAt", ""),
+            "role": "system", "label": "system", "kind": "pending",
+            "episodeId": pending.get("episodeId", ""), "taskIds": pending.get("taskIds") or [],
+            "latestCommit": pending.get("latestCommit") or None, "toRole": to,
+            "wake": pending.get("wake") or [], "nativeWakeup": native,
+            "summary": f"Waiting for {to_label}", "body": "",
+        })
+
+    active = bool((active_view and active_view["status"] in ACTIVE_STATUSES) or pending)
+    return {
+        "ok": True, "active": active, "items": items, "hasBus": has_bus,
+        "pendingDelivery": handoff_broker.delivery_summary(pending),
+        "activeStatus": active_view["status"] if active_view else None,
+    }
+
+
 def _head_commit(repo_root):
     """(message, sha) of HEAD, or ('', '') when not a git repo / no commits."""
     try:

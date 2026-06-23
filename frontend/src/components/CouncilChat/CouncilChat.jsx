@@ -318,7 +318,7 @@ function CouncilTranscript({ data }) {
       ) : items.map(it => {
         const accent = rowAccent(it)
         const expandable = !!(it.body || (it.findings || []).length)
-        const sha = it.latestCommit ? String(it.latestCommit).slice(0, 7) : ''
+        const sha = (it.latestCommit && it.latestCommit !== '(none)') ? String(it.latestCommit).slice(0, 7) : ''
         return (
           <div key={it.id} className={'ctx-row' + (it.kind === 'pending' ? ' ctx-pending' : '')}
                style={{ borderLeftColor: accent }}>
