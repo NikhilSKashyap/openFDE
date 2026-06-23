@@ -51,13 +51,13 @@ export default function Toolbar({ activeTool, setActiveTool, activeView, setActi
         <span>Lock</span>
       </button>
 
-      {/* Expand / collapse all modules */}
-      <button className="btn" title="Expand all modules"
+      {/* Expand / collapse all drillable boxes (modules + built intent steps) */}
+      <button className="btn" title="Expand all modules and built steps"
         onClick={() => { onExpandAll?.(); setActiveView('whiteboard') }}>
         <IconExpandAll />
         <span>Expand</span>
       </button>
-      <button className="btn" title="Collapse all modules"
+      <button className="btn" title="Collapse all modules and built steps"
         onClick={() => { onCollapseAll?.(); setActiveView('whiteboard') }}>
         <IconCollapseAll />
         <span>Collapse</span>

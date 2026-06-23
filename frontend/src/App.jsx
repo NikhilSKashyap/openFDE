@@ -13,6 +13,7 @@ import Plugins from './components/Plugins/Plugins'
 import SemanticGraphCard from './components/SemanticGraph/SemanticGraphCard'
 import ConceptPanel from './components/SemanticGraph/ConceptPanel'
 import FunctionPatch, { TrailEditor } from './components/Whiteboard/FunctionPatch'
+import { isIntentDrillBox } from './components/Whiteboard/archLayout'
 import RaiseIssue from './components/Feedback/RaiseIssue'
 import { pickPrimaryFn } from './lib/flowResolve'
 import { watchActivityTargets } from './lib/watchTarget'
@@ -1103,18 +1104,20 @@ export default function App() {
     if (!archGraph) getArchgraph().then(g => { if (g && Array.isArray(g.files)) setArchGraph(g) })
   }
 
-  // Expand every module + every file at once.
+  // Expand every drillable box (modules + BUILT intent boxes) and every file at once. Built
+  // intent boxes carry their own implementation files, so they expand immediately without the
+  // ArchGraph (matching the double-click / chevron path); modules still need the graph to show
+  // their nested files, so it's fetched and re-applied when absent.
   function expandAll() {
+    applyExpandAll(archGraph)
     if (!archGraph) {
       getArchgraph().then(g => { if (g && Array.isArray(g.files)) { setArchGraph(g); applyExpandAll(g) } })
-      return
     }
-    applyExpandAll(archGraph)
   }
   function applyExpandAll(graph) {
     const ids = new Set()
-    canvasState.boxes.forEach(b => { if (b.moduleId) ids.add(b.id) })
-    ;(graph.files || []).forEach(f => ids.add(`box:file:${f.path}`))
+    canvasState.boxes.forEach(b => { if (b.moduleId || isIntentDrillBox(b)) ids.add(b.id) })
+    ;(graph?.files || []).forEach(f => ids.add(`box:file:${f.path}`))
     setExpandedIds(ids)
   }
   function collapseAll() { setExpandedIds(new Set()); setArchSel(null) }
