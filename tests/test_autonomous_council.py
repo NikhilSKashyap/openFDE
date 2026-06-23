@@ -211,48 +211,52 @@ class CouncilNoiseMigrationTest(unittest.TestCase):
         e.update(kw)
         return e
 
-    def test_classifier_catches_council_machinery_only(self):
+    def test_classifier_catches_council_machinery_by_title(self):
         cases = {
-            "Autonomous Council Verification": "verification",
-            "Autonomous Council Relay REVIEW": "review",
+            "Autonomous Council Verification": "relay",
+            "Autonomous Council Relay": "relay",
             "Claude Code Implementation Prompt": "implementation_prompt",
-            "External Agent Council": "relay",
-            "Council Verification Smoke Test": "smoke",          # smoke matches first
+            "Codex Implementation Prompt": "implementation_prompt",
+            "External Agent Council": "council",
+            "Council Verification Smoke Test": "smoke",
         }
         for title, kind in cases.items():
             self.assertEqual(internal_council_kind(self._ep(title=title)), kind, title)
-        # real product tasks are NOT caught (even if they say "review"/"verify" without council context)
-        self.assertIsNone(internal_council_kind(self._ep(title="build an agentic SaaS for insurance")))
-        self.assertIsNone(internal_council_kind(self._ep(title="add a code review feature", kind="prompt")))
-        # real work — a commit or autonomous-run council data — is never internal
-        self.assertIsNone(internal_council_kind(self._ep(title="Council Smoke Test Artifact", commitShas=["abc"])))
-        self.assertIsNone(internal_council_kind(self._ep(title="Autonomous Council Verification",
+        # real FEATURE titles are NEVER folded — even when they carry council/prompt words
+        for title in ("External Council Inbox", "Council Handoff Wakeups", "Persistent Council Inbox",
+                      "Passive Codex Prompt Capture", "build an agentic SaaS for insurance",
+                      "add a code review feature"):
+            self.assertIsNone(internal_council_kind(self._ep(title=title)), title)
+        # a machinery TITLE with a commit IS folded (a council-relay implementation commit is machinery)
+        self.assertEqual(internal_council_kind(self._ep(title="Autonomous Council Relay", commitShas=["abc"])), "relay")
+        # only a real autonomous run (a recorded council loop) is protected
+        self.assertIsNone(internal_council_kind(self._ep(title="Autonomous Council Relay",
                                                          council={"status": "verified"})))
 
     def test_migration_demotes_internal_and_is_reversible(self):
-        noisy = self._ep(title="Autonomous Council Verification")
-        real = self._ep(title="build an agentic SaaS", commitShas=["deadbeef"])
+        noisy = self._ep(title="Autonomous Council Relay", commitShas=["face0ff"])   # machinery + commit
+        real = self._ep(title="External Council Inbox", commitShas=["deadbeef"])     # real feature
         self.p.upsert_episode(noisy)
         self.p.upsert_episode(real)
         self.p.flag_internal_council_episodes()
         n = self.p.get_episode(noisy["episodeId"])
         self.assertTrue(n["internal"])
         self.assertEqual((n["internalKind"], n["signal"], n["nonImplementation"]),
-                         ("verification", "operational", True))
+                         ("relay", "operational", True))
         self.assertEqual(self.p.get_episode(real["episodeId"])["signal"], "product")
-        # reversible: the demoted artifact later gains a commit → flips back to product
-        n["commitShas"] = ["c0ffee0"]
+        # reversible: it becomes a real autonomous run (a recorded council loop) → product again
+        n["council"] = {"status": "verified"}
         self.p.upsert_episode(n)
         self.p.flag_internal_council_episodes()
         self.assertFalse(self.p.get_episode(noisy["episodeId"]).get("internal"))
 
     def test_rail_excludes_internal_artifacts(self):
         from openfde.server import build_rail_payload
-        self.p.upsert_episode(self._ep(title="Autonomous Council Verification"))
-        self.p.upsert_episode(self._ep(title="build a real thing", commitShas=["abc1234"]))
+        self.p.upsert_episode(self._ep(title="Autonomous Council Relay", commitShas=["aaa1111"]))
+        self.p.upsert_episode(self._ep(title="External Council Inbox", commitShas=["abc1234"]))
         titles = [c["title"] for c in build_rail_payload(self.p)["episodes"]]
-        self.assertIn("build a real thing", titles)
-        self.assertNotIn("Autonomous Council Verification", titles)   # folded under the council
+        self.assertIn("External Council Inbox", titles)
+        self.assertNotIn("Autonomous Council Relay", titles)         # folded under the council
 
     def test_hydrate_phase_cards_for_parent_with_council(self):
         parent = self._ep(title="build X", commitShas=["abc1234"], council={

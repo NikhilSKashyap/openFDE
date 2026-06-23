@@ -124,34 +124,37 @@ def is_operational(prompt: str) -> bool:
 
 
 # ── Internal council artifacts — relay machinery that must NOT be a product rail beat ───
-# A council MECHANIC episode (a verification run, a relay review, a Claude-Code implementation-prompt
-# / OPS handoff, a smoke/test run, a bare "External Agent Council" label) is an internal turn/receipt,
-# not a product task. We demote it off the product rail and fold it under the council, GENERALLY —
-# keyed on council-mechanic vocabulary, never on a specific id. The phrasing requires council/relay/
-# autonomous CONTEXT next to the mechanic word, so a real task that merely says "add a review feature"
-# is never caught. An episode with a real implementation commit OR autonomous-run council data is
-# real work and is NEVER demoted.
+# A council MECHANIC episode — a Claude-Code/Codex "Implementation Prompt" (the summarizer's fallback
+# title for a relay handoff), an "Autonomous Council Relay/Verification/Review" run, a bare "External
+# Agent Council" label, or a smoke/test artifact — is an internal turn/receipt, not a product feature.
+# We demote it off the product rail and fold it under the council, GENERALLY — keyed on the TITLE (the
+# rail label), with patterns tuned to mechanic phrasing so a real FEATURE title ("External Council
+# Inbox", "Council Handoff Wakeups", "Passive Codex Prompt Capture") is never caught. The title is the
+# discriminator — a machinery title is folded even when it landed a commit (a council-relay
+# implementation commit is still relay machinery); only a real autonomous run (a recorded `council`
+# loop) is unconditionally product. Title-only on purpose: a product task that merely mentions the
+# council in its prompt is never folded.
 _COUNCIL_MACHINERY = (
-    (re.compile(r"council[\s\w]*\bsmoke\b|\bsmoke\b[\s\w]*council|smoke\s+test\s+artifact", re.I), "smoke"),
-    (re.compile(r"(council|relay|autonomous)[\s\w]*\bverif|\bverif\w*[\s\w]*(council|relay)", re.I), "verification"),
-    (re.compile(r"(council|relay|autonomous)[\s\w]*\breview\b|\breview\b[\s\w]*(council|relay)", re.I), "review"),
-    (re.compile(r"claude[\s\-]*code\s+implementation|implementation\s+prompt|handoff\s+prompt", re.I), "implementation_prompt"),
-    (re.compile(r"autonomous\s+council\s+relay|external\s+agent\s+council|council\s+relay", re.I), "relay"),
+    (re.compile(r"\b(implementation|handoff)\s+prompt\b", re.I), "implementation_prompt"),
+    (re.compile(r"\bautonomous\s+council\s+(relay|verif\w*|review)\b", re.I), "relay"),
+    (re.compile(r"\bexternal\s+agent\s+council\b", re.I), "council"),
+    (re.compile(r"\bcouncil\s+(smoke|verification)\b|\bsmoke\s+test\s+artifact\b", re.I), "smoke"),
 )
 
 
 def internal_council_kind(episode: dict):
-    """Classify ``episode`` as an internal council artifact and return its kind
-    (``smoke`` | ``verification`` | ``review`` | ``implementation_prompt`` | ``relay``), or ``None``
-    for a real product episode. Real work (a commit, or autonomous-run ``council`` data) is never
-    internal — only no-commit council machinery is."""
+    """Classify ``episode`` as an internal council artifact by its TITLE (the rail label) and return
+    the kind (``implementation_prompt`` | ``relay`` | ``council`` | ``smoke``), or ``None`` for a real
+    product episode. Title-only, so a machinery-titled episode is folded even when it has a commit (a
+    council-relay implementation commit is still machinery), while a real autonomous run (a recorded
+    ``council`` loop) is never internal. General — by vocabulary, never by id."""
     if not isinstance(episode, dict):
         return None
-    if episode.get("commitShas") or episode.get("commits") or episode.get("council"):
-        return None                       # real implementation / a real autonomous run → product
-    text = " ".join(str(episode.get(k) or "") for k in ("title", "prompt", "summary"))
+    if episode.get("council"):
+        return None                       # a real autonomous run (a recorded loop) → product
+    title = str(episode.get("title") or "")
     for rx, kind in _COUNCIL_MACHINERY:
-        if rx.search(text):
+        if rx.search(title):
             return kind
     return None
 

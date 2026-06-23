@@ -274,10 +274,15 @@ export default function App() {
     const eps = Array.isArray(res.episodes) ? res.episodes : []
     // The cheap rail omits PR readiness + the Outside bucket (those come from refreshEpisodesFull).
     // Merge so a frequent rail poll never wipes the richer fields the full fetch already loaded.
-    setEpisodes(prev => eps.map(e => {
-      const old = (prev || []).find(p => p.episodeId === e.episodeId)
-      return old?.prReadiness ? { ...e, prReadiness: old.prReadiness } : e
-    }))
+    setEpisodes(prev => {
+      // Never let a transient-empty rail response wipe an already-populated rail (the chip rail
+      // returns null when episodes is empty, so a single empty fetch would make it vanish on reload).
+      if (!eps.length && (prev?.length || 0) > 0) return prev
+      return eps.map(e => {
+        const old = (prev || []).find(p => p.episodeId === e.episodeId)
+        return old?.prReadiness ? { ...e, prReadiness: old.prReadiness } : e
+      })
+    })
     setOutsideBucket(prev => {
       const next = res.outside || null
       return (next?.commits?.length || 0) === 0 && (prev?.commits?.length || 0) > 0 ? prev : next
@@ -316,8 +321,10 @@ export default function App() {
     const res = await getReviewEpisodesFull()
     if (!res?.ok) return
     const eps = Array.isArray(res.episodes) ? res.episodes : []
-    setEpisodes(eps)                         // full view supersedes the cheap rail (carries readiness)
-    setOutsideBucket(res.outside || null)
+    // The full view supersedes the cheap rail (carries readiness) — but a transient ok-but-empty
+    // response (a hiccup in the 49s git-heavy call on reload) must NOT wipe a populated rail.
+    setEpisodes(prev => (!eps.length && (prev?.length || 0) > 0) ? prev : eps)
+    if (eps.length || !res.outside) setOutsideBucket(res.outside || null)
   })
 
   // Pull the SERVER's reconciled task list and adopt it as local truth. GET

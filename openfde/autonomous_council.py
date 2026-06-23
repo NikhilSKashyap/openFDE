@@ -280,18 +280,42 @@ def _phase_states_from_council(council: dict):
     return states, council.get("latestCommit")
 
 
+def _council_from_run(persistence, episode):
+    """Reconstruct a council summary from the episode's run record (so a parent whose ``council`` field
+    predates the summary still hydrates) — None when no usable run exists."""
+    repo_root = persistence.openfde_dir.parent
+    for rid in reversed(episode.get("runIds") or []):
+        rec = load_run(repo_root, rid)
+        if rec and rec.get("episodeId") == episode.get("episodeId") and rec.get("storyEvents"):
+            return {"runId": rid, "phase": rec.get("phase"), "status": rec.get("status"),
+                    "loop": rec.get("loop", 0), "maxLoops": rec.get("maxLoops", 0),
+                    "latestCommit": rec.get("latestCommit"), "blockedReason": rec.get("blockedReason"),
+                    "providers": rec.get("providers") or {},
+                    "edges": [ev["edge"] for ev in rec.get("storyEvents", [])],
+                    "turns": (rec.get("turns") or [])[-14:], "updatedAt": rec.get("updatedAt")}
+    return None
+
+
 def hydrate_phase_cards(persistence) -> int:
     """Backfill the five OpenPM phase cards for any PRODUCT parent episode that has autonomous-run
-    ``council`` data but is missing them — so existing parents pick up phase cards on load. Card state
-    reflects the council's edges/status; the implementation card carries the commit. Idempotent."""
+    council data (on the episode, or reconstructable from its run record) but is missing them — so
+    existing parents pick up phase cards on load. Card state reflects the council's edges/status; the
+    implementation card carries the commit. Skips internal/demoted episodes. Idempotent."""
     eps = persistence.load_episodes()
     tasks = persistence.load_tasks()
     have = {(t.get("episodeId"), t.get("phaseKey")) for t in tasks
             if isinstance(t, dict) and t.get("phaseKey")}
-    added = 0
+    added, backfilled = 0, []
     for e in eps:
+        if e.get("internal"):
+            continue
         council = e.get("council")
-        if not council or e.get("internal"):
+        if not council and e.get("runIds"):
+            council = _council_from_run(persistence, e)
+            if council:
+                e["council"] = council                    # backfill onto the episode (drawer + reuse)
+                backfilled.append(e)
+        if not council:
             continue
         eid = e["episodeId"]
         if all((eid, key) in have for key, _t in _PHASE_TASKS):
@@ -309,6 +333,8 @@ def hydrate_phase_cards(persistence) -> int:
                 "episodeTag": e.get("tag", ""), "promptTitle": e.get("title", ""), "promptLabel": e.get("title", ""),
             })
             added += 1
+    for e in backfilled:
+        persistence.upsert_episode(e)
     if added:
         persistence.save_tasks(tasks)
     return added
