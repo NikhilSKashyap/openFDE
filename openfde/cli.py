@@ -76,6 +76,26 @@ def main() -> None:
     status_parser.add_argument("--path", default=".",
                                help="Repository path (default: current directory)")
 
+    handoff_parser = council_sub.add_parser(
+        "handoff", help="Senior Dev (Claude Code): hand the active task to Codex for verification")
+    handoff_parser.add_argument("--role", choices=["claude"], default="claude",
+                                help="Senior-dev handoff (Claude Code)")
+    handoff_parser.add_argument("--commit", default="HEAD", help="Commit to verify (default: HEAD)")
+    handoff_parser.add_argument("--summary", default="", help="What changed")
+    handoff_parser.add_argument("--checks", default="",
+                                help="What passed/failed, e.g. 'tests passed; build passed'")
+    handoff_parser.add_argument("--path", default=".",
+                                help="Repository path (default: current directory)")
+
+    verdict_parser = council_sub.add_parser(
+        "verdict", help="Codex: record a verification verdict (never commits)")
+    verdict_parser.add_argument("--status", choices=["verified", "changes-requested"], required=True)
+    verdict_parser.add_argument("--summary", default="", help="Verdict summary")
+    verdict_parser.add_argument("--finding", action="append", default=[],
+                                help="A specific finding / requested change (repeatable)")
+    verdict_parser.add_argument("--path", default=".",
+                                help="Repository path (default: current directory)")
+
     args = parser.parse_args()
 
     if args.command == "watch":
@@ -95,9 +115,35 @@ def main() -> None:
         # Non-zero exit only when the agent truly failed with no useful change.
         sys.exit(0 if out["episode"]["status"] in ("reviewing", "complete_no_changes") else 1)
     elif args.command == "council":
-        if getattr(args, "council_command", None) == "status":
-            from openfde.external_council import render_session_inbox
-            print(render_session_inbox(args.path, args.role), end="")
+        from openfde import external_council as ec
+        cc = getattr(args, "council_command", None)
+        if cc == "status":
+            print(ec.render_session_inbox(args.path, args.role), end="")
+        elif cc == "handoff":
+            sha = ec._resolve_commit(args.path, args.commit)
+            res = ec.record_claude_handoff(args.path, commit_sha=sha,
+                                           summary=args.summary, checks=args.checks)
+            if not res["found"]:
+                print("No active Claude Code task to hand off "
+                      "(has Codex started work — READY_FOR_CC?).")
+                sys.exit(1)
+            print(f"Handed off {res['episodeId']} → READY_FOR_CODEX_VERIFICATION "
+                  f"(commit {sha[:12]}).")
+            if not res["trailerOk"]:
+                print(f"  ⚠ that commit has no OpenFDE-Episode trailer — Codex can still verify, but "
+                      f"stamp next time: OpenFDE-Episode: {res['episodeId']}, OpenFDE-Role: senior_dev, "
+                      "OpenFDE-Handoff: ready_for_codex_verification")
+            print("\nCodex can now run:  openfde council status --role codex")
+        elif cc == "verdict":
+            status = "VERIFIED" if args.status == "verified" else "CHANGES_REQUESTED"
+            res = ec.record_codex_verdict_cli(args.path, status=status, summary=args.summary,
+                                              findings="\n".join(args.finding))
+            if not res["found"]:
+                print("No task awaiting Codex verification (READY_FOR_CODEX_VERIFICATION).")
+                sys.exit(1)
+            print(f"Recorded {status} for {res['episodeId']}.")
+            if status == "CHANGES_REQUESTED":
+                print("Claude Code can now run:  openfde council status --role claude")
         else:
             council_parser.print_help()
             sys.exit(1)

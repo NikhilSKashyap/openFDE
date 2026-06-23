@@ -144,7 +144,10 @@ def render_council_md(project_log: list) -> str:
              "`openfde council status --role codex` (Architect+Verifier) or "
              "`openfde council status --role claude` (Senior Dev). It shows the current handoff "
              "addressed to you: status, episode/task ids, objective, next action, and (for Claude) "
-             "the exact commit trailers to stamp.", ""]
+             "the exact commit trailers to stamp. Completion is a handoff, not just a commit: after "
+             "committing, Claude runs `openfde council handoff --role claude --commit HEAD --summary "
+             "... --checks ...`; Codex records `openfde council verdict --status verified|"
+             "changes-requested ...` (Codex never commits).", ""]
     for b in _COUNCIL_ORDER:
         lines.append(f"## {b}")
         rows = buckets[b][-_MAX_LEDGER_PER_ROLE:]

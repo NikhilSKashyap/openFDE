@@ -173,6 +173,98 @@ def record_codex_verdict(repo_root, *, episode_id, commit_sha, status, findings=
     return {"status": status, "episodeId": episode_id, "commitSha": commit_sha, "found": found}
 
 
+# Statuses Claude Code owns (its turn to implement + hand off).
+_CC_OWNED = (council_bus.STATUS_READY_FOR_CC, council_bus.STATUS_CLAUDE_WORKING,
+             council_bus.STATUS_CHANGES_REQUESTED)
+
+
+def _active_item(repo_root, statuses):
+    """The latest work item whose status is in ``statuses`` (the one a role acts on now), or None.
+    Resolution only — never mints a work item or id."""
+    hits = [v for v in bus_snapshot(repo_root).values()
+            if v["episodeId"] and v["status"] in statuses]
+    return hits[-1] if hits else None
+
+
+def _resolve_commit(repo_root, ref="HEAD") -> str:
+    """Resolve a git ref (``HEAD``, a short sha) to a full sha; returns the ref unchanged if git
+    can't resolve it (so a caller-supplied literal sha still flows through)."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "rev-parse", ref or "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else (ref or "")
+    except (OSError, subprocess.SubprocessError):
+        return ref or ""
+
+
+def _commit_message(repo_root, sha):
+    """A specific commit's full message, or None when git can't read it."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "log", "-1", "--pretty=%B", sha],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def record_claude_handoff(repo_root, *, commit_sha, summary="", checks=""):
+    """Claude Code's senior-dev handoff — the step that makes "committed" actually *done*.
+
+    Resolves the active CC-owned work item, flips it to ``READY_FOR_CODEX_VERIFICATION`` with
+    ``latestCommit`` (preserving episode/task/run/box ids), and appends a structured receipt
+    (commit / summary / checks) to ``CLAUDE.md`` so Codex's inbox shows it. Never mints an id; never
+    commits. ``trailerOk`` is False when the commit is resolvable but missing its ``OpenFDE-Episode``
+    trailer — the caller WARNS, it does not drop the handoff.
+
+    Returns ``{found, episodeId, taskIds, runId, status, commitSha, trailerOk}``.
+    """
+    v = _active_item(repo_root, _CC_OWNED)
+    if not v:
+        return {"found": False, "episodeId": "", "taskIds": [], "runId": "",
+                "status": "", "commitSha": commit_sha, "trailerOk": True}
+    episode_id = v["episodeId"]
+    short = (commit_sha or "")[:7]
+    heading = f"{episode_id} · READY_FOR_CODEX_VERIFICATION" + (f" · {short}" if short else "")
+    body = [f"commit: {commit_sha or '(none)'}"]
+    if (summary or "").strip():
+        body.append(f"summary: {summary.strip()}")
+    if (checks or "").strip():
+        body.append(f"checks: {checks.strip()}")
+    council_bus.append_bus_entry(repo_root, "claude", heading, "\n".join(body))
+
+    rebuilt = []
+    for it in council_bus.parse_work_items(council_bus.read_bus_file(repo_root, "tasks")):
+        h = it["header"]
+        if h.get("episodeId") == episode_id:
+            h = dict(h)
+            h["status"] = council_bus.STATUS_READY_FOR_CODEX_VERIFICATION
+            if commit_sha:
+                h["latestCommit"] = commit_sha
+        rebuilt.append(council_bus.render_front_matter(h, it["body"]).rstrip("\n"))
+    council_bus.write_bus_file(repo_root, "tasks", "\n\n".join(rebuilt) + "\n")
+
+    trailer_ok = True
+    if commit_sha:
+        msg = _commit_message(repo_root, commit_sha)
+        if msg is not None:                                   # commit readable → check its trailers
+            trailer_ok = episode_id in (council_bus.binding_from_commit(msg).get("episodeIds") or [])
+    return {"found": True, "episodeId": episode_id, "taskIds": v["taskIds"], "runId": v["runId"],
+            "status": council_bus.STATUS_READY_FOR_CODEX_VERIFICATION, "commitSha": commit_sha,
+            "trailerOk": trailer_ok}
+
+
+def record_codex_verdict_cli(repo_root, *, status, summary="", findings=""):
+    """CLI-friendly Codex verdict: resolve the active item awaiting verification (so Codex needn't
+    retype ids), then :func:`record_codex_verdict` it. ``status`` is ``VERIFIED`` |
+    ``CHANGES_REQUESTED``. Returns the verdict result (+ ``found: False`` when nothing awaits Codex)."""
+    v = _active_item(repo_root, (council_bus.STATUS_READY_FOR_CODEX_VERIFICATION,))
+    if not v:
+        return {"found": False, "episodeId": "", "status": status, "commitSha": ""}
+    text = "\n\n".join(t.strip() for t in (summary, findings) if (t or "").strip())
+    return record_codex_verdict(repo_root, episode_id=v["episodeId"], commit_sha=v["latestCommit"],
+                                status=status, findings=text)
+
+
 def _head_commit(repo_root):
     """(message, sha) of HEAD, or ('', '') when not a git repo / no commits."""
     try:
@@ -373,13 +465,9 @@ _CLAUDE_NEEDS_TRAILERS = (council_bus.STATUS_READY_FOR_CC, council_bus.STATUS_CL
 
 
 def _pick_work_item(repo_root):
-    """The work item a session should orient on: the latest ACTIVE one, else the latest overall,
-    else None (empty/absent bus). Never invents an item."""
-    views = [v for v in bus_snapshot(repo_root).values() if v["episodeId"]]
-    if not views:
-        return None
-    active = [v for v in views if v["status"] in ACTIVE_STATUSES]
-    return active[-1] if active else views[-1]
+    """The work item a session should orient on: the latest ACTIVE (in-flight) one, else None.
+    A done (VERIFIED) or empty/absent bus → None → "No active council handoff." Never invents one."""
+    return _active_item(repo_root, ACTIVE_STATUSES)
 
 
 def render_session_inbox(repo_root, role: str) -> str:

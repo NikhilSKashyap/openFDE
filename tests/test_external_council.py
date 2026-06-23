@@ -189,6 +189,69 @@ class ExternalCouncilTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Codex Inbox", r.stdout)
 
+    # ── Symmetric handoff ritual ──────────────────────────────────────────────
+    def test_claude_handoff_moves_to_verification_and_codex_inbox_shows_it(self):
+        res = self._start(box_ids=["box_a"])
+        out = ec.record_claude_handoff(self.root, commit_sha="deadbeef1234",
+                                       summary="added the endpoint + a unit test",
+                                       checks="tests passed; build passed")
+        self.assertTrue(out["found"])
+        self.assertEqual(out["episodeId"], res["episodeId"])      # ids preserved
+        self.assertEqual(out["taskIds"], res["taskIds"])
+        h = council_bus.parse_work_items(council_bus.read_bus_file(self.root, "tasks"))[0]["header"]
+        self.assertEqual(h["status"], "READY_FOR_CODEX_VERIFICATION")
+        self.assertEqual(h["latestCommit"], "deadbeef1234")
+        self.assertEqual(h["episodeId"], res["episodeId"])
+        inbox = ec.render_session_inbox(self.root, "codex")        # Codex now sees the handoff
+        self.assertIn("Verify the latest Claude Code commit", inbox)
+        self.assertIn("deadbeef1234", inbox)
+        self.assertIn("added the endpoint + a unit test", inbox)   # summary
+        self.assertIn("tests passed; build passed", inbox)         # checks
+
+    def test_handoff_with_no_active_task_is_noop(self):
+        out = ec.record_claude_handoff(self.root, commit_sha="abc", summary="x", checks="y")
+        self.assertFalse(out["found"])
+
+    def test_verdict_cli_changes_requested_then_claude_sees_findings(self):
+        self._start()
+        ec.record_claude_handoff(self.root, commit_sha="abc1234", summary="did it", checks="green")
+        out = ec.record_codex_verdict_cli(self.root, status="CHANGES_REQUESTED",
+                                          summary="close, but", findings="handle the empty-input case")
+        self.assertEqual(out["status"], "CHANGES_REQUESTED")
+        h = council_bus.parse_work_items(council_bus.read_bus_file(self.root, "tasks"))[0]["header"]
+        self.assertEqual(h["status"], "CHANGES_REQUESTED")
+        inbox = ec.render_session_inbox(self.root, "claude")
+        self.assertIn("Fix Codex findings", inbox)
+        self.assertIn("handle the empty-input case", inbox)
+
+    def test_verdict_cli_verified_then_no_active_handoff(self):
+        self._start()
+        ec.record_claude_handoff(self.root, commit_sha="abc1234", summary="done", checks="green")
+        out = ec.record_codex_verdict_cli(self.root, status="VERIFIED", summary="looks good")
+        self.assertEqual(out["status"], "VERIFIED")
+        self.assertIn("No active council handoff", ec.render_session_inbox(self.root, "codex"))
+        self.assertIn("No active council handoff", ec.render_session_inbox(self.root, "claude"))
+
+    def test_verdict_cli_with_nothing_awaiting_is_noop(self):
+        self._start()                                             # READY_FOR_CC — nothing awaits Codex
+        out = ec.record_codex_verdict_cli(self.root, status="VERIFIED", summary="x")
+        self.assertFalse(out["found"])
+
+    def test_cli_handoff_then_codex_status_end_to_end(self):
+        import subprocess
+        import sys
+        self._start()
+        r = subprocess.run([sys.executable, "-m", "openfde", "council", "handoff", "--role", "claude",
+                            "--commit", "abc1234ff", "--summary", "did the work",
+                            "--checks", "tests passed", "--path", str(self.root)],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("READY_FOR_CODEX_VERIFICATION", r.stdout)
+        s = subprocess.run([sys.executable, "-m", "openfde", "council", "status", "--role", "codex",
+                            "--path", str(self.root)], capture_output=True, text=True, timeout=60)
+        self.assertIn("Verify the latest Claude Code commit", s.stdout)
+        self.assertIn("did the work", s.stdout)
+
 
 def _view(status, *, episode="ep1", commit="", tasks=("task_a",), boxes=("box_x",), run=""):
     return {"episodeId": episode, "status": status, "taskIds": list(tasks), "runId": run,
