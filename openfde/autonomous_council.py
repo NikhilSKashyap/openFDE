@@ -8,20 +8,22 @@ human copy-paste:
       → architect (Codex) proposes a plan
       → senior dev (Claude Code) reviews it honestly (consultation)
       → architect (Codex) makes the final implementation decision
-      → senior dev (Claude Code) implements, verifies, commits, hands off
+      → senior dev (Claude Code) implements (real file edits) — the RELAY commits
       → verifier (Codex) verifies the commit
       → pass: READY_TO_PUSH (push gated by config) · fail: CHANGES_REQUESTED → loop
       → loop until VERIFIED or BLOCKED
 
-OpenFDE owns the managed sessions (:mod:`openfde.agent_sessions`), records every turn into the durable
-council transcript (shown in Orient), drives the SAME episode / OpenPM / bus the manual council uses,
-and records Story loop edges. No new council id is invented — the run is keyed on a real ``episodeId``
-+ ``taskIds`` (+ ``boxIds``); the ``runId`` is the run's own id.
+Provenance (general, not hardcoded): a PRODUCT run owns exactly ONE parent episode; every council
+turn (consultation, decision, implementation, verification, push) is a CHILD turn/receipt of that
+episode — never a new rail beat. OpenPM gets five phase cards under the parent's tag, moved as the
+relay advances; a real implementation commit is attached to the episode. A SMOKE run (``product=
+False``) writes only debug records (run.json + session logs) — no episode, no OpenPM cards, no Orient
+inbox pollution. Existing OpenFDE ids are reused; the ``runId`` is the run's own.
 
-No human in the middle unless: a protected boundary requires approval, credentials are needed, the
-retry budget is exceeded, or the task is too ambiguous to proceed. v1 is proven end-to-end by the
-deterministic ``echo`` adapter; real claude-code/codex adapters report ``adapter_unavailable`` and
-block honestly until the next slice wires them.
+Sessions are driven through :mod:`openfde.agent_sessions`: real ``codex``/``claude-code`` CLIs when
+available (honest, precise block reason otherwise), or the deterministic ``echo`` adapter that backs
+the tests. No human in the middle unless a protected boundary, credentials, the retry budget, or
+genuine ambiguity demands it.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 from datetime import datetime, timezone
 
 from openfde import agent_sessions, council_bus, external_council
@@ -66,6 +69,15 @@ EDGE_CHANGES_REQUESTED = "changes_requested"
 EDGE_FIXED = "fixed"
 EDGE_BLOCKED = "blocked"
 
+# ── OpenPM phase cards (under the parent episode's tag) ────────────────────────
+_PHASE_TASKS = [
+    ("plan", "Architect plan"),
+    ("consult", "Senior dev consultation"),
+    ("implement", "Implementation"),
+    ("verify", "Verification"),
+    ("push", "Push / blocked"),
+]
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -73,6 +85,41 @@ def _now() -> str:
 
 def _first_line(text: str) -> str:
     return next((ln.strip() for ln in str(text or "").splitlines() if ln.strip()), "")
+
+
+# ── Role prompts (framing for the REAL agents; echo keys on phase and ignores them) ──
+def _plan_prompt(prompt: str) -> str:
+    return ("You are the ARCHITECT on an autonomous engineering council. Propose a concise "
+            "implementation plan for the task below: a short list of modules and concrete tasks "
+            "(one per line as `- task: <title>`), then a one-line acceptance criterion. Plan only — "
+            f"do not write code.\n\nTASK:\n{prompt}")
+
+
+def _consult_prompt(plan: str) -> str:
+    return ("You are the SENIOR DEV consultant reviewing the architect's plan BEFORE implementation. "
+            "Give honest, brief feedback: what to keep small, risks, what is missing, what to add. "
+            f"Do not implement.\n\nPLAN:\n{plan}")
+
+
+def _decide_prompt(consult: str, prompt: str) -> str:
+    return ("You are the ARCHITECT. Given the senior dev's feedback, make the FINAL implementation "
+            "decision: a concise, ordered description of the minimal change to make now. Scope stays "
+            f"within the task.\n\nTASK:\n{prompt}\n\nSENIOR DEV FEEDBACK:\n{consult}")
+
+
+def _implement_prompt(decision: str, prompt: str) -> str:
+    return ("You are the SENIOR DEV. Implement the decision now by editing files in this repository. "
+            "Make the minimal real change. Do NOT run git and do NOT push — the runtime commits for "
+            "you. When done, summarize what you changed in one line starting with `IMPLEMENTED:`.\n\n"
+            f"TASK:\n{prompt}\n\nDECISION:\n{decision}")
+
+
+def _verify_prompt(sha: str, prompt: str) -> str:
+    return ("You are the INDEPENDENT VERIFIER. A commit was just made on this repository: "
+            f"{sha or '(no file changes)'}. Inspect it (you may read files and run `git show {sha}`) "
+            "and decide whether it satisfies the task. Respond starting with EXACTLY one token — "
+            "`VERIFIED` or `CHANGES_REQUESTED` — then a one-line reason.\n\n"
+            f"TASK:\n{prompt}")
 
 
 # ── Run record persistence — .openfde/council/runs/<runId>/run.json ───────────
@@ -118,8 +165,8 @@ def list_runs(repo_root) -> list:
     return out
 
 
-def latest_run(repo_root) -> dict | None:
-    runs = list_runs(repo_root)
+def latest_run(repo_root, *, product_only=True) -> dict | None:
+    runs = [r for r in list_runs(repo_root) if (r.get("product", True) or not product_only)]
     return runs[-1] if runs else None
 
 
@@ -133,12 +180,13 @@ def run_summary(rec: dict | None) -> dict | None:
         "loop": rec.get("loop", 0), "maxLoops": rec.get("maxLoops", 0),
         "latestCommit": rec.get("latestCommit"), "latestTurn": rec.get("latestTurn"),
         "blockedReason": rec.get("blockedReason"), "autoPush": rec.get("autoPush", False),
+        "product": rec.get("product", True), "providers": rec.get("providers") or {},
         "running": rec.get("status") == STATUS_RUNNING,
     }
 
 
 def latest_run_summary(repo_root) -> dict | None:
-    return run_summary(latest_run(repo_root))
+    return run_summary(latest_run(repo_root, product_only=True))
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -155,7 +203,6 @@ def _seed_acceptance(prompt: str) -> str:
 
 
 def _patch_work_item_header(repo_root, episode_id, patch: dict) -> bool:
-    """Merge ``patch`` into a TASKS.md work item header, preserving its body. Bus-only."""
     items = council_bus.parse_work_items(council_bus.read_bus_file(repo_root, "tasks"))
     rebuilt, found = [], False
     for it in items:
@@ -181,6 +228,8 @@ def _attach_run_to_episode(persistence, episode_id, run_id):
 
 
 def _mark_episode(persistence, episode_id, status):
+    if not episode_id:
+        return
     ep = persistence.get_episode(episode_id)
     if ep:
         ep["status"] = status
@@ -188,35 +237,24 @@ def _mark_episode(persistence, episode_id, status):
         persistence.upsert_episode(ep)
 
 
-def _parse_plan_tasks(plan: str) -> list:
-    out = []
-    for ln in (plan or "").splitlines():
-        m = re.match(r"\s*[-*]\s*task:\s*(.+)", ln, re.I)
-        if m:
-            out.append(m.group(1).strip())
-    return out
-
-
-def _ensure_plan_tasks(persistence, rec, plan):
-    """Create OpenPM tasks from the architect's plan (in addition to the seed task), bound to the
-    episode + boxes, and keep the bus work item's taskIds in sync. Existing ids preserved."""
-    titles = _parse_plan_tasks(plan)
-    if not titles:
-        return
+def _ensure_phase_tasks(persistence, rec):
+    """Create any missing council phase cards under the parent episode, each tagged with a
+    ``phaseKey`` so the relay can move just that card as the phase advances. Dedups by phaseKey."""
     repo_root = persistence.openfde_dir.parent
     tasks = persistence.load_tasks()
     ep = persistence.get_episode(rec["episodeId"]) or {}
-    have = {t.get("title") for t in tasks if isinstance(t, dict) and t.get("episodeId") == rec["episodeId"]}
+    have = {t.get("phaseKey") for t in tasks if isinstance(t, dict) and t.get("episodeId") == rec["episodeId"]}
     added = []
-    for title in titles:
-        if title in have:
+    for key, title in _PHASE_TASKS:
+        if key in have:
             continue
         tid = "task_" + secrets.token_hex(5)
         tasks.append({
             "id": tid, "title": title, "description": "", "column": "todo",
             "verificationStatus": "pending", "source": external_council.EXTERNAL_COUNCIL_SOURCE,
-            "episodeId": rec["episodeId"], "linkedBoxIds": list(rec["boxIds"]), "files": [], "commitSha": None,
-            "episodeTag": ep.get("tag", ""), "promptTitle": ep.get("title", ""), "promptLabel": ep.get("title", ""),
+            "episodeId": rec["episodeId"], "phaseKey": key, "linkedBoxIds": list(rec["boxIds"]),
+            "files": [], "commitSha": None, "episodeTag": ep.get("tag", ""),
+            "promptTitle": ep.get("title", ""), "promptLabel": ep.get("title", ""),
         })
         added.append(tid)
     if added:
@@ -225,12 +263,18 @@ def _ensure_plan_tasks(persistence, rec, plan):
         _patch_work_item_header(repo_root, rec["episodeId"], {"taskIds": rec["taskIds"]})
 
 
-def _attach_commit_to_tasks(persistence, episode_id, sha):
+def _set_phase_task(persistence, rec, phase_key, column, verification=None, commit=None):
+    if not (rec.get("product") and rec.get("episodeId")):
+        return
     tasks = persistence.load_tasks()
     changed = False
     for t in tasks:
-        if isinstance(t, dict) and t.get("episodeId") == episode_id and t.get("commitSha") != sha:
-            t["commitSha"] = sha
+        if isinstance(t, dict) and t.get("episodeId") == rec["episodeId"] and t.get("phaseKey") == phase_key:
+            t["column"] = column
+            if verification:
+                t["verificationStatus"] = verification
+            if commit:
+                t["commitSha"] = commit
             changed = True
     if changed:
         persistence.save_tasks(tasks)
@@ -238,9 +282,8 @@ def _attach_commit_to_tasks(persistence, episode_id, sha):
 
 def _attach_commit_to_episode(persistence, episode_id, sha):
     """Record the implementation commit on the EPISODE — the source of truth OpenPM repairs cards
-    from (else /api/tasks would null the card's commit back to episode truth). Echo emits a
-    synthetic sha; real adapters emit the real one."""
-    if not sha:
+    from. Echo emits a synthetic sha; the real path emits the actual commit."""
+    if not (sha and episode_id):
         return
     ep = persistence.get_episode(episode_id)
     if ep:
@@ -252,8 +295,75 @@ def _attach_commit_to_episode(persistence, episode_id, sha):
             persistence.upsert_episode(ep)
 
 
+def _update_episode_council(persistence, rec):
+    """Mirror a compact council summary onto the parent episode so the drawer can show the loop:
+    transcript summary, commits, verification result, blocked reason. Product runs only."""
+    if not (rec.get("product") and rec.get("episodeId")):
+        return
+    ep = persistence.get_episode(rec["episodeId"])
+    if not ep:
+        return
+    ep["council"] = {
+        "runId": rec["runId"], "phase": rec["phase"], "status": rec["status"],
+        "activeRole": rec.get("activeRole"), "loop": rec.get("loop", 0), "maxLoops": rec.get("maxLoops", 0),
+        "latestCommit": rec.get("latestCommit"), "blockedReason": rec.get("blockedReason"),
+        "providers": rec.get("providers") or {}, "edges": [e["edge"] for e in rec.get("storyEvents", [])],
+        "turns": (rec.get("turns") or [])[-14:], "updatedAt": _now(),
+    }
+    persistence.upsert_episode(ep)
+
+
+def _porcelain(repo_root) -> dict:
+    """{path: status} from `git status --porcelain` — used to scope the relay's commit to exactly the
+    files the senior dev touched (never sweeping in unrelated pre-existing changes)."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=30)
+        out = {}
+        for ln in (r.stdout or "").splitlines():
+            if len(ln) > 3:
+                out[ln[3:].strip().strip('"')] = ln[:2]
+        return out
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+def _commit_implementation(repo_root, rec, before_status: dict) -> str:
+    """Commit ONLY the files the senior dev changed this turn (diffed against ``before_status``),
+    stamped with OpenFDE trailers. Returns the real sha, or '' when nothing was produced. The relay
+    commits (the law: Claude Code's edits, but a deterministic, trailer-stamped commit)."""
+    after = _porcelain(repo_root)
+    touched = [p for p, st in after.items() if before_status.get(p) != st]
+    if not touched:
+        return ""
+    try:
+        add = subprocess.run(["git", "-C", str(repo_root), "add", "--"] + touched,
+                            capture_output=True, text=True, timeout=60)
+        if add.returncode != 0:
+            return ""
+        staged = subprocess.run(["git", "-C", str(repo_root), "diff", "--cached", "--quiet"])
+        if staged.returncode == 0:        # nothing actually staged
+            return ""
+        title = (rec.get("title") or _first_line(rec["prompt"]) or "autonomous council change")[:72]
+        msg = (f"{title}\n\n"
+               f"OpenFDE-Episode: {rec['episodeId']}\n"
+               f"OpenFDE-Run: {rec['runId']}\n"
+               f"OpenFDE-Role: senior_dev\n"
+               f"OpenFDE-Handoff: ready_for_codex_verification\n\n"
+               "Co-Authored-By: Claude Code (autonomous council) <noreply@anthropic.com>")
+        commit = subprocess.run(["git", "-C", str(repo_root), "commit", "-m", msg],
+                              capture_output=True, text=True, timeout=60)
+        if commit.returncode != 0:
+            return ""
+        sha = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=30)
+        return sha.stdout.strip() if sha.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def _parse_impl(text: str):
-    """Extract (commit_sha, checks) from an implementer reply — the contract real adapters follow too."""
+    """Extract (commit_sha, checks) from an echo implementer reply — the echo contract."""
     sha, checks = "", ""
     m = re.search(r"commit=(\S+)", text or "")
     if m:
@@ -272,13 +382,20 @@ def _verdict_from_text(text: str) -> str:
 
 
 def _add_turn(repo_root, rec, role, label, kind, **fields) -> dict:
-    turn = {"role": role, "label": label, "kind": kind, "episodeId": rec["episodeId"],
-            "taskIds": rec["taskIds"], "runId": rec["runId"], "boxIds": rec["boxIds"], **fields}
-    t = external_council.append_transcript_turn(repo_root, turn)
-    rec["latestTurn"] = {"role": role, "label": label, "kind": kind,
-                         "summary": fields.get("summary", ""), "at": t.get("at", "")}
+    """Record a council turn. Always updates the run record (debug); for PRODUCT runs it also appends
+    to the durable Orient transcript (a smoke run never pollutes the inbox)."""
+    summary = fields.get("summary", "")
+    at = _now()
+    compact = {"role": role, "label": label, "kind": kind, "summary": summary, "at": at,
+               "latestCommit": fields.get("latestCommit")}
+    rec.setdefault("turns", []).append(compact)
+    rec["latestTurn"] = {"role": role, "label": label, "kind": kind, "summary": summary, "at": at}
     rec["turnCount"] = rec.get("turnCount", 0) + 1
-    return t
+    if rec.get("product") and rec.get("episodeId"):
+        external_council.append_transcript_turn(repo_root, {
+            "role": role, "label": label, "kind": kind, "episodeId": rec["episodeId"],
+            "taskIds": rec["taskIds"], "runId": rec["runId"], "boxIds": rec["boxIds"], "at": at, **fields})
+    return compact
 
 
 def _add_edge(rec, edge, role):
@@ -287,10 +404,13 @@ def _add_edge(rec, edge, role):
 
 # ── Public API: init → advance → run ──────────────────────────────────────────
 def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
-             run_id=None) -> dict:
-    """Create the episode + OpenPM seed task + bus work item (READY_FOR_CC) and the run record, and
-    record the opening user turn. FAST + synchronous — returns the ids the API responds with before
-    the (slow) relay advances. Reuses OpenFDE's own id scheme; never mints a parallel council id."""
+             allow_edits=False, product=True, parent_episode_id=None, run_id=None) -> dict:
+    """Create the run record (+ for a PRODUCT run: the parent episode, five OpenPM phase cards, and the
+    bus work item) and record the opening user turn. FAST + synchronous — returns the ids the API
+    responds with before the relay advances. Reuses OpenFDE ids; the runId is the run's own.
+
+    ``product=False`` is a SMOKE run: no episode, no OpenPM cards, no Orient-inbox turns — only debug
+    records. ``parent_episode_id`` attaches to an existing episode instead of minting a new one."""
     repo_root = persistence.openfde_dir.parent
     run_id = run_id or ("run_" + secrets.token_hex(6))
     providers = _norm_providers(providers)
@@ -298,22 +418,39 @@ def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, 
     prompt = (prompt or "").strip()
     ts = _now()
 
-    work = external_council.create_external_council_work(
-        persistence, objective=prompt, acceptance=[_seed_acceptance(prompt)], box_ids=box_ids)
-    episode_id, task_ids = work["episodeId"], work["taskIds"]
-
-    _patch_work_item_header(repo_root, episode_id, {"runId": run_id})
-    _attach_run_to_episode(persistence, episode_id, run_id)
-
+    episode_id, task_ids, title = "", [], ""
     rec = {
-        "runId": run_id, "episodeId": episode_id, "taskIds": list(task_ids), "boxIds": box_ids,
-        "prompt": prompt, "providers": providers, "maxLoops": int(max_loops), "autoPush": bool(auto_push),
+        "runId": run_id, "episodeId": "", "taskIds": [], "boxIds": box_ids, "prompt": prompt,
+        "title": "", "providers": providers, "maxLoops": int(max_loops), "autoPush": bool(auto_push),
+        "allowEdits": bool(allow_edits), "product": bool(product), "parentEpisodeId": parent_episode_id,
         "status": STATUS_RUNNING, "phase": PHASE_ARCHITECT_PLANNING, "activeRole": "architect",
         "loop": 0, "latestCommit": None, "blockedReason": None,
-        "storyEvents": [], "latestTurn": None, "turnCount": 0,
+        "storyEvents": [], "turns": [], "latestTurn": None, "turnCount": 0,
         "createdAt": ts, "updatedAt": ts,
     }
+
+    if product:
+        if parent_episode_id and persistence.get_episode(parent_episode_id):
+            episode_id = parent_episode_id        # attach to the originating episode (no new beat)
+            title = (persistence.get_episode(parent_episode_id) or {}).get("title", "")
+            rec["episodeId"] = episode_id
+            _attach_run_to_episode(persistence, episode_id, run_id)
+            _ensure_phase_tasks(persistence, rec)
+        else:
+            work = external_council.create_external_council_work(
+                persistence, objective=prompt, acceptance=[_seed_acceptance(prompt)],
+                box_ids=box_ids, task_titles=[t for _t, t in _PHASE_TASKS])
+            episode_id, task_ids = work["episodeId"], work["taskIds"]
+            title = work.get("title", "")
+            rec["episodeId"], rec["taskIds"] = episode_id, list(task_ids)
+            for i, (key, _t) in enumerate(_PHASE_TASKS):
+                persistence.update_task(task_ids[i], {"phaseKey": key})
+            _patch_work_item_header(repo_root, episode_id, {"runId": run_id})
+            _attach_run_to_episode(persistence, episode_id, run_id)
+        rec["title"] = title
+
     _add_turn(repo_root, rec, "user", "user", "prompt", summary=prompt[:140], body=prompt)
+    _update_episode_council(persistence, rec)
     save_run(repo_root, rec)
     return rec
 
@@ -322,6 +459,7 @@ def _emit(persistence, rec, on_event):
     repo_root = persistence.openfde_dir.parent
     rec["updatedAt"] = _now()
     save_run(repo_root, rec)
+    _update_episode_council(persistence, rec)
     if on_event:
         try:
             on_event(dict(rec))
@@ -334,11 +472,13 @@ def _finish_verified(persistence, rec, on_event):
     rec["activeRole"] = None
     if rec["autoPush"]:
         rec["phase"], rec["status"] = PHASE_READY_TO_PUSH, STATUS_VERIFIED
+        _set_phase_task(persistence, rec, "push", "doing", "pending")
         _add_turn(repo_root, rec, "system", "system", "push",
                   summary="Auto-push enabled — handed to Claude Code to push.",
                   body="autoPush=true: the senior dev (Claude Code) owns the push; the verifier never pushes.")
     else:
         rec["phase"], rec["status"] = PHASE_READY_TO_PUSH, STATUS_READY_TO_PUSH
+        _set_phase_task(persistence, rec, "push", "done", "passed")
         _add_turn(repo_root, rec, "system", "system", "ready_to_push",
                   summary="Verified — ready to push (autoPush off).",
                   body="Verification passed. Push is gated by config (autoPush=false); nothing was pushed.")
@@ -354,9 +494,10 @@ def _block_max_loops(persistence, rec, on_event):
               summary=f"Blocked — exceeded {rec['maxLoops']} verification loops; needs human.",
               body="Retry budget exhausted without a passing verification — escalated to a human.")
     _add_edge(rec, EDGE_BLOCKED, "system")
-    external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
-    persistence.move_tasks_for_episode(rec["episodeId"], "doing", "failed", from_columns=("doing", "testing"))
-    _mark_episode(persistence, rec["episodeId"], "blocked")
+    _set_phase_task(persistence, rec, "push", "doing", "failed")
+    if rec.get("episodeId"):
+        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+        _mark_episode(persistence, rec["episodeId"], "blocked")
     _emit(persistence, rec, on_event)
 
 
@@ -368,7 +509,9 @@ def _block_adapter(persistence, rec, exc, on_event):
     _add_turn(repo_root, rec, "system", "system", "blocked",
               summary=f"Blocked — {exc.provider} adapter unavailable for {exc.role}.", body=exc.reason)
     _add_edge(rec, EDGE_BLOCKED, "system")
-    external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+    _set_phase_task(persistence, rec, "push", "doing", "failed")
+    if rec.get("episodeId"):
+        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
     _emit(persistence, rec, on_event)
     return rec
 
@@ -376,9 +519,11 @@ def _block_adapter(persistence, rec, exc, on_event):
 def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dict:
     """Drive the relay from ARCHITECT_PLANNING to a terminal status. Synchronous (the caller may run
     it off the event loop). ``session_factory(role, provider, run_dir=...)`` builds managed sessions —
-    defaults to the honest real/echo factory. ``on_event(rec)`` fires after each turn for live WS."""
+    defaults to the real (codex/claude-code) factory bound to the repo. ``on_event(rec)`` fires after
+    each turn for live WS."""
     repo_root = persistence.openfde_dir.parent
-    factory = session_factory or agent_sessions.default_session_factory
+    factory = session_factory or agent_sessions.session_factory_for(
+        repo_root, allow_edits=rec.get("allowEdits", False))
     rdir = run_dir(repo_root, rec["runId"])
 
     sessions = {}
@@ -394,27 +539,30 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
 
         # 1. Architect proposes a plan.
         rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_PLANNING, "architect"
+        _set_phase_task(persistence, rec, "plan", "doing", "pending")
         _emit(persistence, rec, on_event)
-        plan = arch.send(rec["prompt"], {"phase": "plan", "runId": rec["runId"]})
+        plan = arch.send(_plan_prompt(rec["prompt"]), {"phase": "plan", "runId": rec["runId"]})
         _add_turn(repo_root, rec, "architect", "architect (Codex)", "proposal",
                   summary=_first_line(plan), body=plan)
         _add_edge(rec, EDGE_PROPOSED, "architect")
-        _ensure_plan_tasks(persistence, rec, plan)
+        _set_phase_task(persistence, rec, "plan", "done", "passed")
         _emit(persistence, rec, on_event)
 
         # 2. Senior dev consults — honest review BEFORE building.
         rec["phase"], rec["activeRole"] = PHASE_SR_DEV_CONSULTING, "sr_dev"
+        _set_phase_task(persistence, rec, "consult", "doing", "pending")
         _emit(persistence, rec, on_event)
-        consult = srdev.send(plan, {"phase": "consult", "runId": rec["runId"]})
+        consult = srdev.send(_consult_prompt(plan), {"phase": "consult", "runId": rec["runId"]})
         _add_turn(repo_root, rec, "sr_dev", "sr dev (Claude Code)", "consultation",
                   summary=_first_line(consult), body=consult)
         _add_edge(rec, EDGE_CONSULTED, "sr_dev")
+        _set_phase_task(persistence, rec, "consult", "done", "passed")
         _emit(persistence, rec, on_event)
 
         # 3. Architect makes the final implementation decision.
         rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_DECIDING, "architect"
         _emit(persistence, rec, on_event)
-        decision = arch.send(consult, {"phase": "decide", "runId": rec["runId"]})
+        decision = arch.send(_decide_prompt(consult, rec["prompt"]), {"phase": "decide", "runId": rec["runId"]})
         _add_turn(repo_root, rec, "architect", "architect (Codex)", "decision",
                   summary=_first_line(decision), body=decision)
         _add_edge(rec, EDGE_DECIDED, "architect")
@@ -422,29 +570,40 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
 
         work_input = decision
         while True:
-            # 4. Senior dev implements + commits + hands off.
+            # 4. Senior dev implements; the RELAY commits the real edits (or echo reports a sha).
             rec["phase"], rec["activeRole"] = PHASE_SR_DEV_IMPLEMENTING, "sr_dev"
+            _set_phase_task(persistence, rec, "implement", "doing", "pending")
             _emit(persistence, rec, on_event)
-            persistence.move_tasks_for_episode(rec["episodeId"], "doing", "pending", from_columns=("todo",))
-            impl = srdev.send(work_input, {"phase": "implement", "runId": rec["runId"], "loop": rec["loop"]})
-            sha, checks = _parse_impl(impl)
+            before = _porcelain(repo_root)
+            impl = srdev.send(_implement_prompt(work_input, rec["prompt"]),
+                              {"phase": "implement", "runId": rec["runId"], "loop": rec["loop"]})
+            if srdev.provider == "echo":
+                sha, checks = _parse_impl(impl)
+            elif getattr(srdev, "allow_edits", False):
+                sha = _commit_implementation(repo_root, rec, before)
+                checks = "edited + committed by the senior dev" if sha else "no file changes were produced"
+            else:
+                sha, checks = "", "planned only — real edits gated (enable allowEdits to let the senior dev write files)"
             if sha:
                 rec["latestCommit"] = sha
                 _attach_commit_to_episode(persistence, rec["episodeId"], sha)
-                _attach_commit_to_tasks(persistence, rec["episodeId"], sha)
             is_fix = rec["loop"] > 0
             _add_turn(repo_root, rec, "sr_dev", "sr dev (Claude Code)", "implementation",
                       summary=_first_line(impl), body=impl, latestCommit=(sha or None), checks=checks)
             _add_edge(rec, EDGE_FIXED if is_fix else EDGE_IMPLEMENTED, "sr_dev")
-            external_council.set_work_item_status(repo_root, rec["episodeId"],
-                                                  council_bus.STATUS_READY_FOR_CODEX_VERIFICATION,
-                                                  latest_commit=sha or None)
+            _set_phase_task(persistence, rec, "implement", "done" if sha else "doing",
+                            "passed" if sha else "pending", commit=sha or None)
+            if rec.get("episodeId"):
+                external_council.set_work_item_status(repo_root, rec["episodeId"],
+                                                      council_bus.STATUS_READY_FOR_CODEX_VERIFICATION,
+                                                      latest_commit=sha or None)
             _emit(persistence, rec, on_event)
 
             # 5. Verifier verifies the commit.
             rec["phase"], rec["activeRole"] = PHASE_CODEX_VERIFYING, "verifier"
+            _set_phase_task(persistence, rec, "verify", "doing", "pending")
             _emit(persistence, rec, on_event)
-            vtext = verifier.send(f"verify commit {sha}",
+            vtext = verifier.send(_verify_prompt(sha, rec["prompt"]),
                                   {"phase": "verify", "commit": sha, "loop": rec["loop"]})
             rec["loop"] += 1
             if _verdict_from_text(vtext) == council_bus.STATUS_VERIFIED:
@@ -452,11 +611,11 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
                           summary=_first_line(vtext), body=vtext, latestCommit=(sha or None),
                           findings=[_first_line(vtext)] if vtext.strip() else [])
                 _add_edge(rec, EDGE_VERIFIED, "verifier")
-                external_council.set_work_item_status(repo_root, rec["episodeId"],
-                                                      council_bus.STATUS_VERIFIED, latest_commit=sha or None)
-                persistence.move_tasks_for_episode(rec["episodeId"], "done", "passed",
-                                                   from_columns=("todo", "doing", "testing"))
-                _mark_episode(persistence, rec["episodeId"], "landed")
+                _set_phase_task(persistence, rec, "verify", "done", "passed")
+                if rec.get("episodeId"):
+                    external_council.set_work_item_status(repo_root, rec["episodeId"],
+                                                          council_bus.STATUS_VERIFIED, latest_commit=sha or None)
+                    _mark_episode(persistence, rec["episodeId"], "landed")
                 _finish_verified(persistence, rec, on_event)
                 return rec
 
@@ -465,8 +624,10 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
                       summary=_first_line(vtext), body=vtext, latestCommit=(sha or None),
                       findings=[_first_line(vtext)] if vtext.strip() else ["changes requested"])
             _add_edge(rec, EDGE_CHANGES_REQUESTED, "verifier")
-            external_council.set_work_item_status(repo_root, rec["episodeId"],
-                                                  council_bus.STATUS_CHANGES_REQUESTED, latest_commit=sha or None)
+            _set_phase_task(persistence, rec, "verify", "doing", "failed")
+            if rec.get("episodeId"):
+                external_council.set_work_item_status(repo_root, rec["episodeId"],
+                                                      council_bus.STATUS_CHANGES_REQUESTED, latest_commit=sha or None)
             if rec["loop"] >= rec["maxLoops"]:
                 _block_max_loops(persistence, rec, on_event)
                 return rec
@@ -482,10 +643,12 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
 
 
 def run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
-        run_id=None, session_factory=None, on_event=None) -> dict:
+        allow_edits=False, product=True, parent_episode_id=None, run_id=None,
+        session_factory=None, on_event=None) -> dict:
     """Synchronous convenience: init + advance to terminal. The testable core of the relay."""
     rec = init_run(persistence, prompt=prompt, box_ids=box_ids, providers=providers,
-                   max_loops=max_loops, auto_push=auto_push, run_id=run_id)
+                   max_loops=max_loops, auto_push=auto_push, allow_edits=allow_edits,
+                   product=product, parent_episode_id=parent_episode_id, run_id=run_id)
     return advance_run(persistence, rec, session_factory=session_factory, on_event=on_event)
 
 

@@ -945,11 +945,15 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         prompt = (body.get("prompt") or "").strip()
         if not prompt:
             return web.json_response({"ok": False, "error": "prompt is required"}, status=400)
-        providers = body.get("providers") or {}
+        # Default to the REAL adapters (codex architect/verifier, claude-code senior dev). File edits
+        # are gated (allowEdits, default off) so a default run drives the real conversation + verifies
+        # without writing to the repo; a real commit happens only when the caller opts into edits.
+        providers = body.get("providers") or {"architect": "codex", "srDev": "claude-code", "verifier": "codex"}
         rec = autonomous_council.init_run(
             persistence, prompt=prompt, box_ids=body.get("selectedBoxIds") or [],
             providers=providers, max_loops=int(body.get("maxLoops") or 3),
-            auto_push=bool(body.get("autoPush", False)))
+            auto_push=bool(body.get("autoPush", False)), allow_edits=bool(body.get("allowEdits", False)),
+            product=bool(body.get("product", True)), parent_episode_id=body.get("parentEpisodeId"))
 
         loop = asyncio.get_running_loop()
         on_event = _autonomous_on_event(loop)
@@ -957,7 +961,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         async def _advance():
             await asyncio.to_thread(autonomous_council.advance_run, persistence, rec, on_event=on_event)
             await manager.broadcast({"type": "tasks_updated"})
-            ep = persistence.get_episode(rec["episodeId"])
+            ep = persistence.get_episode(rec["episodeId"]) if rec.get("episodeId") else None
             if ep:
                 await manager.broadcast({"type": "episode_updated", "episode": ep})
 

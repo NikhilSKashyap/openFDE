@@ -46,6 +46,7 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
   const [busyRoles, setBusyRoles] = useState([])
   const [transcript, setTranscript] = useState(null)   // durable council conversation (Orient inbox)
   const [launching, setLaunching] = useState(false)    // autonomous relay being kicked off
+  const [allowEdits, setAllowEdits] = useState(false)  // let the senior dev write files (real commit)
   const txSeqRef = useRef(0)                            // latest-wins guard for overlapping refetches
 
   // The persistent council transcript — refreshed on load, on each council websocket event
@@ -63,10 +64,12 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
     const prompt = (q ?? question).trim()
     if (!prompt || launching) return
     setLaunching(true)
-    const res = await postAutonomousCouncilRun(prompt, { providers: { architect: 'echo', srDev: 'echo', verifier: 'echo' } })
+    // Real adapters by default (Codex architect/verifier, Claude Code senior dev). allowEdits lets
+    // the senior dev write files so the run produces an actual commit; default off (plan-only).
+    const res = await postAutonomousCouncilRun(prompt, { allowEdits })
     setLaunching(false)
     if (res?.ok) { setQuestion(''); refreshTranscript() }
-  }, [question, launching, refreshTranscript])
+  }, [question, launching, allowEdits, refreshTranscript])
   useEffect(() => {
     const seq = ++txSeqRef.current
     getCouncilTranscript().then(t => { if (seq === txSeqRef.current && t?.ok) setTranscript(t) })
@@ -296,11 +299,17 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
         </button>
       </div>
       {/* Hand the whole task to the autonomous relay — no human copy-paste between Codex and CC. */}
-      <button className="council-run-auto" disabled={!question.trim() || launching}
-        onClick={() => runAutonomous()}
-        title="OpenFDE runs the full architect → consult → decide → implement → verify loop and streams every turn here">
-        {launching ? 'Starting…' : '▶ Run autonomous council'}
-      </button>
+      <div className="council-run-auto-row">
+        <button className="council-run-auto" disabled={!question.trim() || launching}
+          onClick={() => runAutonomous()}
+          title="OpenFDE drives the real loop — Codex (architect/verifier) + Claude Code (senior dev) — and streams every turn here">
+          {launching ? 'Starting…' : '▶ Run autonomous council'}
+        </button>
+        <label className="council-run-edits" title="Let the senior dev write files and produce a real commit (off = plan only, no repo changes)">
+          <input type="checkbox" checked={allowEdits} onChange={e => setAllowEdits(e.target.checked)} />
+          allow file edits
+        </label>
+      </div>
 
       {onOpenAgentSettings && (
         <button className="council-settings-link" onClick={onOpenAgentSettings}>Agent Settings →</button>
@@ -330,10 +339,17 @@ const PHASE_LABEL = {
   VERIFIED: 'verified', READY_TO_PUSH: 'ready to push', BLOCKED: 'blocked',
 }
 const BATON_LABEL = { architect: 'Codex (architect)', sr_dev: 'Claude Code (sr dev)', verifier: 'Codex (verifier)' }
+function providersLabel(p) {
+  const vals = Object.values(p || {})
+  if (!vals.length) return ''
+  if (vals.every(v => v === 'echo')) return 'echo (demo)'
+  return 'Codex + Claude Code'
+}
 function RunBanner({ run }) {
   if (!run) return null
   const blocked = String(run.status || '').startsWith('blocked')
   const cls = run.running ? 'running' : (blocked ? 'blocked' : 'done')
+  const provs = providersLabel(run.providers)
   return (
     <div className={`acr-banner acr-${cls}`}>
       <div className="acr-line1">
@@ -341,6 +357,7 @@ function RunBanner({ run }) {
         <span className="acr-phase">Autonomous council — {PHASE_LABEL[run.phase] || run.phase}</span>
         {run.running && run.activeRole && <span className="acr-baton">{BATON_LABEL[run.activeRole] || run.activeRole} has the baton</span>}
         {run.loop > 0 && <span className="acr-loop">loop {run.loop}/{run.maxLoops}</span>}
+        {provs && <span className="acr-provs">{provs}</span>}
       </div>
       {run.latestTurn?.summary && <div className="acr-last">{run.latestTurn.summary}</div>}
       {run.blockedReason && <div className="acr-blockedreason">{run.blockedReason}</div>}

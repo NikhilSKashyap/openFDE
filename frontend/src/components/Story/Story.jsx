@@ -662,6 +662,25 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
             })}
           </div>
         )}
+        {ep?.council && (
+          <div className="tlv3-drawer-section">
+            <div className="tlv3-drawer-k">council loop</div>
+            {(ep.council.edges || []).length > 0 && (
+              <div className="tlv3-council-edges">
+                {ep.council.edges.map((e, i) => <span key={i} className="tlv3-council-edge">{e}</span>)}
+              </div>
+            )}
+            {row('status', ep.council.status)}
+            {ep.council.latestCommit && row('commit', String(ep.council.latestCommit).slice(0, 7))}
+            {ep.council.blockedReason && row('blocked', ep.council.blockedReason)}
+            {(ep.council.turns || []).slice(-6).map((t, i) => (
+              <div key={i} className="tlv3-drawer-row" style={{ display: 'block' }}>
+                <span className="tlv3-council-role">{t.label}:</span>{' '}
+                <span className="tlv3-drawer-v">{t.summary}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {commits.length > 0 && (
           <div className="tlv3-drawer-section">
             <div className="tlv3-drawer-k">commits</div>
