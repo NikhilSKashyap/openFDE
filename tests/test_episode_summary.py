@@ -479,6 +479,18 @@ class ReconcileIntentTasksTest(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual([t["id"] for t in out], ["e1"])
 
+    def test_drops_duplicate_for_external_council_episode(self):
+        # An external-council episode is ALSO represented by its own task cards → the auto
+        # episode/commit card for the same episode is a duplicate (generic across council sources).
+        ep = {"episodeId": "epEC", "commitShas": ["sha9"]}
+        tasks = [
+            {"id": "ec1", "source": "external-council", "episodeId": "epEC", "linkedBoxIds": ["bx"]},
+            {"id": "dup", "source": "openfde-episode", "episodeId": "epEC", "commitSha": "sha9"},
+        ]
+        out, changed = es.reconcile_intent_tasks(tasks, [ep])
+        self.assertTrue(changed)
+        self.assertEqual([t["id"] for t in out], ["ec1"])      # council card kept, duplicate dropped
+
     def test_idempotent(self):
         ep = _intent_episode("epX", [("bx", "some step", ["gen/thing.py"])])
         tasks = [_intent_card("epX", "bx", files=["gen/thing.py"])]

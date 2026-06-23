@@ -843,6 +843,66 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         return web.json_response({"ok": True, **demo})
 
     # ================================================================== #
+    #  REST — /api/external-council  (Codex+CC council coordinator v1)    #
+    # ================================================================== #
+    # Thin wrappers around openfde.external_council. Codex starts tracked work (episode + OpenPM
+    # tasks + the gitignored .openfde/council bus); CC implements + commits; Codex records a verdict.
+
+    async def post_external_council_work(request: web.Request) -> web.Response:
+        """Codex starts a tracked external-council work item — one OpenFDE episode + N OpenPM tasks
+        bound to real ids, plus a TASKS.md item at READY_FOR_CC. body: {objective, acceptance,
+        architectureNotes?, boxIds?, taskTitles?}."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        if not (body.get("objective") or "").strip():
+            return web.json_response({"ok": False, "error": "objective is required"}, status=400)
+        from openfde import external_council
+        result = external_council.create_external_council_work(
+            persistence, objective=body.get("objective"), acceptance=body.get("acceptance"),
+            architecture_notes=body.get("architectureNotes"), box_ids=body.get("boxIds"),
+            task_titles=body.get("taskTitles"))
+        # OpenPM cards show immediately; the episode joins the Story spine even before any commit.
+        await manager.broadcast({"type": "tasks_updated"})
+        ep = persistence.get_episode(result["episodeId"])
+        if ep:
+            await manager.broadcast({"type": "episode_updated", "episode": ep})
+        await _refresh_story_cache_and_broadcast()
+        return web.json_response({"ok": True, **result})
+
+    async def post_external_council_verdict(request: web.Request) -> web.Response:
+        """Codex records its independent verdict on the latest CC commit (VERIFIED |
+        CHANGES_REQUESTED) — updates the bus and moves the episode's OpenPM cards. Codex never
+        commits. body: {episodeId, commitSha?, status, findings?}."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        from openfde import council_bus, external_council
+        try:
+            result = external_council.record_codex_verdict(
+                path, episode_id=body.get("episodeId"), commit_sha=body.get("commitSha"),
+                status=body.get("status"), findings=body.get("findings") or "")
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        # Reflect the verdict on the board: VERIFIED → done/passed; CHANGES_REQUESTED → back to doing.
+        if body.get("episodeId"):
+            if result["status"] == council_bus.STATUS_VERIFIED:
+                persistence.move_tasks_for_episode(body["episodeId"], "done", "passed")
+            else:
+                persistence.move_tasks_for_episode(body["episodeId"], "doing", "pending",
+                                                   from_columns=("testing", "done"))
+            await manager.broadcast({"type": "tasks_updated"})
+        return web.json_response({"ok": True, **result})
+
+    async def get_external_council_status(request: web.Request) -> web.Response:
+        """The external-council bus state: TASKS.md work items + the latest CC handoff (CLAUDE.md tail
+        + HEAD commit trailers)."""
+        from openfde import external_council
+        return web.json_response({"ok": True, **external_council.read_status(path)})
+
+    # ================================================================== #
     #  REST — /api/issues/github  (durable intent v1)                     #
     # ================================================================== #
     # A GitHub Issue is intent BEFORE the episode: importing one creates an
@@ -5015,6 +5075,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_put( "/api/tasks",                 put_tasks)
     app.router.add_post("/api/dev/sketch-demo",       post_sketch_demo)
     app.router.add_post("/api/dev/saas-demo",          post_saas_demo)
+    app.router.add_post("/api/external-council/work",    post_external_council_work)
+    app.router.add_post("/api/external-council/verdict", post_external_council_verdict)
+    app.router.add_get( "/api/external-council/status",  get_external_council_status)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)

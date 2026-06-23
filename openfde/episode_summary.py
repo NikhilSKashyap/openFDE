@@ -487,6 +487,11 @@ def repair_task_commit_shas(tasks, episodes):
     return out, changed
 
 
+# OpenPM card sources that ARE an episode's own representation (so an auto episode/commit card for
+# the same episode is a duplicate). Generic across council flows — never keyed on a specific demo.
+_COUNCIL_TASK_SOURCES = ("intent-graph", "external-council")
+
+
 def reconcile_intent_tasks(tasks, episodes):
     """Protect an intent-graph run's OpenPM receipts across UI hydration/persistence.
 
@@ -514,17 +519,20 @@ def reconcile_intent_tasks(tasks, episodes):
         return tasks, False
     by_ep = {e["episodeId"]: e for e in (episodes or [])
              if isinstance(e, dict) and e.get("episodeId")}
-    # Episodes that already have intent-graph step cards — their landed commit is covered by them.
-    intent_eps = {t.get("episodeId") for t in tasks
-                  if isinstance(t, dict) and t.get("source") == "intent-graph" and t.get("episodeId")}
+    # Episodes already REPRESENTED by their own council task cards (intent-graph step cards OR
+    # external-council work cards) — a later landed commit is covered by them, so the auto
+    # episode/commit card is a duplicate. Generic across council sources, not one demo.
+    covered_eps = {t.get("episodeId") for t in tasks
+                   if isinstance(t, dict) and t.get("source") in _COUNCIL_TASK_SOURCES
+                   and t.get("episodeId")}
     changed = False
     out = []
     for t in tasks:
         if not isinstance(t, dict):
             out.append(t)
             continue
-        # (2) drop a redundant episode/commit card duplicating an intent-graph episode.
-        if t.get("source") == "openfde-episode" and t.get("episodeId") in intent_eps:
+        # (2) drop a redundant episode/commit card duplicating a council-represented episode.
+        if t.get("source") == "openfde-episode" and t.get("episodeId") in covered_eps:
             changed = True
             continue
         # (1) heal step-card receipts from episode truth.
