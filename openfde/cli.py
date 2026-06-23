@@ -96,6 +96,13 @@ def main() -> None:
     verdict_parser.add_argument("--path", default=".",
                                 help="Repository path (default: current directory)")
 
+    ack_parser = council_sub.add_parser(
+        "ack", help="Acknowledge your pending council delivery (your session has resumed)")
+    ack_parser.add_argument("--role", choices=["codex", "claude"], required=True,
+                            help="Which role's pending delivery to acknowledge")
+    ack_parser.add_argument("--path", default=".",
+                            help="Repository path (default: current directory)")
+
     args = parser.parse_args()
 
     if args.command == "watch":
@@ -116,9 +123,20 @@ def main() -> None:
         sys.exit(0 if out["episode"]["status"] in ("reviewing", "complete_no_changes") else 1)
     elif args.command == "council":
         from openfde import external_council as ec
+        from openfde import handoff_broker
         cc = getattr(args, "council_command", None)
         if cc == "status":
+            banner = handoff_broker.delivery_banner(args.path, args.role)   # pending delivery first
+            if banner:
+                print(banner)
             print(ec.render_session_inbox(args.path, args.role), end="")
+        elif cc == "ack":
+            d = handoff_broker.acknowledge_delivery(args.path, args.role)
+            if d:
+                print(f"Acknowledged delivery {d['deliveryId']} "
+                      f"({d.get('fromRole')} → {args.role}). Now do the work.")
+            else:
+                print("No pending delivery to acknowledge.")
         elif cc == "handoff":
             sha = ec._resolve_commit(args.path, args.commit)
             res = ec.record_claude_handoff(args.path, commit_sha=sha,

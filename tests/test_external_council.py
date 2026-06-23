@@ -252,6 +252,34 @@ class ExternalCouncilTest(unittest.TestCase):
         self.assertIn("Verify the latest Claude Code commit", s.stdout)
         self.assertIn("did the work", s.stdout)
 
+    # ── Session-wakeup delivery surfaced by `council status` ──────────────────
+    def test_claude_status_shows_pending_delivery_then_ack_clears_it(self):
+        import subprocess
+        import sys
+        from openfde import handoff_broker
+        res = self._start()
+        # The watcher creates the wakeup delivery on the READY_FOR_CC transition — simulate it here.
+        handoff_broker.process_transition(self.root, ec.bus_snapshot(self.root)[res["episodeId"]])
+        r = subprocess.run([sys.executable, "-m", "openfde", "council", "status", "--role", "claude",
+                            "--path", str(self.root)], capture_output=True, text=True, timeout=60)
+        self.assertIn("Resume council handoff", r.stdout)         # pending delivery shown FIRST
+        self.assertIn("Claude Code Inbox", r.stdout)
+        self.assertLess(r.stdout.index("Resume council handoff"), r.stdout.index("Claude Code Inbox"))
+        a = subprocess.run([sys.executable, "-m", "openfde", "council", "ack", "--role", "claude",
+                            "--path", str(self.root)], capture_output=True, text=True, timeout=60)
+        self.assertIn("Acknowledged delivery", a.stdout)
+        self.assertEqual(handoff_broker.delivery_banner(self.root, "claude"), "")  # cleared
+
+    def test_codex_status_shows_pending_delivery_after_handoff(self):
+        from openfde import handoff_broker
+        self._start()
+        ec.record_claude_handoff(self.root, commit_sha="abc1234", summary="done", checks="green")
+        view = next(iter(ec.bus_snapshot(self.root).values()))
+        d = handoff_broker.process_transition(self.root, view)    # the watcher would do this
+        self.assertEqual(d["toRole"], "codex")
+        self.assertIn("Resume council handoff", handoff_broker.delivery_banner(self.root, "codex"))
+        self.assertEqual(handoff_broker.delivery_banner(self.root, "claude"), "")  # not for claude
+
 
 def _view(status, *, episode="ep1", commit="", tasks=("task_a",), boxes=("box_x",), run=""):
     return {"episodeId": episode, "status": status, "taskIds": list(tasks), "runId": run,

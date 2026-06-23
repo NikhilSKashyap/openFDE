@@ -51,6 +51,8 @@ export default function CouncilHandoffBubble({ handoff, onDismiss }) {
       {handoff.objective && <div className="council-bubble-obj">{handoff.objective}</div>}
       {handoff.nextAction && <div className="council-bubble-next">→ {handoff.nextAction}</div>}
 
+      <WakeRow delivery={handoff.delivery} />
+
       <div className="council-bubble-foot">
         {sha && <span className="council-bubble-sha" title={handoff.latestCommit}>⎇ {sha}</span>}
         <span style={{ flex: 1 }} />
@@ -92,6 +94,26 @@ function Row({ k, v, mono }) {
     <div className="council-bubble-row">
       <span className="council-bubble-k">{k}</span>
       <span className={'council-bubble-v' + (mono ? ' council-bubble-mono' : '')}>{v}</span>
+    </div>
+  )
+}
+
+// Honest session-wakeup status — never claims the agent was woken if only a durable inbox is
+// pending. Driven by the delivery's raw `wake` adapter results.
+const TO_LABEL = { claude: 'Claude Code', codex: 'Codex', human: 'You' }
+function WakeRow({ delivery }) {
+  if (!delivery || !delivery.toRole) return null
+  const wake = delivery.wake || []
+  const native = wake.find(w => String(w.adapter || '').endsWith('-session'))
+  const acked = !!delivery.acknowledgedAt
+  const state = acked ? 'acknowledged' : 'pending'
+  const nativeTxt = native
+    ? (native.status === 'native_unavailable' ? 'native unavailable' : `native ${native.status}`)
+    : 'native unavailable'
+  return (
+    <div className="council-bubble-wake" title={`delivery ${delivery.deliveryId}`}>
+      <span className={'council-bubble-wakedot' + (acked ? ' acked' : '')} />
+      Wake {TO_LABEL[delivery.toRole] || delivery.toRole}: {state} · {nativeTxt}
     </div>
   )
 }

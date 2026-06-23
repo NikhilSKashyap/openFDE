@@ -3455,3 +3455,9 @@
   letter-spacing: 0.3px; font-size: 9px; padding-top: 2px; }
 .council-bubble-v { color: var(--text); line-height: 1.4; word-break: break-word; }
 .council-bubble-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
+.council-bubble-wake { margin-top: 6px; font-size: 10.5px; color: var(--text-muted);
+  display: flex; align-items: center; gap: 5px; }
+.council-bubble-wakedot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--accent-orange);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-orange) 25%, transparent); }
+.council-bubble-wakedot.acked { background: var(--solid); box-shadow: none; }

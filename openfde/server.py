@@ -5350,7 +5350,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     # or commits. This replaces heartbeat/polling as the product path.
     async def _council_watch_loop():
         import hashlib
-        from openfde import council_bus, external_council
+        from openfde import council_bus, external_council, handoff_broker
         cp = council_bus.council_paths(path)
         files = [cp["tasks"], cp["claude"], cp["codex"], cp["decisions"]]
 
@@ -5377,8 +5377,16 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 cur = external_council.bus_snapshot(path)
                 for eid, view in cur.items():
                     ev = external_council.detect_council_bus_event(snap.get(eid), view)
-                    if ev:
-                        await manager.broadcast({**ev, "at": time.time()})
+                    if not ev:
+                        continue
+                    # Durable session-wakeup delivery for the receiving role (deduped; VERIFIED
+                    # closes it). This — not native injection — is what makes the handoff complete.
+                    delivery = handoff_broker.process_transition(path, view)
+                    msg = {**ev, "at": time.time()}
+                    ds = handoff_broker.delivery_summary(delivery)
+                    if ds:
+                        msg["delivery"] = ds
+                    await manager.broadcast(msg)
                 snap = cur
             except asyncio.CancelledError:
                 raise

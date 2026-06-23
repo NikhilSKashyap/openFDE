@@ -147,7 +147,9 @@ def render_council_md(project_log: list) -> str:
              "the exact commit trailers to stamp. Completion is a handoff, not just a commit: after "
              "committing, Claude runs `openfde council handoff --role claude --commit HEAD --summary "
              "... --checks ...`; Codex records `openfde council verdict --status verified|"
-             "changes-requested ...` (Codex never commits).", ""]
+             "changes-requested ...` (Codex never commits). On a handoff OpenFDE records a durable "
+             "**delivery** and wakes the receiving session (no UI injection) — if `status` shows a "
+             "`▶ Resume council handoff` banner, print it, then `openfde council ack --role <…>`.", ""]
     for b in _COUNCIL_ORDER:
         lines.append(f"## {b}")
         rows = buckets[b][-_MAX_LEDGER_PER_ROLE:]

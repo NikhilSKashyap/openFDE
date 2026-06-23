@@ -431,11 +431,21 @@ def detect_council_bus_event(previous, current):
 
 def render_inbox(repo_root) -> dict:
     """The current ACTIVE handoff bubble for UI restore on page load — the most recent in-flight
-    work item (``ACTIVE_STATUSES``). A done/escalated item surfaces no restored bubble."""
+    work item (``ACTIVE_STATUSES``), with its pending session-wakeup ``delivery`` attached (so the
+    UI shows 'Wake … : pending' honestly). A done/escalated item surfaces no restored bubble."""
     active = [v for v in bus_snapshot(repo_root).values() if v["status"] in ACTIVE_STATUSES]
     if not active:
         return {"active": False, "event": None}
-    return {"active": True, "event": detect_council_bus_event(None, active[-1])}
+    v = active[-1]
+    ev = detect_council_bus_event(None, v)
+    if ev:
+        from openfde import handoff_broker
+        role = handoff_broker.receiving_role(v["status"])
+        d = handoff_broker.pending_delivery(repo_root, role) if role else None
+        ds = handoff_broker.delivery_summary(d)
+        if ds:
+            ev["delivery"] = ds
+    return {"active": True, "event": ev}
 
 
 # ── Self-orienting session inbox — `openfde council status --role <codex|claude>` ────────────────
