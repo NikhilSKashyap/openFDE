@@ -5344,6 +5344,48 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         path, manager, is_run_active=lambda: bool(_RUN_CONTROLS),
         resolve_function=_resolve_watch_function))
 
+    # ── External council LIVE bridge: poll .openfde/council/*.md sub-second, and on a REAL change
+    # diff the bus snapshot → broadcast handoff/status/verdict events the moment a status transitions
+    # (Codex → Claude Code, and back). Hash-gated (emit only on real change) + debounced; never writes
+    # or commits. This replaces heartbeat/polling as the product path.
+    async def _council_watch_loop():
+        import hashlib
+        from openfde import council_bus, external_council
+        cp = council_bus.council_paths(path)
+        files = [cp["tasks"], cp["claude"], cp["codex"], cp["decisions"]]
+
+        def _digest():
+            h = hashlib.sha1()
+            for f in files:
+                try:
+                    with open(f, "rb") as fh:
+                        h.update(fh.read())
+                except OSError:
+                    h.update(b"\0")
+                h.update(b"|")
+            return h.hexdigest()
+
+        snap = external_council.bus_snapshot(path)        # baseline — emit nothing for what exists
+        last = _digest()
+        while True:
+            try:
+                await asyncio.sleep(0.15)                  # sub-second detection
+                if _digest() == last:
+                    continue
+                await asyncio.sleep(0.12)                  # debounce: let the writer settle
+                last = _digest()
+                cur = external_council.bus_snapshot(path)
+                for eid, view in cur.items():
+                    ev = external_council.detect_council_bus_event(snap.get(eid), view)
+                    if ev:
+                        await manager.broadcast({**ev, "at": time.time()})
+                snap = cur
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a bad tick must never kill the bridge
+                logger.debug("council watch tick failed", exc_info=True)
+    council_watch_task = asyncio.create_task(_council_watch_loop())
+
     # ── Passive Prompt Capture: tail this repo's Claude Code transcripts and turn
     # new human prompts into prompt-story episodes (no `openfde cc` wrapper needed).
     from openfde import prompt_capture
@@ -5379,8 +5421,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         pass
     finally:
         logger.info("Server stopping")
-        for t in (watch_task, capture_task, summarizer_task, backfill_task, memory_task,
-                  warm_task, warm_story_task, rail_cache_task):
+        for t in (watch_task, council_watch_task, capture_task, summarizer_task, backfill_task,
+                  memory_task, warm_task, warm_story_task, rail_cache_task):
             t.cancel()
             try:
                 await t

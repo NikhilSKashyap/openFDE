@@ -3424,3 +3424,34 @@
 .work-verifyplan-h { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700;
   color: var(--text); }
 .work-verify-warn { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+/* External council LIVE handoff bubble — a small chat toast (bottom-left), not a panel. */
+.council-bubble {
+  position: fixed; left: 16px; bottom: 16px; z-index: 60;
+  width: 320px; max-width: calc(100vw - 32px);
+  background: var(--surface); border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: 10px; padding: 10px 12px; box-shadow: 0 8px 28px rgba(0,0,0,0.28);
+  font-size: 12px; animation: council-bubble-in 0.18s ease-out;
+}
+@keyframes council-bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.council-bubble-head { display: flex; align-items: center; gap: 7px; }
+.council-bubble-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.council-bubble-route { font-weight: 700; }
+.council-bubble-pill { font-size: 9px; font-weight: 600; letter-spacing: 0.3px; color: var(--text-muted);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+.council-bubble-x { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 0 2px; }
+.council-bubble-x:hover { color: var(--text); }
+.council-bubble-obj { margin-top: 6px; color: var(--text); line-height: 1.35; }
+.council-bubble-next { margin-top: 5px; color: var(--text-muted); line-height: 1.35; font-size: 11px; }
+.council-bubble-foot { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+.council-bubble-sha { font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--solid); }
+.council-bubble-more { background: none; border: 1px solid var(--border); border-radius: 99px;
+  color: var(--accent); font-family: inherit; font-size: 10.5px; padding: 1px 9px; cursor: pointer; }
+.council-bubble-more:hover { border-color: var(--accent); }
+.council-bubble-detail { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px; }
+.council-bubble-row { display: flex; gap: 8px; font-size: 11px; }
+.council-bubble-k { color: var(--text-muted); min-width: 70px; flex-shrink: 0; text-transform: uppercase;
+  letter-spacing: 0.3px; font-size: 9px; padding-top: 2px; }
+.council-bubble-v { color: var(--text); line-height: 1.4; word-break: break-word; }
+.council-bubble-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }

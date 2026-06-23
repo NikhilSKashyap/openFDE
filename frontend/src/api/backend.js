@@ -101,6 +101,10 @@ export const getBootCanvas = () => apiFetch('/api/boot/canvas', { _timeout: 9000
  */
 export const getState = () => apiFetch('/api/state')
 
+// External council bus state — work items + latest handoff + the current ACTIVE handoff bubble
+// (`inbox`) for restoring the bubble on page load without showing stale/done ones.
+export const getExternalCouncilStatus = () => apiFetch('/api/external-council/status')
+
 /**
  * Persist the canvas state (boxes and arrows only; Sets are not serialisable).
  *

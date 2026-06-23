@@ -210,10 +210,137 @@ def read_latest_handoff(repo_root) -> dict:
 
 
 def read_status(repo_root) -> dict:
-    """Bus state for ``GET /api/external-council/status``: the ``TASKS.md`` work items + the latest
-    handoff. Pure read of the gitignored bus."""
+    """Bus state for ``GET /api/external-council/status``: the ``TASKS.md`` work items, the latest
+    handoff, and the current ACTIVE handoff bubble (``inbox``) for UI restore. Pure read."""
     items = council_bus.parse_work_items(council_bus.read_bus_file(repo_root, "tasks"))
     return {
         "workItems": [{"header": it["header"], "body": it["body"]} for it in items],
         "handoff": read_latest_handoff(repo_root),
+        "inbox": render_inbox(repo_root),
     }
+
+
+# ── LIVE handoff events — the sub-second bridge (pure detection; the server watches + broadcasts) ──
+# Each status transition is a chat-style handoff. ``type`` is the websocket event name; ``direction``
+# drives the "Codex → Claude Code" bubble. Durable truth stays in OpenFDE ids + commit trailers.
+_STATUS_EVENT = {
+    council_bus.STATUS_READY_FOR_CC:                 ("external_council_handoff", "codex_to_claude"),
+    council_bus.STATUS_CLAUDE_WORKING:               ("external_council_status",  "claude_working"),
+    council_bus.STATUS_READY_FOR_CODEX_VERIFICATION: ("external_council_handoff", "claude_to_codex"),
+    council_bus.STATUS_CHANGES_REQUESTED:            ("external_council_verdict", "codex_to_claude"),
+    council_bus.STATUS_VERIFIED:                     ("external_council_verdict", "codex_verdict"),
+    council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT:      ("external_council_status",  "claude_to_codex"),
+    council_bus.STATUS_BLOCKED_NEEDS_HUMAN:          ("external_council_status",  "needs_human"),
+}
+_DIRECTION_PARTIES = {
+    "codex_to_claude": ("Codex", "Claude Code"), "claude_to_codex": ("Claude Code", "Codex"),
+    "codex_verdict": ("Codex", "Claude Code"), "claude_working": ("Claude Code", "Claude Code"),
+    "needs_human": ("Council", "You"),
+}
+# Statuses whose bubble should still show on a fresh page load — the work is mid-flight. A VERIFIED /
+# BLOCKED_NEEDS_HUMAN bubble is a one-shot notification, not restored as a stale bubble.
+ACTIVE_STATUSES = (council_bus.STATUS_READY_FOR_CC, council_bus.STATUS_CLAUDE_WORKING,
+                   council_bus.STATUS_READY_FOR_CODEX_VERIFICATION,
+                   council_bus.STATUS_CHANGES_REQUESTED, council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT)
+
+
+def _body_section(body: str, heading: str) -> list:
+    """The bullet/line list under a ``## <heading>`` section of a work-item body."""
+    out, grabbing = [], False
+    for ln in (body or "").splitlines():
+        s = ln.strip()
+        if s.lower().startswith("## " + heading.lower()):
+            grabbing = True
+            continue
+        if grabbing:
+            if s.startswith("## "):
+                break
+            b = s.lstrip("-*•").strip()
+            if b:
+                out.append(b)
+    return out
+
+
+def work_item_view(item: dict) -> dict:
+    """Normalize a parsed work item (``{header, body}``) to a flat view for diffing + bubbles."""
+    h = item.get("header") or {}
+    body = item.get("body") or ""
+    objective = next(iter(_body_section(body, "Objective")), "")
+    if not objective:
+        objective = next((ln.strip() for ln in body.splitlines()
+                          if ln.strip() and not ln.strip().startswith("#")), "")
+    return {
+        "episodeId": h.get("episodeId") or "", "status": h.get("status") or "",
+        "taskIds": list(h.get("taskIds") or []), "runId": h.get("runId") or "",
+        "boxIds": list(h.get("boxIds") or []), "latestCommit": h.get("latestCommit") or "",
+        "objective": objective, "acceptance": _body_section(body, "Acceptance"),
+    }
+
+
+def bus_snapshot(repo_root) -> dict:
+    """``{episodeId: view}`` for the current ``TASKS.md`` — the watcher's diff baseline."""
+    snap = {}
+    for it in council_bus.parse_work_items(council_bus.read_bus_file(repo_root, "tasks")):
+        v = work_item_view(it)
+        if v["episodeId"]:
+            snap[v["episodeId"]] = v
+    return snap
+
+
+def _next_action(direction: str, status: str) -> str:
+    if status == council_bus.STATUS_READY_FOR_CC:
+        return ("Claude Code: claim it (CLAUDE_WORKING), implement, run focused checks, commit with "
+                "the trailers below, then set READY_FOR_CODEX_VERIFICATION.")
+    if status == council_bus.STATUS_CHANGES_REQUESTED:
+        return ("Claude Code: address the findings in CODEX.md, re-commit with the SAME episode/task "
+                "trailers, then set READY_FOR_CODEX_VERIFICATION.")
+    if status == council_bus.STATUS_READY_FOR_CODEX_VERIFICATION:
+        return ("Codex: verify the latest commit against the acceptance criteria; "
+                "write VERIFIED or CHANGES_REQUESTED.")
+    if status == council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT:
+        return "Codex: resolve the architecture/product question in CLAUDE.md, then re-hand to CC."
+    if status == council_bus.STATUS_VERIFIED:
+        return "Verified — no further action. The commit (with its trailers) is the durable record."
+    if status == council_bus.STATUS_CLAUDE_WORKING:
+        return "Claude Code is implementing…"
+    return "Human: an irreversible / security / cost / product decision is needed before proceeding."
+
+
+def detect_council_bus_event(previous, current):
+    """Pure: compare one work item's PREVIOUS view (or ``None``) to its CURRENT view; return the LIVE
+    handoff event on a MATERIAL change (status transitioned, or a new commit landed at the same
+    status), else ``None``. No timestamps / no I/O — the server stamps ``at`` and broadcasts. A
+    ``codex_to_claude`` event carries the exact ``OpenFDE-*`` trailers CC must stamp on its commit."""
+    cur = current or {}
+    status = cur.get("status") or ""
+    if status not in _STATUS_EVENT:
+        return None
+    prev = previous or {}
+    status_changed = prev.get("status") != status
+    commit_changed = bool(cur.get("latestCommit")) and prev.get("latestCommit") != cur.get("latestCommit")
+    if not (status_changed or commit_changed):
+        return None
+    ev_type, direction = _STATUS_EVENT[status]
+    sender, receiver = _DIRECTION_PARTIES[direction]
+    episode_id = cur.get("episodeId") or prev.get("episodeId") or ""
+    event = {
+        "type": ev_type, "direction": direction, "status": status, "episodeId": episode_id,
+        "taskIds": cur.get("taskIds") or [], "runId": cur.get("runId") or "",
+        "boxIds": cur.get("boxIds") or [], "latestCommit": cur.get("latestCommit") or "",
+        "objective": cur.get("objective") or "", "acceptance": cur.get("acceptance") or [],
+        "from": sender, "to": receiver, "nextAction": _next_action(direction, status),
+    }
+    if direction == "codex_to_claude" and episode_id:        # CC is being handed actionable work
+        event["trailers"] = council_bus.build_trailers(
+            episode_id=episode_id, task_ids=event["taskIds"], run_id=event["runId"] or None,
+            role="senior_dev", handoff="ready_for_codex_verification")
+    return event
+
+
+def render_inbox(repo_root) -> dict:
+    """The current ACTIVE handoff bubble for UI restore on page load — the most recent in-flight
+    work item (``ACTIVE_STATUSES``). A done/escalated item surfaces no restored bubble."""
+    active = [v for v in bus_snapshot(repo_root).values() if v["status"] in ACTIVE_STATUSES]
+    if not active:
+        return {"active": False, "event": None}
+    return {"active": True, "event": detect_council_bus_event(None, active[-1])}

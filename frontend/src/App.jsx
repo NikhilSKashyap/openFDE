@@ -4,6 +4,7 @@ import Toolbar from './components/Toolbar/Toolbar'
 import FileTree from './components/FileTree/FileTree'
 import Whiteboard from './components/Whiteboard/Whiteboard'
 import RightPanel from './components/RightPanel/RightPanel'
+import CouncilHandoffBubble from './components/CouncilHandoff/CouncilHandoffBubble'
 import WorkPanel from './components/WorkPanel/WorkPanel'
 import FocusLens from './components/Focus/FocusLens'
 import { deriveMoment } from './productFlow/deriveMoment'
@@ -21,7 +22,7 @@ import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
 import {
   isBackendAvailable,
-  getState, putState,
+  getState, putState, getExternalCouncilStatus,
   getTasks, putTasks,
   postEvent,
   getEvents,
@@ -106,6 +107,8 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('openfde-theme') || 'dark')
   const [activeTool, setActiveTool] = useState('select')
   const [activeView, setActiveView] = useState('whiteboard')
+  // Latest LIVE external-council handoff event (or null) → the council handoff bubble.
+  const [councilHandoff, setCouncilHandoff] = useState(null)
   const [canvasState, _rawCanvasDispatch] = useCanvasState()
   // Live mirror of boxes so WS handlers (stable closures) can map file→module.
   const boxesRef = useRef(canvasState.boxes)
@@ -637,6 +640,17 @@ export default function App() {
   const skipStateSaveRef = useRef(false)
   const skipTasksSaveRef = useRef(false)
 
+  // Restore the council handoff bubble on load — but only an ACTIVE, in-flight handoff (the
+  // server's inbox suppresses stale/done ones), so a refresh never resurrects an old bubble.
+  useEffect(() => {
+    if (!backendAvailable) return
+    let alive = true
+    getExternalCouncilStatus().then(s => {
+      if (alive && s?.inbox?.active && s.inbox.event) setCouncilHandoff(s.inbox.event)
+    })
+    return () => { alive = false }
+  }, [backendAvailable])
+
   // ── Session identity (Priority A): learn WHICH repo the backend is watching and key
   // the UI on repoRoot. If it changed since this browser last loaded (the same port now
   // serving a different repo), hard-reload so no stale canvas/story/task/filetree data
@@ -930,6 +944,13 @@ export default function App() {
       // the reconciled list so OpenPM never shows a stale FAILED beside a passed
       // episode. (This used to be a no-op; the server is now a task writer too.)
       else if (msg?.type === 'tasks_updated') { refetchTasks() }
+      // LIVE external-council bridge: a handoff/verdict/status crossed the bus → show the bubble
+      // immediately (event-driven, not polling). The msg IS the rendered event.
+      else if (msg?.type === 'external_council_handoff' || msg?.type === 'external_council_verdict'
+               || msg?.type === 'external_council_status') {
+        setCouncilHandoff(msg)
+        if (msg.taskIds?.length) refetchTasks()       // OpenPM moved on a verdict
+      }
       // A commit landed (the only commit path) — refresh the rail's nested beats,
       // the OpenPM commit cards, and the git timeline so all three stay in sync.
       else if (msg?.type === 'commit_created') {
@@ -2180,6 +2201,9 @@ export default function App() {
 
   return (
     <>
+      <CouncilHandoffBubble
+        key={councilHandoff ? `${councilHandoff.episodeId}:${councilHandoff.status}:${councilHandoff.latestCommit || ''}` : 'none'}
+        handoff={councilHandoff} onDismiss={() => setCouncilHandoff(null)} />
       <div className={`app${theme === 'light' ? ' light' : ''}`}>
         <Toolbar
           activeTool={activeTool}

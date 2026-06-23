@@ -116,6 +116,94 @@ class ExternalCouncilTest(unittest.TestCase):
         self.assertEqual(st["workItems"][0]["header"]["episodeId"], res["episodeId"])
         self.assertIn("handoff", st)
 
+    def test_render_inbox_restores_active_only(self):
+        res = self._start()                                    # READY_FOR_CC → active
+        inbox = ec.render_inbox(self.root)
+        self.assertTrue(inbox["active"])
+        self.assertEqual(inbox["event"]["direction"], "codex_to_claude")
+        self.assertEqual(inbox["event"]["episodeId"], res["episodeId"])
+        ec.record_codex_verdict(self.root, episode_id=res["episodeId"], commit_sha="x", status="VERIFIED")
+        self.assertFalse(ec.render_inbox(self.root)["active"])  # done → no stale bubble restored
+
+    def test_bus_snapshot_keys_by_episode(self):
+        res = self._start()
+        snap = ec.bus_snapshot(self.root)
+        self.assertIn(res["episodeId"], snap)
+        self.assertEqual(snap[res["episodeId"]]["status"], "READY_FOR_CC")
+
+
+def _view(status, *, episode="ep1", commit="", tasks=("task_a",), boxes=("box_x",), run=""):
+    return {"episodeId": episode, "status": status, "taskIds": list(tasks), "runId": run,
+            "boxIds": list(boxes), "latestCommit": commit, "objective": "do the thing",
+            "acceptance": ["tests pass"]}
+
+
+class CouncilEventDetectionTest(unittest.TestCase):
+    """Pure transition → live-event mapping. Each council status emits the right event type +
+    direction; only MATERIAL changes emit; CC-bound handoffs carry the commit trailers."""
+
+    def test_ready_for_cc_is_codex_to_claude_handoff_with_trailers(self):
+        ev = ec.detect_council_bus_event(None, _view("READY_FOR_CC", tasks=("task_a", "task_b")))
+        self.assertEqual(ev["type"], "external_council_handoff")
+        self.assertEqual(ev["direction"], "codex_to_claude")
+        self.assertEqual((ev["from"], ev["to"]), ("Codex", "Claude Code"))
+        self.assertEqual(ev["episodeId"], "ep1")
+        self.assertEqual(ev["trailers"]["OpenFDE-Episode"], "ep1")     # CC gets the exact trailers
+        self.assertEqual(ev["trailers"]["OpenFDE-Tasks"], "task_a, task_b")
+        self.assertEqual(ev["trailers"]["OpenFDE-Role"], "senior_dev")
+
+    def test_ready_for_verification_is_claude_to_codex(self):
+        ev = ec.detect_council_bus_event(_view("CLAUDE_WORKING"),
+                                         _view("READY_FOR_CODEX_VERIFICATION", commit="abc1234"))
+        self.assertEqual(ev["type"], "external_council_handoff")
+        self.assertEqual(ev["direction"], "claude_to_codex")
+        self.assertEqual((ev["from"], ev["to"]), ("Claude Code", "Codex"))
+        self.assertEqual(ev["latestCommit"], "abc1234")
+        self.assertNotIn("trailers", ev)                       # receiver is Codex, not CC
+
+    def test_changes_requested_is_codex_to_claude_verdict(self):
+        ev = ec.detect_council_bus_event(_view("READY_FOR_CODEX_VERIFICATION", commit="abc"),
+                                         _view("CHANGES_REQUESTED", commit="abc"))
+        self.assertEqual(ev["type"], "external_council_verdict")
+        self.assertEqual(ev["direction"], "codex_to_claude")
+        self.assertIn("trailers", ev)                          # CC must re-commit → gets trailers
+
+    def test_verified_is_codex_verdict_no_trailers(self):
+        ev = ec.detect_council_bus_event(_view("READY_FOR_CODEX_VERIFICATION", commit="abc"),
+                                         _view("VERIFIED", commit="abc"))
+        self.assertEqual(ev["type"], "external_council_verdict")
+        self.assertEqual(ev["direction"], "codex_verdict")
+        self.assertNotIn("trailers", ev)                       # done — no CC action
+
+    def test_claude_working_is_status_event(self):
+        ev = ec.detect_council_bus_event(_view("READY_FOR_CC"), _view("CLAUDE_WORKING"))
+        self.assertEqual(ev["type"], "external_council_status")
+        self.assertEqual(ev["direction"], "claude_working")
+
+    def test_blocked_needs_architect_emits(self):
+        ev = ec.detect_council_bus_event(_view("CLAUDE_WORKING"), _view("BLOCKED_NEEDS_ARCHITECT"))
+        self.assertEqual(ev["type"], "external_council_status")
+        self.assertEqual(ev["direction"], "claude_to_codex")
+
+    def test_no_event_when_status_and_commit_unchanged(self):
+        v = _view("CLAUDE_WORKING", commit="abc")
+        v2 = {**v, "objective": "reworded objective"}          # only prose changed
+        self.assertIsNone(ec.detect_council_bus_event(v, v2))
+
+    def test_new_commit_at_same_status_is_material(self):
+        ev = ec.detect_council_bus_event(_view("READY_FOR_CODEX_VERIFICATION", commit="aaa"),
+                                         _view("READY_FOR_CODEX_VERIFICATION", commit="bbb"))
+        self.assertIsNotNone(ev)                               # a fresh CC commit → re-handoff
+        self.assertEqual(ev["latestCommit"], "bbb")
+
+    def test_debounce_does_not_duplicate(self):
+        a, b = _view("READY_FOR_CC"), _view("CLAUDE_WORKING")
+        self.assertIsNotNone(ec.detect_council_bus_event(a, b))   # the transition emits once…
+        self.assertIsNone(ec.detect_council_bus_event(b, b))      # …the next tick (snap==cur) is silent
+
+    def test_unknown_status_is_ignored(self):
+        self.assertIsNone(ec.detect_council_bus_event(_view("READY_FOR_CC"), _view("WAT")))
+
 
 if __name__ == "__main__":
     unittest.main()
