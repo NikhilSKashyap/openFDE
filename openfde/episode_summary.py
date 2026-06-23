@@ -470,6 +470,12 @@ def repair_task_commit_shas(tasks, episodes):
         if not isinstance(t, dict):
             out.append(t)
             continue
+        # Intent-graph step cards OWN their run's commit (set by sync_intent_tasks). The
+        # episode-mismatch heuristic must never null their sha — that's a receipt the run authored,
+        # and reconcile_intent_task_receipts heals it from episode truth instead.
+        if t.get("source") == "intent-graph":
+            out.append(t)
+            continue
         sha, eid = t.get("commitSha"), t.get("episodeId")
         if not sha or eid not in shas_by_ep or sha in shas_by_ep[eid]:
             out.append(t)                 # no commit, unknown episode, or already valid → leave it
@@ -478,6 +484,68 @@ def repair_task_commit_shas(tasks, episodes):
         new_sha = ep_shas[0] if len(ep_shas) == 1 else None
         out.append({**t, "commitSha": new_sha, "shortSha": (new_sha[:7] if new_sha else None)})
         changed = True
+    return out, changed
+
+
+def reconcile_intent_tasks(tasks, episodes):
+    """Protect an intent-graph run's OpenPM receipts across UI hydration/persistence.
+
+    For an intent-graph episode, the FIVE step cards (``source == "intent-graph"``) ARE the
+    operational source of truth. This does two things, both keyed generically on the episode (never a
+    specific demo), and both idempotent:
+
+      1. **Heal receipts.** A frontend hydrate→PUT round-trip can drop a step card's ``files`` /
+         ``commitSha``. Restore them from episode truth — per-step ``files`` from the episode's
+         ``intentSource.steps`` (matched by the card's linked box id) and ``commitSha`` from the
+         episode's single landed commit — so opening OpenPM can never erase what the run produced.
+      2. **Drop the duplicate.** Remove any ``source == "openfde-episode"`` card for an episode that
+         already has intent-graph step cards — the step cards cover that landed commit, so the extra
+         episode/commit card is noise (the regression). Episodes with NO step cards keep their
+         episode-card behaviour untouched.
+
+    Args:
+        tasks: list[dict] — persisted OpenPM tasks.
+        episodes: list[dict] — episodes (source of truth).
+
+    Returns:
+        (list[dict], bool) — (possibly-repaired tasks, changed?).
+    """
+    if not isinstance(tasks, list):
+        return tasks, False
+    by_ep = {e["episodeId"]: e for e in (episodes or [])
+             if isinstance(e, dict) and e.get("episodeId")}
+    # Episodes that already have intent-graph step cards — their landed commit is covered by them.
+    intent_eps = {t.get("episodeId") for t in tasks
+                  if isinstance(t, dict) and t.get("source") == "intent-graph" and t.get("episodeId")}
+    changed = False
+    out = []
+    for t in tasks:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        # (2) drop a redundant episode/commit card duplicating an intent-graph episode.
+        if t.get("source") == "openfde-episode" and t.get("episodeId") in intent_eps:
+            changed = True
+            continue
+        # (1) heal step-card receipts from episode truth.
+        if t.get("source") == "intent-graph":
+            ep = by_ep.get(t.get("episodeId"))
+            if ep:
+                t = dict(t)
+                shas = ep.get("commitShas") or []
+                if not t.get("commitSha") and len(shas) == 1:
+                    t["commitSha"] = shas[0]
+                    t["shortSha"] = shas[0][:7]
+                    changed = True
+                if not (t.get("files") or []):
+                    box = (t.get("linkedBoxIds") or [None])[0]
+                    steps = (ep.get("intentSource") or {}).get("steps") or []
+                    files = next((s.get("files") for s in steps
+                                  if s.get("boxId") == box and s.get("files")), None)
+                    if files:
+                        t["files"] = list(files)
+                        changed = True
+        out.append(t)
     return out, changed
 
 

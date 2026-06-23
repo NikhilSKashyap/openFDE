@@ -73,11 +73,17 @@ function pmReducer(state, action) {
     case 'SYNC_EPISODE_COMMITS': {
       const byCommit = new Map()
       state.forEach((t, i) => { if (t.commitSha) byCommit.set(t.commitSha, i) })
+      // An intent-graph run's FIVE step cards are the operational source of truth for that episode —
+      // its landed commit is already covered, so never add a duplicate episode/commit card for it.
+      // Keyed by episodeId (not commitSha) so it holds even if a card's sha is momentarily missing.
+      const intentEpisodeIds = new Set()
+      state.forEach(t => { if (t.source === 'intent-graph' && t.episodeId) intentEpisodeIds.add(t.episodeId) })
       let next = null
       const clone = () => (next || (next = state.slice()))
       const additions = []
       for (const c of action.commits || []) {
         if (!c.commitSha) continue
+        if (c.episodeId && intentEpisodeIds.has(c.episodeId)) continue   // covered by step cards
         const title = cardTitleFor(c)
         const desc = c.displaySummary || ''
         if (!byCommit.has(c.commitSha)) {

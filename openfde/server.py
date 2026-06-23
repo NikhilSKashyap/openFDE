@@ -90,8 +90,9 @@ from openfde import plugins as plugins_mod
 from openfde import focus as focus_mod
 from openfde import issue_repro as issue_repro_mod
 from openfde import source_edit
-from openfde.episode_summary import (commit_display, is_bad_title, reconcile_task_status,
-                                     repair_episode_tasks, repair_task_commit_shas, sync_intent_tasks)
+from openfde.episode_summary import (commit_display, is_bad_title, reconcile_intent_tasks,
+                                     reconcile_task_status, repair_episode_tasks,
+                                     repair_task_commit_shas, sync_intent_tasks)
 from openfde.issue_intents import gh_issue_list, gh_issue_view, normalize_issue, upsert_intent_task
 from openfde import verify as verify_mod
 from openfde import prs as prs_mod
@@ -747,6 +748,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # can't keep showing on the wrong card.
         repaired, c2 = repair_task_commit_shas(repaired, episodes)
         changed = changed or c2
+        # Intent-graph runs: the step cards are the source of truth. Heal any step card whose
+        # files/commitSha a UI hydration dropped (from episode truth), and drop a redundant
+        # episode/commit card that duplicates an episode already covered by step cards — so opening
+        # OpenPM can neither erase receipts nor leave a 6th card behind.
+        repaired, c3 = reconcile_intent_tasks(repaired, episodes)
+        changed = changed or c3
         # Make every episode card mirror its episode's CURRENT verify/landed state
         # — no stale FAILED next to a passed episode (one source of truth).
         if reconcile_task_status(repaired, episodes):

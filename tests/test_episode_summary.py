@@ -412,6 +412,61 @@ class RepairTaskCommitShasTest(unittest.TestCase):
         out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P1", "commitShas": []}])
         self.assertFalse(changed)
 
+    def test_intent_graph_card_sha_is_protected(self):
+        # An intent-graph step card OWNS its run's commit; the episode-mismatch heuristic (which would
+        # otherwise null it when the episode lists no/other commits) must never erase that receipt.
+        tasks = [{"id": "t", "source": "intent-graph", "episodeId": "P1", "commitSha": "run_sha"}]
+        out, changed = es.repair_task_commit_shas(tasks, [{"episodeId": "P1", "commitShas": []}])
+        self.assertFalse(changed)
+        self.assertEqual(out[0]["commitSha"], "run_sha")
+
+
+class ReconcileIntentTasksTest(unittest.TestCase):
+    """Intent-graph step cards are the operational source of truth: their receipts survive UI
+    hydration, and no duplicate episode/commit card is left for the same episode."""
+
+    def _episode(self):
+        return {"episodeId": "ep1", "commitShas": ["sha1"],
+                "intentSource": {"kind": "intent-graph", "steps": [
+                    {"boxId": "b1", "title": "ingest customer messages", "files": ["support_inbox/ingest.py"]},
+                    {"boxId": "b2", "title": "classify issue", "files": ["support_inbox/classify.py"]},
+                ]}}
+
+    def test_drops_duplicate_episode_card(self):
+        tasks = [
+            {"id": "i1", "source": "intent-graph", "episodeId": "ep1", "linkedBoxIds": ["b1"],
+             "commitSha": "sha1", "files": ["support_inbox/ingest.py"]},
+            {"id": "e1", "source": "openfde-episode", "episodeId": "ep1", "commitSha": "sha1",
+             "title": "AI Support Inbox"},
+        ]
+        out, changed = es.reconcile_intent_tasks(tasks, [self._episode()])
+        self.assertTrue(changed)
+        self.assertEqual([t["id"] for t in out], ["i1"])          # episode card dropped, step kept
+
+    def test_heals_dropped_files_and_sha(self):
+        # A hydrate→PUT round-trip cleared the step card's receipts → restore from episode truth.
+        tasks = [{"id": "i1", "source": "intent-graph", "episodeId": "ep1", "linkedBoxIds": ["b1"],
+                  "commitSha": None, "files": []}]
+        out, changed = es.reconcile_intent_tasks(tasks, [self._episode()])
+        self.assertTrue(changed)
+        self.assertEqual(out[0]["commitSha"], "sha1")
+        self.assertEqual(out[0]["shortSha"], "sha1"[:7])
+        self.assertEqual(out[0]["files"], ["support_inbox/ingest.py"])
+
+    def test_keeps_episode_card_when_no_step_tasks(self):
+        # An ordinary episode (no intent-graph step cards) keeps its episode/commit card.
+        tasks = [{"id": "e1", "source": "openfde-episode", "episodeId": "ep9", "commitSha": "z"}]
+        out, changed = es.reconcile_intent_tasks(tasks, [{"episodeId": "ep9", "commitShas": ["z"]}])
+        self.assertFalse(changed)
+        self.assertEqual([t["id"] for t in out], ["e1"])
+
+    def test_idempotent(self):
+        tasks = [{"id": "i1", "source": "intent-graph", "episodeId": "ep1", "linkedBoxIds": ["b1"],
+                  "commitSha": "sha1", "files": ["support_inbox/ingest.py"]}]
+        out1, c1 = es.reconcile_intent_tasks(tasks, [self._episode()])
+        out2, c2 = es.reconcile_intent_tasks(out1, [self._episode()])
+        self.assertFalse(c2)               # already healed → no further change
+
 
 class SyncIntentTasksTest(unittest.TestCase):
     """Server-durable OpenPM cards for an intent-graph run — the source of truth (tasks.json)."""
