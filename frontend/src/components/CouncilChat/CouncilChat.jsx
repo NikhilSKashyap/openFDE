@@ -310,6 +310,11 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
           allow file edits
         </label>
       </div>
+      <div className="council-run-hint">
+        {allowEdits
+          ? 'Real run: the senior dev will write files and the relay will commit them.'
+          : 'Plan-only: drives the real Codex + Claude Code loop and verifies, but writes nothing. Turn on “allow file edits” for a real implementation + commit.'}
+      </div>
 
       {onOpenAgentSettings && (
         <button className="council-settings-link" onClick={onOpenAgentSettings}>Agent Settings →</button>

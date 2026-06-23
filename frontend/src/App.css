@@ -3499,6 +3499,7 @@
   white-space: nowrap; cursor: pointer; user-select: none; }
 .council-run-edits input { margin: 0; cursor: pointer; }
 .acr-provs { font-size: 9px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+.council-run-hint { font-size: 9.5px; color: var(--text-muted); line-height: 1.4; margin-top: 4px; padding: 0 2px; }
 .acr-banner { margin-bottom: 8px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border);
   border-left-width: 3px; background: var(--surface-2); }
 .acr-banner.acr-running { border-left-color: var(--accent-orange);

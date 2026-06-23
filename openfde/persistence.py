@@ -819,13 +819,13 @@ class Persistence:
             return eps
         missing = [e for e in eps if not (e.get("sequence") and e.get("tag")
                                           and e.get("title") and e.get("summary"))]
-        if not missing:
-            return eps
-        max_seq = max((e.get("sequence") or 0) for e in eps)
-        for e in sorted(missing, key=lambda x: x.get("createdAt") or ""):
-            max_seq = enrich_episode(e, max_seq)
-        self._write_json(self.episodes_path, eps)
-        return eps
+        if missing:
+            max_seq = max((e.get("sequence") or 0) for e in eps)
+            for e in sorted(missing, key=lambda x: x.get("createdAt") or ""):
+                max_seq = enrich_episode(e, max_seq)
+            self._write_json(self.episodes_path, eps)
+        # Always demote internal council artifacts off the product rail (git-free, idempotent).
+        return self.flag_internal_council_episodes(eps)
 
     def flag_nonimplementation_episodes(self, root, episodes: list = None) -> list:
         """Reclassify episodes that are meta *by effect* so they leave the product Story
@@ -894,6 +894,46 @@ class Persistence:
                 changed = True
             elif not verdict and e.get("nonImplementation"):
                 e["nonImplementation"] = False              # gained a real commit / tracked file
+                e["signal"] = "product"
+                changed = True
+        if changed:
+            self._write_json(self.episodes_path, eps)
+        return eps
+
+    def flag_internal_council_episodes(self, episodes: list = None) -> list:
+        """Demote internal council artifacts (verification / review / implementation-prompt / smoke /
+        relay machinery) off the product rail + Story — GENERALLY, by vocabulary, never by id. A
+        demoted episode is stamped ``internal=True`` + ``internalKind`` + ``signal="operational"`` +
+        ``nonImplementation=True`` (so :func:`prompt_story.is_operational_episode` hides it from the
+        spine and the rail skips it) while staying in ``episodes.json`` as a queryable receipt under
+        the council. Reversible — an episode that gains a real commit / autonomous-run ``council`` data
+        flips back to ``product``. Git-free + idempotent, so the demo repo cleans itself on load.
+
+        Returns:
+            list[dict] — the episodes, reclassified where decidable.
+        """
+        from openfde.episode_summary import internal_council_kind
+        eps = episodes if episodes is not None else self.load_episodes()
+        if not eps:
+            return eps
+        changed = False
+        for e in eps:
+            kind = internal_council_kind(e)
+            if kind:
+                if not (e.get("internal") and e.get("signal") == "operational"):
+                    e["internal"] = True
+                    e["internalKind"] = kind
+                    e["signal"] = "operational"
+                    e["nonImplementation"] = True
+                    sf = e.get("storyFacts")
+                    if isinstance(sf, dict):
+                        sf["operational"] = True
+                        sf["concepts"] = []
+                    changed = True
+            elif e.get("internal"):                     # gained real work → product again
+                e["internal"] = False
+                e.pop("internalKind", None)
+                e["nonImplementation"] = False
                 e["signal"] = "product"
                 changed = True
         if changed:

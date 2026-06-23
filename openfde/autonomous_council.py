@@ -263,6 +263,57 @@ def _ensure_phase_tasks(persistence, rec):
         _patch_work_item_header(repo_root, rec["episodeId"], {"taskIds": rec["taskIds"]})
 
 
+def _phase_states_from_council(council: dict):
+    """Map a parent episode's council summary (edges + status) to per-phase (column, verification)."""
+    edges = set(council.get("edges") or [])
+    status = council.get("status")
+    blocked = str(status or "").startswith("blocked")
+    states = {
+        "plan": ("done", "passed") if "proposed" in edges else ("todo", "pending"),
+        "consult": ("done", "passed") if "consulted" in edges else ("todo", "pending"),
+        "implement": ("done", "passed") if ({"implemented", "fixed"} & edges) else ("todo", "pending"),
+        "verify": ("done", "passed") if "verified" in edges
+                  else (("doing", "failed") if "changes_requested" in edges else ("todo", "pending")),
+        "push": ("done", "passed") if status in (STATUS_VERIFIED, STATUS_READY_TO_PUSH)
+                else (("doing", "failed") if blocked else ("todo", "pending")),
+    }
+    return states, council.get("latestCommit")
+
+
+def hydrate_phase_cards(persistence) -> int:
+    """Backfill the five OpenPM phase cards for any PRODUCT parent episode that has autonomous-run
+    ``council`` data but is missing them — so existing parents pick up phase cards on load. Card state
+    reflects the council's edges/status; the implementation card carries the commit. Idempotent."""
+    eps = persistence.load_episodes()
+    tasks = persistence.load_tasks()
+    have = {(t.get("episodeId"), t.get("phaseKey")) for t in tasks
+            if isinstance(t, dict) and t.get("phaseKey")}
+    added = 0
+    for e in eps:
+        council = e.get("council")
+        if not council or e.get("internal"):
+            continue
+        eid = e["episodeId"]
+        if all((eid, key) in have for key, _t in _PHASE_TASKS):
+            continue
+        states, commit = _phase_states_from_council(council)
+        for key, title in _PHASE_TASKS:
+            if (eid, key) in have:
+                continue
+            col, ver = states[key]
+            tasks.append({
+                "id": "task_" + secrets.token_hex(5), "title": title, "description": "", "column": col,
+                "verificationStatus": ver, "source": external_council.EXTERNAL_COUNCIL_SOURCE,
+                "episodeId": eid, "phaseKey": key, "linkedBoxIds": list(e.get("boxIds") or []),
+                "files": [], "commitSha": (commit if key == "implement" else None),
+                "episodeTag": e.get("tag", ""), "promptTitle": e.get("title", ""), "promptLabel": e.get("title", ""),
+            })
+            added += 1
+    if added:
+        persistence.save_tasks(tasks)
+    return added
+
+
 def _set_phase_task(persistence, rec, phase_key, column, verification=None, commit=None):
     if not (rec.get("product") and rec.get("episodeId")):
         return

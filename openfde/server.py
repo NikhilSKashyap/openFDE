@@ -426,10 +426,13 @@ def build_rail_payload(persistence, *, limit=None) -> dict:
     authoritative empty (``confirmed: False``); the full rail (``limit=None``) is, so the UI may show
     an empty rail only after that. ``totalCount`` lets the UI know more chips are hydrating.
     """
-    persistence.backfill_episode_meta()                    # tag/title/seq — deterministic, no git
+    persistence.backfill_episode_meta()                    # tag/title/seq + council-noise demotion, no git
     # Deterministic order (sequence desc) for BOTH boot and full — never the store's file order,
-    # which a reconciliation upsert reorders. Boot then takes the latest N off the top.
-    eps = sorted(persistence.load_episodes(), key=_rail_order_key, reverse=True)
+    # which a reconciliation upsert reorders. Boot then takes the latest N off the top. Internal
+    # council artifacts (verification/review/OPS/smoke machinery) are folded under the council, not
+    # shown as their own rail beats.
+    eps = sorted((e for e in persistence.load_episodes() if not e.get("internal")),
+                 key=_rail_order_key, reverse=True)
     total = len(eps)
     boot = limit is not None
     if boot:
@@ -742,6 +745,8 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             web.Response — JSON array of task objects (repaired in place when needed).
         """
         episodes = episode_llm_summary.ensure_facts(persistence)   # ensure clean episode titles first
+        from openfde import autonomous_council
+        autonomous_council.hydrate_phase_cards(persistence)        # parents with council data get phase cards
         tasks = persistence.load_tasks()
         repaired, changed = repair_episode_tasks(tasks, episodes)
         # Heal stale commit mappings: a card showing a commit its owning episode no longer claims is
@@ -2495,6 +2500,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # and committed nothing — or only OS junk like .DS_Store — is reclassified operational, off
         # the spine (Events layer still has it).
         episodes = persistence.flag_nonimplementation_episodes(path, episodes)
+        # Internal council artifacts (verification/review/OPS handoff/smoke machinery) fold under the
+        # council, off the spine + rail — general, by vocabulary (never by id).
+        episodes = persistence.flag_internal_council_episodes(episodes)
         # Demo-PLANNING concepts (NanoGPT/Tailwind, live demo, …) leave product Story concepts; a
         # demo-prompt episode that made a real change is titled by the change.
         episodes = persistence.clean_story_facts(episodes)

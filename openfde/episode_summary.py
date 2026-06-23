@@ -123,6 +123,39 @@ def is_operational(prompt: str) -> bool:
     return joined in _ACK_WORDS
 
 
+# ── Internal council artifacts — relay machinery that must NOT be a product rail beat ───
+# A council MECHANIC episode (a verification run, a relay review, a Claude-Code implementation-prompt
+# / OPS handoff, a smoke/test run, a bare "External Agent Council" label) is an internal turn/receipt,
+# not a product task. We demote it off the product rail and fold it under the council, GENERALLY —
+# keyed on council-mechanic vocabulary, never on a specific id. The phrasing requires council/relay/
+# autonomous CONTEXT next to the mechanic word, so a real task that merely says "add a review feature"
+# is never caught. An episode with a real implementation commit OR autonomous-run council data is
+# real work and is NEVER demoted.
+_COUNCIL_MACHINERY = (
+    (re.compile(r"council[\s\w]*\bsmoke\b|\bsmoke\b[\s\w]*council|smoke\s+test\s+artifact", re.I), "smoke"),
+    (re.compile(r"(council|relay|autonomous)[\s\w]*\bverif|\bverif\w*[\s\w]*(council|relay)", re.I), "verification"),
+    (re.compile(r"(council|relay|autonomous)[\s\w]*\breview\b|\breview\b[\s\w]*(council|relay)", re.I), "review"),
+    (re.compile(r"claude[\s\-]*code\s+implementation|implementation\s+prompt|handoff\s+prompt", re.I), "implementation_prompt"),
+    (re.compile(r"autonomous\s+council\s+relay|external\s+agent\s+council|council\s+relay", re.I), "relay"),
+)
+
+
+def internal_council_kind(episode: dict):
+    """Classify ``episode`` as an internal council artifact and return its kind
+    (``smoke`` | ``verification`` | ``review`` | ``implementation_prompt`` | ``relay``), or ``None``
+    for a real product episode. Real work (a commit, or autonomous-run ``council`` data) is never
+    internal — only no-commit council machinery is."""
+    if not isinstance(episode, dict):
+        return None
+    if episode.get("commitShas") or episode.get("commits") or episode.get("council"):
+        return None                       # real implementation / a real autonomous run → product
+    text = " ".join(str(episode.get(k) or "") for k in ("title", "prompt", "summary"))
+    for rx, kind in _COUNCIL_MACHINERY:
+        if rx.search(text):
+            return kind
+    return None
+
+
 # ── Story-noise vocabulary: OS junk, demo planning, and change-based retitling ───
 # These keep non-product work (a .DS_Store commit, "NanoGPT live demo" planning) out of
 # the product Story while never touching real OpenFDE changes.

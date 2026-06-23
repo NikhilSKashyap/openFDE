@@ -673,7 +673,7 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
             {row('status', ep.council.status)}
             {ep.council.latestCommit && row('commit', String(ep.council.latestCommit).slice(0, 7))}
             {ep.council.blockedReason && row('blocked', ep.council.blockedReason)}
-            {(ep.council.turns || []).slice(-6).map((t, i) => (
+            {(ep.council.turns || []).map((t, i) => (
               <div key={i} className="tlv3-drawer-row" style={{ display: 'block' }}>
                 <span className="tlv3-council-role">{t.label}:</span>{' '}
                 <span className="tlv3-drawer-v">{t.summary}</span>

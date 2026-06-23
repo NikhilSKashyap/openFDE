@@ -5,6 +5,7 @@ full happy path, the changes-requested fix loop, the retry-budget block, an hone
 adapter-unavailable block (precise reason), parent-episode attachment, smoke runs that do NOT
 pollute Story/OpenPM, the five OpenPM phase cards, and transcript role order."""
 
+import secrets
 import shutil
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from pathlib import Path
 from openfde import agent_sessions
 from openfde import autonomous_council as ac
 from openfde import external_council as ec
+from openfde.episode_summary import internal_council_kind
 from openfde.persistence import Persistence
 
 
@@ -189,6 +191,98 @@ class AutonomousCouncilTest(unittest.TestCase):
         rec = self._run(auto_push=True)
         self.assertEqual(rec["status"], ac.STATUS_VERIFIED)
         self.assertEqual([t["kind"] for t in ec.load_recorded_transcript(self.root)][-1], "push")
+
+
+class CouncilNoiseMigrationTest(unittest.TestCase):
+    """Internal council artifacts (verification/review/OPS/smoke/relay machinery) must fold under the
+    council — off the product rail — while real work stays product. Migration + filtering + hydration."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.p = Persistence(self.root / ".openfde")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _ep(self, **kw):
+        e = {"episodeId": "episode_" + secrets.token_hex(4), "kind": "external-council",
+             "signal": "product", "createdAt": "2026-01-01T00:00:00Z", "commitShas": []}
+        e.update(kw)
+        return e
+
+    def test_classifier_catches_council_machinery_only(self):
+        cases = {
+            "Autonomous Council Verification": "verification",
+            "Autonomous Council Relay REVIEW": "review",
+            "Claude Code Implementation Prompt": "implementation_prompt",
+            "External Agent Council": "relay",
+            "Council Verification Smoke Test": "smoke",          # smoke matches first
+        }
+        for title, kind in cases.items():
+            self.assertEqual(internal_council_kind(self._ep(title=title)), kind, title)
+        # real product tasks are NOT caught (even if they say "review"/"verify" without council context)
+        self.assertIsNone(internal_council_kind(self._ep(title="build an agentic SaaS for insurance")))
+        self.assertIsNone(internal_council_kind(self._ep(title="add a code review feature", kind="prompt")))
+        # real work — a commit or autonomous-run council data — is never internal
+        self.assertIsNone(internal_council_kind(self._ep(title="Council Smoke Test Artifact", commitShas=["abc"])))
+        self.assertIsNone(internal_council_kind(self._ep(title="Autonomous Council Verification",
+                                                         council={"status": "verified"})))
+
+    def test_migration_demotes_internal_and_is_reversible(self):
+        noisy = self._ep(title="Autonomous Council Verification")
+        real = self._ep(title="build an agentic SaaS", commitShas=["deadbeef"])
+        self.p.upsert_episode(noisy)
+        self.p.upsert_episode(real)
+        self.p.flag_internal_council_episodes()
+        n = self.p.get_episode(noisy["episodeId"])
+        self.assertTrue(n["internal"])
+        self.assertEqual((n["internalKind"], n["signal"], n["nonImplementation"]),
+                         ("verification", "operational", True))
+        self.assertEqual(self.p.get_episode(real["episodeId"])["signal"], "product")
+        # reversible: the demoted artifact later gains a commit → flips back to product
+        n["commitShas"] = ["c0ffee0"]
+        self.p.upsert_episode(n)
+        self.p.flag_internal_council_episodes()
+        self.assertFalse(self.p.get_episode(noisy["episodeId"]).get("internal"))
+
+    def test_rail_excludes_internal_artifacts(self):
+        from openfde.server import build_rail_payload
+        self.p.upsert_episode(self._ep(title="Autonomous Council Verification"))
+        self.p.upsert_episode(self._ep(title="build a real thing", commitShas=["abc1234"]))
+        titles = [c["title"] for c in build_rail_payload(self.p)["episodes"]]
+        self.assertIn("build a real thing", titles)
+        self.assertNotIn("Autonomous Council Verification", titles)   # folded under the council
+
+    def test_hydrate_phase_cards_for_parent_with_council(self):
+        parent = self._ep(title="build X", commitShas=["abc1234"], council={
+            "status": "ready_to_push", "latestCommit": "abc1234",
+            "edges": ["proposed", "consulted", "decided", "implemented", "verified"]})
+        self.p.upsert_episode(parent)
+        self.assertEqual(ac.hydrate_phase_cards(self.p), 5)
+        byk = {t["phaseKey"]: t for t in self.p.load_tasks() if t.get("episodeId") == parent["episodeId"]}
+        self.assertEqual(set(byk), {"plan", "consult", "implement", "verify", "push"})
+        self.assertEqual(byk["implement"]["commitSha"], "abc1234")
+        self.assertEqual(byk["implement"]["column"], "done")
+        self.assertEqual(byk["push"]["column"], "done")
+        self.assertEqual(ac.hydrate_phase_cards(self.p), 0)           # idempotent
+
+    def test_hydrate_skips_internal_episodes(self):
+        internal = self._ep(title="Autonomous Council Verification", internal=True,
+                            council={"status": "verified", "edges": ["verified"]})
+        self.p.upsert_episode(internal)
+        self.assertEqual(ac.hydrate_phase_cards(self.p), 0)           # no cards for demoted machinery
+
+    def test_parent_council_receipt_payload(self):
+        rec = ac.run(self.p, prompt="ship it",
+                     providers={"architect": "echo", "srDev": "echo", "verifier": "echo"},
+                     session_factory=_echo_factory())
+        c = self.p.get_episode(rec["episodeId"])["council"]
+        self.assertEqual(c["status"], ac.STATUS_READY_TO_PUSH)
+        self.assertEqual(c["edges"], ["proposed", "consulted", "decided", "implemented", "verified"])
+        labels = [t["label"] for t in c["turns"]]
+        for lbl in ("user", "architect (Codex)", "sr dev (Claude Code)", "verifier (Codex)", "system"):
+            self.assertIn(lbl, labels)
 
 
 if __name__ == "__main__":
