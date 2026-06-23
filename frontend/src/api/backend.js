@@ -108,6 +108,15 @@ export const getExternalCouncilStatus = () => apiFetch('/api/external-council/st
 // The durable council conversation transcript for the Orient inbox (normalized role turns).
 export const getCouncilTranscript = () => apiFetch('/api/external-council/transcript')
 
+// Autonomous council relay — one prompt drives the full architect→consult→decide→implement→verify loop.
+export const postAutonomousCouncilRun = (prompt, opts = {}) =>
+  apiFetch('/api/autonomous-council/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, ...opts }),
+  })
+export const getAutonomousCouncilRun = (runId) => apiFetch(`/api/autonomous-council/runs/${runId}`)
+
 /**
  * Persist the canvas state (boxes and arrows only; Sets are not serialisable).
  *

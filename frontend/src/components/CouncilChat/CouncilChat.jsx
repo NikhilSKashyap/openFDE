@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, getCouncilTranscript } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, getCouncilTranscript, postAutonomousCouncilRun } from '../../api/backend'
 
 /**
  * CouncilChat — the read-only brain of Orient, as a real chat thread (not a single answer card).
@@ -45,17 +45,31 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
   const [asking, setAsking]       = useState(false)
   const [busyRoles, setBusyRoles] = useState([])
   const [transcript, setTranscript] = useState(null)   // durable council conversation (Orient inbox)
+  const [launching, setLaunching] = useState(false)    // autonomous relay being kicked off
+  const txSeqRef = useRef(0)                            // latest-wins guard for overlapping refetches
 
   // The persistent council transcript — refreshed on load, on each council websocket event
-  // (councilNonce bumps in App), and after an Ask. Never blocks the Ask thread.
+  // (councilNonce bumps in App), and after an Ask. An autonomous relay fires many events in a burst,
+  // so responses can resolve out of order — the seq guard keeps the LAST request the one that wins.
   const refreshTranscript = useCallback(async () => {
+    const seq = ++txSeqRef.current
     const t = await getCouncilTranscript()
-    if (t?.ok) setTranscript(t)
+    if (seq === txSeqRef.current && t?.ok) setTranscript(t)
   }, [])
+
+  // Launch the autonomous relay for the typed prompt — OpenFDE runs the full
+  // architect→consult→decide→implement→verify loop; turns stream into the transcript live.
+  const runAutonomous = useCallback(async (q) => {
+    const prompt = (q ?? question).trim()
+    if (!prompt || launching) return
+    setLaunching(true)
+    const res = await postAutonomousCouncilRun(prompt, { providers: { architect: 'echo', srDev: 'echo', verifier: 'echo' } })
+    setLaunching(false)
+    if (res?.ok) { setQuestion(''); refreshTranscript() }
+  }, [question, launching, refreshTranscript])
   useEffect(() => {
-    let alive = true
-    getCouncilTranscript().then(t => { if (alive && t?.ok) setTranscript(t) })
-    return () => { alive = false }
+    const seq = ++txSeqRef.current
+    getCouncilTranscript().then(t => { if (seq === txSeqRef.current && t?.ok) setTranscript(t) })
   }, [councilNonce])
 
   const idRef    = useRef(0)
@@ -281,6 +295,12 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
           {asking ? '…' : 'Send'}
         </button>
       </div>
+      {/* Hand the whole task to the autonomous relay — no human copy-paste between Codex and CC. */}
+      <button className="council-run-auto" disabled={!question.trim() || launching}
+        onClick={() => runAutonomous()}
+        title="OpenFDE runs the full architect → consult → decide → implement → verify loop and streams every turn here">
+        {launching ? 'Starting…' : '▶ Run autonomous council'}
+      </button>
 
       {onOpenAgentSettings && (
         <button className="council-settings-link" onClick={onOpenAgentSettings}>Agent Settings →</button>
@@ -302,12 +322,39 @@ function rowAccent(it) {
   return ROLE_ACCENT[it.role] || 'var(--text-muted)'
 }
 
+// Live autonomous-relay banner — who has the baton, what happened last, whether it is stuck/done.
+const PHASE_LABEL = {
+  USER_PROMPT: 'queued', ARCHITECT_PLANNING: 'architect planning', SR_DEV_CONSULTING: 'sr dev consulting',
+  ARCHITECT_DECIDING: 'architect deciding', SR_DEV_IMPLEMENTING: 'sr dev implementing',
+  CODEX_VERIFYING: 'verifier verifying', CHANGES_REQUESTED: 'changes requested',
+  VERIFIED: 'verified', READY_TO_PUSH: 'ready to push', BLOCKED: 'blocked',
+}
+const BATON_LABEL = { architect: 'Codex (architect)', sr_dev: 'Claude Code (sr dev)', verifier: 'Codex (verifier)' }
+function RunBanner({ run }) {
+  if (!run) return null
+  const blocked = String(run.status || '').startsWith('blocked')
+  const cls = run.running ? 'running' : (blocked ? 'blocked' : 'done')
+  return (
+    <div className={`acr-banner acr-${cls}`}>
+      <div className="acr-line1">
+        <span className="acr-dot" />
+        <span className="acr-phase">Autonomous council — {PHASE_LABEL[run.phase] || run.phase}</span>
+        {run.running && run.activeRole && <span className="acr-baton">{BATON_LABEL[run.activeRole] || run.activeRole} has the baton</span>}
+        {run.loop > 0 && <span className="acr-loop">loop {run.loop}/{run.maxLoops}</span>}
+      </div>
+      {run.latestTurn?.summary && <div className="acr-last">{run.latestTurn.summary}</div>}
+      {run.blockedReason && <div className="acr-blockedreason">{run.blockedReason}</div>}
+    </div>
+  )
+}
+
 function CouncilTranscript({ data }) {
   const [open, setOpen] = useState({})
   if (!data) return null
   const items = data.items || []
   return (
     <div className="ctx">
+      <RunBanner run={data.run} />
       <div className="ctx-head">
         <span className="ctx-title">Council inbox</span>
         {data.activeStatus && <span className="ctx-status">{data.activeStatus}</span>}

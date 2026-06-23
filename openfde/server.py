@@ -905,10 +905,84 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_external_council_transcript(request: web.Request) -> web.Response:
         """The durable council CONVERSATION for Orient — a normalized chronological role transcript
         (user → architect proposal → sr-dev handoffs → verifier verdicts → pending wakeup) built from
-        the bus + deliveries + council_chat. Never invents turns; ``active: false`` when no bus."""
-        from openfde import external_council
-        return web.json_response(external_council.build_council_transcript(
-            path, council_chat=persistence.load_council_chat()))
+        the bus + deliveries + council_chat. Never invents turns; ``active: false`` when no bus. Also
+        carries ``run`` — the latest autonomous-relay summary (phase / role / loop) for the banner."""
+        from openfde import autonomous_council, external_council
+        return web.json_response({
+            **external_council.build_council_transcript(path, council_chat=persistence.load_council_chat()),
+            "run": autonomous_council.latest_run_summary(path),
+        })
+
+    # ================================================================== #
+    #  REST — /api/autonomous-council  (OpenFDE-managed autonomous relay) #
+    # ================================================================== #
+    # One prompt → the full architect→consult→decide→implement→verify→push/fix
+    # relay, with NO human copy-paste. OpenFDE owns the managed sessions, records
+    # every turn into the Orient transcript, and drives the same episode/OpenPM/bus.
+    # v1 is proven by the echo adapter; real codex/claude adapters block honestly.
+
+    def _autonomous_on_event(loop):
+        """Build a thread-safe on_event that broadcasts each relay turn to the live UI."""
+        from openfde import autonomous_council
+
+        def on_event(rec):
+            msg = {"type": "autonomous_council", "run": autonomous_council.run_summary(rec),
+                   "at": time.time()}
+            try:
+                asyncio.run_coroutine_threadsafe(manager.broadcast(msg), loop)
+            except RuntimeError:
+                pass
+        return on_event
+
+    async def post_autonomous_council_run(request: web.Request) -> web.Response:
+        """Start an autonomous relay run. Creates the episode + tasks + bus synchronously (so the ids
+        come back immediately), then advances the relay off the event loop, broadcasting each turn."""
+        from openfde import autonomous_council
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            return web.json_response({"ok": False, "error": "prompt is required"}, status=400)
+        providers = body.get("providers") or {}
+        rec = autonomous_council.init_run(
+            persistence, prompt=prompt, box_ids=body.get("selectedBoxIds") or [],
+            providers=providers, max_loops=int(body.get("maxLoops") or 3),
+            auto_push=bool(body.get("autoPush", False)))
+
+        loop = asyncio.get_running_loop()
+        on_event = _autonomous_on_event(loop)
+
+        async def _advance():
+            await asyncio.to_thread(autonomous_council.advance_run, persistence, rec, on_event=on_event)
+            await manager.broadcast({"type": "tasks_updated"})
+            ep = persistence.get_episode(rec["episodeId"])
+            if ep:
+                await manager.broadcast({"type": "episode_updated", "episode": ep})
+
+        asyncio.create_task(_advance())
+        on_event(rec)        # paint the initial running state immediately
+        return web.json_response({"ok": True, "runId": rec["runId"], "episodeId": rec["episodeId"],
+                                  "taskIds": rec["taskIds"], "status": rec["status"]})
+
+    async def get_autonomous_council_run(request: web.Request) -> web.Response:
+        """Poll one relay run by id (phase / role / loop / status / latest turn)."""
+        from openfde import autonomous_council
+        rec = autonomous_council.load_run(path, request.match_info["run_id"])
+        if not rec:
+            return web.json_response({"ok": False, "error": "unknown run"}, status=404)
+        return web.json_response({"ok": True, "run": rec})
+
+    async def post_autonomous_council_cancel(request: web.Request) -> web.Response:
+        """Cancel a still-running relay (best-effort)."""
+        from openfde import autonomous_council
+        rec = autonomous_council.cancel_run(path, request.match_info["run_id"])
+        if not rec:
+            return web.json_response({"ok": False, "error": "unknown run"}, status=404)
+        await manager.broadcast({"type": "autonomous_council", "run": autonomous_council.run_summary(rec),
+                                 "at": time.time()})
+        return web.json_response({"ok": True, "run": autonomous_council.run_summary(rec)})
 
     # ================================================================== #
     #  REST — /api/issues/github  (durable intent v1)                     #
@@ -5087,6 +5161,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/external-council/verdict", post_external_council_verdict)
     app.router.add_get( "/api/external-council/status",  get_external_council_status)
     app.router.add_get( "/api/external-council/transcript", get_external_council_transcript)
+    app.router.add_post("/api/autonomous-council/run", post_autonomous_council_run)
+    app.router.add_get( "/api/autonomous-council/runs/{run_id}", get_autonomous_council_run)
+    app.router.add_post("/api/autonomous-council/runs/{run_id}/cancel", post_autonomous_council_cancel)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)

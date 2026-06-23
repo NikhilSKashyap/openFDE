@@ -313,6 +313,57 @@ def _body_freeform(body: str) -> list:
     return out
 
 
+# ── Recorded transcript — the autonomous relay's authoritative turn log ────────
+# The autonomous council (openfde.autonomous_council) records every relay turn here so the Orient
+# inbox shows the FULL conversation (incl. consultation + decision, which have no bus channel). When
+# this log exists it is the transcript; otherwise build_council_transcript derives turns from the bus.
+def _transcript_path(repo_root):
+    import os
+    return os.path.join(council_bus.ensure_council_dir(repo_root), "transcript.json")
+
+
+def load_recorded_transcript(repo_root) -> list:
+    import json
+    try:
+        with open(_transcript_path(repo_root), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def append_transcript_turn(repo_root, turn: dict) -> dict:
+    """Append one normalized turn (assigns ``id`` + ``at`` if missing) and return it."""
+    import json
+    turns = load_recorded_transcript(repo_root)
+    t = dict(turn)
+    t.setdefault("id", "turn_" + secrets.token_hex(5))
+    t.setdefault("at", _now())
+    turns.append(t)
+    with open(_transcript_path(repo_root), "w", encoding="utf-8") as fh:
+        json.dump(turns, fh, indent=2)
+    return t
+
+
+def set_work_item_status(repo_root, episode_id, status, *, latest_commit=None) -> bool:
+    """Patch a TASKS.md work item's status (+ optional latestCommit), preserving its ids/body.
+    Returns True when the episode's work item was found. Touches only the gitignored bus."""
+    items = council_bus.parse_work_items(council_bus.read_bus_file(repo_root, "tasks"))
+    rebuilt, found = [], False
+    for it in items:
+        h = it["header"]
+        if h.get("episodeId") == episode_id:
+            h = dict(h)
+            h["status"] = status
+            if latest_commit:
+                h["latestCommit"] = latest_commit
+            found = True
+        rebuilt.append(council_bus.render_front_matter(h, it["body"]).rstrip("\n"))
+    if found:
+        council_bus.write_bus_file(repo_root, "tasks", "\n\n".join(rebuilt) + "\n")
+    return found
+
+
 def build_council_transcript(repo_root, *, council_chat=None) -> dict:
     """Normalize the durable council records into ONE chronological role transcript for Orient:
     the architect proposal (``TASKS.md`` objective), the sr-dev handoffs (``CLAUDE.md``), the
@@ -341,55 +392,58 @@ def build_council_transcript(repo_root, *, council_chat=None) -> dict:
         return {"taskIds": v.get("taskIds") or [], "runId": v.get("runId") or "",
                 "boxIds": v.get("boxIds") or []}
 
-    items = []
+    # Prefer the autonomous relay's recorded turns when present — the full conversation in true order
+    # (incl. consultation + decision). Otherwise derive the turns from the bus channels.
+    recorded = load_recorded_transcript(repo_root)
+    items = list(recorded)
+    if not recorded:
+        # 0. The user's latest Orient question (a real record) opens the conversation.
+        last_user = next((t for t in reversed(council_chat or [])
+                          if isinstance(t, dict) and t.get("role") == "user" and (t.get("text") or "").strip()), None)
+        if last_user:
+            txt = last_user["text"].strip()
+            items.append({"id": "user:last", "at": last_user.get("at", ""), "role": "user",
+                          "label": "user", "kind": "prompt", "episodeId": "", "taskIds": [],
+                          "summary": txt[:140], "body": txt})
 
-    # 0. The user's latest Orient question (a real record) opens the conversation.
-    last_user = next((t for t in reversed(council_chat or [])
-                      if isinstance(t, dict) and t.get("role") == "user" and (t.get("text") or "").strip()), None)
-    if last_user:
-        txt = last_user["text"].strip()
-        items.append({"id": "user:last", "at": last_user.get("at", ""), "role": "user",
-                      "label": "user", "kind": "prompt", "episodeId": "", "taskIds": [],
-                      "summary": txt[:140], "body": txt})
-
-    # 1. Architect proposal — the active/latest work item's objective + acceptance.
-    if active_view:
-        v = active_view
-        body = (("Objective: " + v["objective"] + "\n\n") if v["objective"] else "") + \
-               (("Acceptance:\n" + "\n".join("- " + a for a in v["acceptance"])) if v["acceptance"] else "")
-        items.append({
-            "id": "proposal:" + v["episodeId"], "at": at_for.get((v["episodeId"], v["status"]), ""),
-            "role": "architect", "label": "architect (Codex)", "kind": "proposal",
-            "episodeId": v["episodeId"], "taskIds": v["taskIds"], "runId": v["runId"],
-            "boxIds": v["boxIds"], "latestCommit": v["latestCommit"] or None,
-            "summary": v["objective"] or "Architecture proposal", "body": body.strip(),
-        })
-
-    # 2. Interleave sr-dev handoffs (CLAUDE.md) and verifier verdicts (CODEX.md) in protocol order.
-    cc, cx = _parse_channel_entries(claude_md), _parse_channel_entries(codex_md)
-    for i in range(max(len(cc), len(cx))):
-        if i < len(cc):
-            e = cc[i]
+        # 1. Architect proposal — the active/latest work item's objective + acceptance.
+        if active_view:
+            v = active_view
+            body = (("Objective: " + v["objective"] + "\n\n") if v["objective"] else "") + \
+                   (("Acceptance:\n" + "\n".join("- " + a for a in v["acceptance"])) if v["acceptance"] else "")
             items.append({
-                "id": "claude:" + str(i), "at": at_for.get((e["episodeId"], e["statusTok"]), ""),
-                "role": "sr_dev", "label": "sr dev (Claude Code)", "kind": "handoff",
-                "episodeId": e["episodeId"], **_ids(e["episodeId"]),
-                "latestCommit": _commit_or_none(_body_field(e["body"], "commit"), e["shortSha"]),
-                "summary": _body_field(e["body"], "summary") or "Implementation handoff",
-                "checks": _body_field(e["body"], "checks"), "body": e["body"],
+                "id": "proposal:" + v["episodeId"], "at": at_for.get((v["episodeId"], v["status"]), ""),
+                "role": "architect", "label": "architect (Codex)", "kind": "proposal",
+                "episodeId": v["episodeId"], "taskIds": v["taskIds"], "runId": v["runId"],
+                "boxIds": v["boxIds"], "latestCommit": v["latestCommit"] or None,
+                "summary": v["objective"] or "Architecture proposal", "body": body.strip(),
             })
-        if i < len(cx):
-            e = cx[i]
-            kind = "verified" if e["statusTok"] == council_bus.STATUS_VERIFIED else "changes_requested"
-            findings = _body_freeform(e["body"])
-            items.append({
-                "id": "codex:" + str(i), "at": at_for.get((e["episodeId"], e["statusTok"]), ""),
-                "role": "verifier", "label": "verifier (Codex)", "kind": kind,
-                "episodeId": e["episodeId"], **_ids(e["episodeId"]),
-                "latestCommit": _commit_or_none(_body_field(e["body"], "commit"), e["shortSha"]),
-                "summary": findings[0] if findings else ("Verified" if kind == "verified" else "Changes requested"),
-                "findings": findings, "body": e["body"],
-            })
+
+        # 2. Interleave sr-dev handoffs (CLAUDE.md) and verifier verdicts (CODEX.md) in protocol order.
+        cc, cx = _parse_channel_entries(claude_md), _parse_channel_entries(codex_md)
+        for i in range(max(len(cc), len(cx))):
+            if i < len(cc):
+                e = cc[i]
+                items.append({
+                    "id": "claude:" + str(i), "at": at_for.get((e["episodeId"], e["statusTok"]), ""),
+                    "role": "sr_dev", "label": "sr dev (Claude Code)", "kind": "handoff",
+                    "episodeId": e["episodeId"], **_ids(e["episodeId"]),
+                    "latestCommit": _commit_or_none(_body_field(e["body"], "commit"), e["shortSha"]),
+                    "summary": _body_field(e["body"], "summary") or "Implementation handoff",
+                    "checks": _body_field(e["body"], "checks"), "body": e["body"],
+                })
+            if i < len(cx):
+                e = cx[i]
+                kind = "verified" if e["statusTok"] == council_bus.STATUS_VERIFIED else "changes_requested"
+                findings = _body_freeform(e["body"])
+                items.append({
+                    "id": "codex:" + str(i), "at": at_for.get((e["episodeId"], e["statusTok"]), ""),
+                    "role": "verifier", "label": "verifier (Codex)", "kind": kind,
+                    "episodeId": e["episodeId"], **_ids(e["episodeId"]),
+                    "latestCommit": _commit_or_none(_body_field(e["body"], "commit"), e["shortSha"]),
+                    "summary": findings[0] if findings else ("Verified" if kind == "verified" else "Changes requested"),
+                    "findings": findings, "body": e["body"],
+                })
 
     # 3. Pending session-wakeup delivery — the current "waiting on" state, prominent + last.
     pending = handoff_broker.active_delivery(deliveries)

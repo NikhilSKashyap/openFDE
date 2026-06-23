@@ -3486,3 +3486,29 @@
 .ctx-findings { margin: 0; padding-left: 16px; }
 .ctx-pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10.5px; background: var(--surface-2); border-radius: 5px; padding: 6px 8px; margin-top: 4px; }
+
+/* Autonomous relay — "Run autonomous council" launcher + the live run banner. */
+.council-run-auto { margin-top: 6px; width: 100%; padding: 7px 10px; font-size: 12px; font-weight: 600;
+  color: var(--accent-orange); background: color-mix(in srgb, var(--accent-orange) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-orange) 38%, var(--border)); border-radius: var(--radius-sm);
+  cursor: pointer; transition: background .12s ease; }
+.council-run-auto:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-orange) 16%, transparent); }
+.council-run-auto:disabled { opacity: .5; cursor: default; }
+.acr-banner { margin-bottom: 8px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  border-left-width: 3px; background: var(--surface-2); }
+.acr-banner.acr-running { border-left-color: var(--accent-orange);
+  background: color-mix(in srgb, var(--accent-orange) 7%, transparent); }
+.acr-banner.acr-done { border-left-color: var(--solid); background: color-mix(in srgb, var(--solid) 7%, transparent); }
+.acr-banner.acr-blocked { border-left-color: var(--violation); background: color-mix(in srgb, var(--violation) 7%, transparent); }
+.acr-line1 { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.acr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-orange); flex-shrink: 0; }
+.acr-running .acr-dot { animation: acr-pulse 1.2s ease-in-out infinite; }
+.acr-done .acr-dot { background: var(--solid); }
+.acr-blocked .acr-dot { background: var(--violation); }
+@keyframes acr-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.acr-phase { font-size: 11.5px; font-weight: 700; color: var(--text); }
+.acr-baton { font-size: 10px; color: var(--accent-orange); font-weight: 600; }
+.acr-loop { font-size: 9.5px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+.acr-last { margin-top: 4px; font-size: 11px; color: var(--text-muted); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acr-blockedreason { margin-top: 4px; font-size: 10.5px; color: var(--violation); line-height: 1.4; }

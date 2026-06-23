@@ -954,6 +954,10 @@ export default function App() {
         setCouncilNonce(n => n + 1)                    // refresh the Orient council transcript
         if (msg.taskIds?.length) refetchTasks()       // OpenPM moved on a verdict
       }
+      else if (msg?.type === 'autonomous_council') {
+        setCouncilNonce(n => n + 1)                    // each relay turn → refresh transcript + run banner
+        if (msg.run?.taskIds?.length) refetchTasks()  // OpenPM advances with the relay
+      }
       // A commit landed (the only commit path) — refresh the rail's nested beats,
       // the OpenPM commit cards, and the git timeline so all three stay in sync.
       else if (msg?.type === 'commit_created') {
