@@ -39,6 +39,23 @@ const SEP_GAP = 56
 export const fileId = (path) => `box:file:${path}`
 export const fnId = (path, name) => `box:function:${path}:${name}`
 
+// Sketch-First: a BUILT intent box is architecture-backed — it grounds into the files the
+// Council wrote (box.implementationFiles). It drills in IN PLACE exactly like a module
+// (chevron + nested file/function children); the only difference is where its file list comes
+// from. `built` mirrors CanvasBox: an explicit runState, or implied by having produced files.
+export const isIntentDrillBox = (box) =>
+  !!box && box.kind === 'intent'
+  && Array.isArray(box.implementationFiles) && box.implementationFiles.length > 0
+  && (box.runState === 'built' || !box.runState)
+
+const _LANG = { py: 'python', js: 'javascript', jsx: 'javascript', ts: 'typescript',
+  tsx: 'typescript', json: 'json', md: 'markdown', css: 'css', scss: 'scss', html: 'html',
+  go: 'go', rs: 'rust', java: 'java', rb: 'ruby', sh: 'shell', sql: 'sql', yml: 'yaml', yaml: 'yaml' }
+const langOf = (path) => {
+  const ext = String(path || '').split('.').pop().toLowerCase()
+  return _LANG[ext] || ext || 'file'
+}
+
 /**
  * Compute the full render layout.
  *
@@ -55,15 +72,21 @@ export function computeArchLayout(boxes, archGraph, expanded) {
 
   for (const box of boxes) {
     const isModule = !!box.moduleId
+    const isIntent = isIntentDrillBox(box)
+    // A module needs the ArchGraph to drill (its files live there); a built intent box carries
+    // its own file list, so it expands even before the generated files are reassimilated.
+    const intentExpanded = isIntent && expanded.has(box.id)
     const moduleExpanded = isModule && expanded.has(box.id) && !!archGraph
 
-    if (!moduleExpanded) {
-      nodes.push(moduleCollapsedNode(box, isModule))
+    if (!intentExpanded && !moduleExpanded) {
+      nodes.push(moduleCollapsedNode(box, isModule || isIntent))
       continue
     }
 
-    // Expanded module: size file children, then position them with dagre.
-    const { fileNodes, fEdges } = sizeModuleFiles(box, archGraph, expanded)
+    // Expanded: size file children, then position them with dagre.
+    const { fileNodes, fEdges } = intentExpanded
+      ? sizeIntentFiles(box, archGraph, expanded)
+      : sizeModuleFiles(box, archGraph, expanded)
     const fl = layoutFiles(fileNodes, fEdges)
     nodes.push(assembleModule(box, fileNodes, fl, fileById, fnById))
   }
@@ -86,6 +109,71 @@ export function moduleCollapsedNode(box, isModule) {
 }
 
 /**
+ * Size ONE file render node: a collapsed header strip, an "empty" strip (file expanded but no
+ * parsed functions), or a header + stacked function boxes. Shared by the module drill-in and the
+ * built-intent drill-in so a generated file renders identically to a module's file.
+ *
+ * @param {Object} file - file descriptor (needs `.path`; `.language` used for the sub-label).
+ * @param {Array} fns - the file's functions (already filtered + sorted), or [] when collapsed.
+ * @param {string} type - 'solid' | 'dotted' (inherited from the parent box, for stroke palette).
+ * @param {boolean} fExpanded - whether this file node is itself expanded.
+ */
+export function sizeFileNode(file, fns, type, fExpanded) {
+  const fid = fileId(file.path)
+  if (!fExpanded) {
+    return { id: fid, kind: 'file', expanded: false, file, type,
+             w: F_MIN_W, h: F_HEADER + 18, functions: [], _rx: 0, _ry: 0 }
+  }
+  if (!fns || fns.length === 0) {
+    return { id: fid, kind: 'file', expanded: true, file, type,
+             w: F_MIN_W, h: F_HEADER + F_EMPTY_H, functions: [], empty: true, _rx: 0, _ry: 0 }
+  }
+  const cols = Math.min(F_COLS, fns.length)
+  const rows = Math.ceil(fns.length / F_COLS)
+  const gridW = cols * FN_W + (cols - 1) * FN_GAP
+  const gridH = rows * FN_H + (rows - 1) * FN_GAP
+  const fnNodes = fns.map((fn, i) => {
+    const col = i % F_COLS
+    const row = Math.floor(i / F_COLS)
+    return {
+      id: fnId(fn.path, fn.name), kind: 'function', fn, type,
+      w: FN_W, h: FN_H,
+      _rx: F_PAD + col * (FN_W + FN_GAP),
+      _ry: F_HEADER + F_PAD + row * (FN_H + FN_GAP),
+    }
+  })
+  return {
+    id: fid, kind: 'file', expanded: true, file, type,
+    // + F_LANE on the right hosts the nested call-arc lane (Step 26).
+    w: Math.max(F_MIN_W, gridW + F_PAD + F_LANE),
+    h: F_HEADER + F_PAD + gridH + F_PAD,
+    functions: fnNodes, _rx: 0, _ry: 0,
+  }
+}
+
+/**
+ * Size the file children of an expanded BUILT intent box. The files come from the persisted
+ * `box.implementationFiles` (no new source of truth); their functions come from the live
+ * ArchGraph when the generated file has been reassimilated, else the file degrades to a
+ * function-less child ("no parsed functions"). No intra-file flow edges → grid layout.
+ *
+ * @returns {{ fileNodes: Array, fEdges: Array }}
+ */
+export function sizeIntentFiles(box, archGraph, expanded) {
+  const functions = (archGraph && archGraph.functions) || []
+  const fnsByPath = groupBy(functions, fn => fn.path)
+  const paths = [...new Set(box.implementationFiles || [])].sort((a, b) => a.localeCompare(b))
+  const fileNodes = paths.map(p => {
+    const fExpanded = expanded.has(fileId(p))
+    const fns = fExpanded
+      ? (fnsByPath[p] || []).slice().sort((a, b) => (a.line || 0) - (b.line || 0))
+      : []
+    return sizeFileNode({ path: p, language: langOf(p), moduleId: box.moduleId }, fns, box.type, fExpanded)
+  })
+  return { fileNodes, fEdges: [] }
+}
+
+/**
  * Size every file box (and its stacked function boxes) inside an expanded
  * module, and derive the intra-module file→file dataflow edges. Pure sizing —
  * no positioning yet, so both layout engines consume the same input.
@@ -103,38 +191,11 @@ export function sizeModuleFiles(box, archGraph, expanded) {
     .sort((a, b) => a.path.localeCompare(b.path))
 
   const fileNodes = modFiles.map(f => {
-    const fid = fileId(f.path)
-    const fExpanded = expanded.has(fid)
-    if (!fExpanded) {
-      return { id: fid, kind: 'file', expanded: false, file: f, type: box.type,
-               w: F_MIN_W, h: F_HEADER + 18, functions: [], _rx: 0, _ry: 0 }
-    }
-    const fns = (fnsByPath[f.path] || []).slice().sort((a, b) => (a.line || 0) - (b.line || 0))
-    if (fns.length === 0) {
-      return { id: fid, kind: 'file', expanded: true, file: f, type: box.type,
-               w: F_MIN_W, h: F_HEADER + F_EMPTY_H, functions: [], empty: true, _rx: 0, _ry: 0 }
-    }
-    const cols = Math.min(F_COLS, fns.length)
-    const rows = Math.ceil(fns.length / F_COLS)
-    const gridW = cols * FN_W + (cols - 1) * FN_GAP
-    const gridH = rows * FN_H + (rows - 1) * FN_GAP
-    const fnNodes = fns.map((fn, i) => {
-      const col = i % F_COLS
-      const row = Math.floor(i / F_COLS)
-      return {
-        id: fnId(fn.path, fn.name), kind: 'function', fn, type: box.type,
-        w: FN_W, h: FN_H,
-        _rx: F_PAD + col * (FN_W + FN_GAP),
-        _ry: F_HEADER + F_PAD + row * (FN_H + FN_GAP),
-      }
-    })
-    return {
-      id: fid, kind: 'file', expanded: true, file: f, type: box.type,
-      // + F_LANE on the right hosts the nested call-arc lane (Step 26).
-      w: Math.max(F_MIN_W, gridW + F_PAD + F_LANE),
-      h: F_HEADER + F_PAD + gridH + F_PAD,
-      functions: fnNodes, _rx: 0, _ry: 0,
-    }
+    const fExpanded = expanded.has(fileId(f.path))
+    const fns = fExpanded
+      ? (fnsByPath[f.path] || []).slice().sort((a, b) => (a.line || 0) - (b.line || 0))
+      : []
+    return sizeFileNode(f, fns, box.type, fExpanded)
   })
 
   // Intra-module file→file dataflow edges (drive layered LR positioning).

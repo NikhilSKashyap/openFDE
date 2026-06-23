@@ -36,11 +36,14 @@ export default function CanvasBox({ box, selected, isEditing, editingField, show
   const st = runState ? (STATE[runState] || STATE.planned) : null
 
   // Intent steps read as plain-English sketch (state colour); modules keep the
-  // blue (dotted/editable) / green (solid/protected) architecture palette.
+  // blue (dotted/editable) / green (solid/protected) architecture palette. A BUILT intent box
+  // is architecture-backed now, so it drops the dashed "sketch" stroke for a solid one — the
+  // visual cue that the same box became real code (it also gains a drill-in chevron).
+  const isBuilt = isIntent && runState === 'built'
   const stroke = isIntent ? st.color : (isDotted ? 'var(--dotted)' : 'var(--solid)')
-  const fill   = isIntent ? `color-mix(in srgb, ${st.color} 9%, transparent)`
+  const fill   = isIntent ? `color-mix(in srgb, ${st.color} ${isBuilt ? 12 : 9}%, transparent)`
                           : (isDotted ? 'rgba(74,158,255,0.08)' : 'rgba(61,186,110,0.08)')
-  const dash   = isIntent ? '2 4' : (isDotted ? '6 3' : undefined)
+  const dash   = isIntent ? (isBuilt ? undefined : '2 4') : (isDotted ? '6 3' : undefined)
 
   return (
     <g

@@ -5,7 +5,7 @@ import Arrow from './Arrow'
 import { getPortPos, bezierPath, getBezierMidpoint } from './arrowUtils'
 import PendingArrow from './PendingArrow'
 import { DEFAULT_W, DEFAULT_H } from '../../store/canvasState'
-import { computeArchLayout, computeFlowArrows } from './archLayout'
+import { computeArchLayout, computeFlowArrows, isIntentDrillBox } from './archLayout'
 import { computeArchLayoutElk } from './elkArchLayout'
 import { computeStoryLayout } from './storyLayout'
 import { pickPrimaryFn } from '../../lib/flowResolve'
@@ -35,11 +35,10 @@ function nodeFilePaths(node) {
   return out
 }
 
-// Sketch-First v3: a calm decomposition for an implemented intent box — its produced files and
-// (when the archGraph has them) the functions/classes in each. No new source of truth: the files
-// come from box.implementationFiles (persisted), the symbols from the live archGraph. When the
-// generated files aren't in the graph yet (e.g. a fresh openfde_work/ run), it degrades to
-// file-level children only — never language-specific.
+// Sketch-First: a BUILT intent box summarizes its grounding on the collapsed card — the produced
+// files and (when the archGraph has them) how many functions they hold. No new source of truth:
+// files come from box.implementationFiles (persisted), symbols from the live archGraph. The full
+// file/function drill-in is the standard module expansion (chevron + double-click), not a card.
 function intentSymbols(box, archGraph) {
   const files = (box?.kind === 'intent' && Array.isArray(box.implementationFiles))
     ? box.implementationFiles : []
@@ -51,55 +50,6 @@ function intentSymbols(box, archGraph) {
   const fileNodes = files.map(p => ({ path: p, fns: fnByPath[p] || [] }))
   const fnCount = fileNodes.reduce((s, f) => s + f.fns.length, 0)
   return { fileNodes, fileCount: files.length, fnCount }
-}
-
-// The expanded "sketch → software" panel drawn below an intent box: a thin connector to a compact
-// card listing each produced file and its top functions. Non-interactive (read-only traceability).
-function IntentDecomposition({ node, sym }) {
-  const GAP = 14
-  const px = node.x
-  const py = node.y + node.h + GAP
-  const pw = Math.max(node.w, 190)
-  const cx = node.x + node.w / 2
-  return (
-    <g pointerEvents="none">
-      <line x1={cx} y1={node.y + node.h} x2={cx} y2={py} stroke="var(--accent)"
-            strokeWidth={1.2} strokeDasharray="2 3" />
-      <foreignObject x={px} y={py} width={pw} height={460}>
-        <div xmlns="http://www.w3.org/1999/xhtml" style={{
-          width: '100%', boxSizing: 'border-box', padding: '7px 9px',
-          background: 'var(--surface)',
-          border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
-          borderRadius: 7, display: 'flex', flexDirection: 'column', gap: 5,
-          fontFamily: 'inherit',
-        }}>
-          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 0.3, textTransform: 'uppercase',
-                        color: 'var(--accent)' }}>became</div>
-          {sym.fileNodes.map(f => (
-            <div key={f.path} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-              <div title={f.path} style={{
-                fontSize: 11, fontWeight: 600, color: 'var(--text)',
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>{baseName(f.path)}</div>
-              {f.fns.slice(0, 5).map(fn => (
-                <div key={fn} style={{ fontSize: 10, color: 'var(--text-muted)', paddingLeft: 9,
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {fn}()
-                </div>
-              ))}
-              {f.fns.length > 5 && (
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', paddingLeft: 9 }}>
-                  +{f.fns.length - 5} more
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </foreignObject>
-    </g>
-  )
 }
 
 // Centroid label for a spotlight: concept name + occurrence count, or a commit
@@ -177,14 +127,7 @@ export default function WhiteboardCanvas({
   const lastModDownRef = useRef(null)   // { id, t } — manual module double-click timing
   const [rubberBand, setRubberBand] = useState(null)
   const [contextMenu, setContextMenu] = useState(null)
-  // Sketch-First v3: which implemented intent boxes are showing their decomposition (UI-only).
-  const [intentExpanded, setIntentExpanded] = useState(() => new Set())
   const [demoState, setDemoState] = useState('idle')   // empty-state Sketch demo: idle | loading | error
-  const toggleIntent = useCallback((id) => setIntentExpanded(s => {
-    const n = new Set(s)
-    if (n.has(id)) n.delete(id); else n.add(id)
-    return n
-  }), [])
   const [lensFocusId, setLensFocusId] = useState(null)  // left-clicked lens node → focus its arrows
   const [editOverlay, setEditOverlay] = useState(null)
   const [pendingArrow, setPendingArrow] = useState(null)
@@ -475,7 +418,8 @@ export default function WhiteboardCanvas({
     const boxEl = e.target.closest?.('[data-box-id]')
     if (boxEl) {
       const b = boxes.find(bx => bx.id === boxEl.dataset.boxId)
-      if (b?.moduleId) return boxEl.dataset.boxId
+      // A module OR a built intent box (architecture-backed) drills in on double-click.
+      if (b?.moduleId || isIntentDrillBox(b)) return boxEl.dataset.boxId
     }
     return null
   }
@@ -484,15 +428,6 @@ export default function WhiteboardCanvas({
     if (e.button === 2) return
     if (contextMenu) { setContextMenu(null); return }
     if (editOverlay) return
-
-    // Sketch-First v3: the "▾ became" tab on an implemented intent box toggles its
-    // decomposition — a single click, never a drag or a selection.
-    const intentEl = e.target.closest?.('[data-intent-expand]')
-    if (intentEl && activeTool === 'select') {
-      toggleIntent(intentEl.dataset.intentExpand)
-      e.preventDefault()
-      return
-    }
 
     // ── Module drill-in: reliable single-vs-double click ──────────────────
     // Native dblclick is unreliable here because box pointerdown uses
@@ -1085,6 +1020,9 @@ export default function WhiteboardCanvas({
                   <ExpandedModule key={node.id} node={node}
                     selected={selectedIds.has(node.id)} archSelId={archSelId} />
                 )
+                // A built intent box carries a fn-count summary on its collapsed badge; once
+                // drillable it expands IN PLACE like a module (chevron + double-click → nested
+                // files/functions), so the bespoke "▾ became" card is gone — one drill-in pattern.
                 const sym = node.box?.kind === 'intent' ? intentSymbols(node.box, archGraph) : null
                 return (
                   <g key={node.id}>
@@ -1099,54 +1037,9 @@ export default function WhiteboardCanvas({
                     {node.drillable && (
                       <Chevron x={node.x + node.w - 20} y={node.y + 8} open={false} nodeId={node.id} kind="module" />
                     )}
-                    {sym && (() => {
-                      const open = intentExpanded.has(node.id)
-                      const cx = node.x + node.w / 2
-                      const cy = node.y + node.h                 // straddles the box's bottom edge
-                      const aria = open ? 'Hide what this step became'
-                                        : 'Show what this step became'
-                      return (
-                        <g
-                          data-intent-expand={node.id}
-                          className="intent-toggle"
-                          role="button"
-                          tabIndex={0}
-                          aria-label={aria}
-                          aria-expanded={open}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              toggleIntent(node.id)
-                            }
-                          }}
-                          style={{ cursor: 'pointer' }}
-                        >
-                          <title>{aria}</title>
-                          {/* Forgiving, always-hittable target — the whole tab area, not just the text */}
-                          <rect x={cx - 34} y={cy - 13} width={68} height={26} rx={13}
-                            fill="transparent" style={{ pointerEvents: 'all' }} />
-                          {/* The compact visible control pill */}
-                          <rect x={cx - 27} y={cy - 9} width={54} height={18} rx={9}
-                            fill="var(--surface)" stroke="var(--accent)" strokeWidth={1}
-                            style={{ pointerEvents: 'none' }} />
-                          <text x={cx} y={cy} dy="0.32em" textAnchor="middle"
-                            fontSize={9} fontWeight={600} fill="var(--accent)"
-                            style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                            {open ? '▴ hide' : '▾ became'}
-                          </text>
-                        </g>
-                      )
-                    })()}
                   </g>
                 )
               })}
-
-              {/* Sketch-First v3: the "sketch → software" decomposition under expanded intent boxes */}
-              {nodes.filter(n => !n.expanded && n.box?.kind === 'intent' && intentExpanded.has(n.id))
-                .map(n => {
-                  const sym = intentSymbols(n.box, archGraph)
-                  return sym ? <IntentDecomposition key={`dec:${n.id}`} node={n} sym={sym} /> : null
-                })}
 
               {/* Attention edges — the focused / story flows, ON TOP of boxes so
                   the selected node's 1-hop detail reads; non-interactive so they
@@ -1753,20 +1646,28 @@ function StoryStage({ stage, onSelectFn, selectedId }) {
 
 /* ─── Expanded module (nested files / functions) ─────────────────────────── */
 function ExpandedModule({ node, selected, archSelId }) {
-  const stroke = node.type === 'solid' ? 'var(--solid)' : 'var(--dotted)'
-  const fill = node.type === 'solid' ? 'rgba(61,186,110,0.05)' : 'rgba(74,158,255,0.05)'
+  // A built intent box expanded reads as architecture-backed: solid green chrome (matching its
+  // collapsed built state), with the original sketch title kept as the header.
+  const isIntentBuilt = node.box?.kind === 'intent'
+  const stroke = (isIntentBuilt || node.type === 'solid') ? 'var(--solid)' : 'var(--dotted)'
+  const fill = (isIntentBuilt || node.type === 'solid') ? 'rgba(61,186,110,0.05)' : 'rgba(74,158,255,0.05)'
+  const dashed = !isIntentBuilt && node.type !== 'solid'
   return (
     <g>
       <rect
         data-box-id={node.id}
         x={node.x} y={node.y} width={node.w} height={node.h} rx={8}
         fill={fill} stroke={stroke} strokeWidth={selected ? 2 : 1.4}
-        strokeDasharray={node.type === 'solid' ? undefined : '5 3'}
+        strokeDasharray={dashed ? '5 3' : undefined}
       />
       {/* Header */}
       <text data-box-id={node.id} x={node.x + 12} y={node.y + 20} fontSize="13" fontWeight="600" fill="var(--text)" style={{ userSelect: 'none' }}>
-        {truncate(node.title, 28)}
+        {truncate(node.title, isIntentBuilt ? 22 : 28)}
       </text>
+      {isIntentBuilt && (
+        <text x={node.x + node.w - 30} y={node.y + 20} fontSize="9" fontWeight="600" fill="var(--solid)"
+          textAnchor="end" style={{ userSelect: 'none', pointerEvents: 'none' }}>✓ built</text>
+      )}
       <Chevron x={node.x + node.w - 20} y={node.y + 8} open nodeId={node.id} kind="module" />
 
       {/* File children */}

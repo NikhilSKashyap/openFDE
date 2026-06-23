@@ -901,12 +901,6 @@
 @keyframes intent-run-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .canvas-box-running > rect { animation: intent-run-pulse 1.1s ease-in-out infinite; }
 
-/* Sketch-First "▾ became" intent control: pointer affordance + a clear keyboard focus ring. */
-.intent-toggle { cursor: pointer; outline: none; }
-.intent-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 13px; }
-.intent-toggle:hover rect:last-of-type,
-.intent-toggle:focus-visible rect:last-of-type { fill: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
-
 /* ─── Command palette ────────────────────────────────────────────── */
 .cmd-backdrop {
   position: fixed;

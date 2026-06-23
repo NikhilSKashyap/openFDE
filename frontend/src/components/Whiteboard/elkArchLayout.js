@@ -17,8 +17,8 @@
  * its own chunk and only loads once the canvas actually has flows to route.
  */
 import {
-  sizeModuleFiles, assembleModule, finalizeLayout, moduleCollapsedNode,
-  gridLayoutFiles, FILE_SPACING,
+  sizeModuleFiles, sizeIntentFiles, isIntentDrillBox, assembleModule, finalizeLayout,
+  moduleCollapsedNode, gridLayoutFiles, FILE_SPACING,
 } from './archLayout'
 
 // Lazy singleton — the ELK bundle loads only when the ELK engine is first used.
@@ -41,14 +41,20 @@ export async function computeArchLayoutElk(boxes, archGraph, expanded) {
 
   for (const box of boxes) {
     const isModule = !!box.moduleId
+    const isIntent = isIntentDrillBox(box)
+    const intentExpanded = isIntent && expanded.has(box.id)
     const moduleExpanded = isModule && expanded.has(box.id) && !!archGraph
 
-    if (!moduleExpanded) {
-      nodes.push(moduleCollapsedNode(box, isModule))
+    if (!intentExpanded && !moduleExpanded) {
+      nodes.push(moduleCollapsedNode(box, isModule || isIntent))
       continue
     }
 
-    const { fileNodes, fEdges } = sizeModuleFiles(box, archGraph, expanded)
+    // Built intent boxes have no intra-file flow edges → layoutFilesElk falls back to the
+    // shared grid (identical to dagre), so the seed→ELK transition is a no-op for them.
+    const { fileNodes, fEdges } = intentExpanded
+      ? sizeIntentFiles(box, archGraph, expanded)
+      : sizeModuleFiles(box, archGraph, expanded)
     const fl = await layoutFilesElk(fileNodes, fEdges)
     nodes.push(assembleModule(box, fileNodes, fl, fileById, fnById))
   }
