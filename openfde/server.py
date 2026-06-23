@@ -4174,7 +4174,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                     # BECOMES a module box (originIntent remembers the sketch). Steps without clear
                     # per-step attribution stay built intent boxes — the honest, unchanged path.
                     if architecturize_intent_box(b, link, episode_id, wid) is None:
+                        # No clean single-file attribution → stays an intent box, but it WAS built by
+                        # a passed run: mark it built (not draft) so the model is honest either way.
                         b["runState"] = "built"
+                        b["status"] = "built"
                         b["implementationFiles"] = link.get("files") or []
                         b["implementationMeta"] = {"runId": wid, "attribution": link.get("attribution"),
                                                    "confidence": link.get("confidence")}

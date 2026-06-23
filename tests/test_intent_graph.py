@@ -182,15 +182,18 @@ class ArchitecturizeIntentBoxTest(unittest.TestCase):
         self.assertEqual(module_title_from_file("a/b/classify.py"), "classify/")
         self.assertEqual(module_title_from_file("x/__init__.py"), "init/")
 
-    def test_matched_single_file_becomes_architecture(self):
+    def test_matched_single_file_becomes_built_architecture(self):
         box = _ibox("inbox_ingest", "ingest customer messages", "pull new customer messages")
         box["runState"] = "built"
         link = {"files": ["openfde_work/support_inbox/ingest.py"], "attribution": "matched", "confidence": 0.75}
         out = architecturize_intent_box(box, link, episode_id="ep1", run_id="run1")
         self.assertIs(out, box)                                  # mutated in place
         self.assertEqual(box["title"], "ingest/")               # module-ish title
-        self.assertNotIn("kind", box)                           # no longer an intent box
+        # Honest persisted model: BUILT architecture module, not a draft intent box.
+        self.assertEqual(box["kind"], "module")
+        self.assertEqual(box["status"], "built")
         self.assertNotIn("runState", box)                       # no intent lifecycle
+        self.assertEqual(box["type"], "dotted")                 # stays editable (FDE-refinable)
         self.assertEqual(box["linkedFiles"], ["openfde_work/support_inbox/ingest.py"])
         self.assertEqual(box["implementationFiles"], ["openfde_work/support_inbox/ingest.py"])
         # Origin preserved: id, original title/prompt, episode/run, files.
@@ -202,12 +205,33 @@ class ArchitecturizeIntentBoxTest(unittest.TestCase):
         self.assertEqual(origin["runId"], "run1")
         self.assertEqual(origin["files"], ["openfde_work/support_inbox/ingest.py"])
 
+    def test_built_state_is_generic_across_domains(self):
+        # Same planned→built transform for ANY flow — no support-inbox titles/ids/paths hardcoded.
+        cases = [
+            ("etl_extract", "extract raw events", "pipeline/extract.py", "extract/"),
+            ("ins_quote", "quote the policy", "underwriting/quote.py", "quote/"),
+            ("xr_scene", "render the scene", "webxr/scene.py", "scene/"),
+        ]
+        for bid, title, path, want_title in cases:
+            box = _ibox(bid, title, f"do: {title}")
+            box["runState"] = "built"
+            out = architecturize_intent_box(box, {"files": [path], "attribution": "matched"},
+                                            episode_id="epX", run_id="runX")
+            self.assertIsNotNone(out)
+            self.assertEqual(box["kind"], "module")             # built architecture, any domain
+            self.assertEqual(box["status"], "built")
+            self.assertEqual(box["title"], want_title)          # title derived from the file
+            self.assertEqual(box["linkedFiles"], [path])
+            self.assertEqual(box["originIntent"]["title"], title)   # provenance kept
+            self.assertEqual(box["id"], bid)                    # id (position-stable) unchanged
+
     def test_coarse_attribution_stays_intent(self):
         box = _ibox("a", "read the data")
         link = {"files": ["openfde_work/intent_demo.py"], "attribution": "graph", "confidence": 0.4}
         self.assertIsNone(architecturize_intent_box(box, link))
         self.assertEqual(box["kind"], "intent")                 # untouched → still intent
         self.assertNotIn("originIntent", box)
+        self.assertNotIn("status", box)                         # not flipped to built
 
     def test_multi_file_match_stays_intent(self):
         box = _ibox("a", "ingest customer messages")

@@ -176,11 +176,13 @@ function reducer(state, action) {
           const files = link.files || []
           const meta = { attribution: link.attribution || 'graph', confidence: link.confidence ?? null, runId }
           if (link.attribution === 'matched' && files.length === 1) {
-            // Intent scaffolding → architecture artifact: drop kind/runState (undefined keys are
-            // dropped on save), gain a module title + linked files, remember the sketch.
+            // Intent scaffolding → architecture artifact: an honest BUILT module (kind:"module",
+            // status:"built"), keeping its editable type, a module title, linked files, and the
+            // remembered sketch. runState cleared (undefined keys are dropped on save).
             return {
               ...b,
-              kind: undefined,
+              kind: 'module',
+              status: 'built',
               runState: undefined,
               title: moduleTitleFromFile(files[0]),
               linkedFiles: files,
@@ -192,7 +194,8 @@ function reducer(state, action) {
               },
             }
           }
-          return { ...b, runState: 'built', implementationFiles: files, implementationMeta: meta }
+          // No clean single-file attribution → stays an intent box, but it WAS built — mark it so.
+          return { ...b, runState: 'built', status: 'built', implementationFiles: files, implementationMeta: meta }
         }),
       }
     }

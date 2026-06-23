@@ -438,6 +438,10 @@ def architecturize_intent_box(box: dict, link: dict, episode_id: str = "", run_i
     box["implementationFiles"] = list(files)
     box["implementationMeta"] = {"runId": run_id, "attribution": link.get("attribution"),
                                  "confidence": link.get("confidence")}
-    box.pop("kind", None)            # intent scaffolding → architecture artifact
+    # The persisted model is now honest: a BUILT architecture module, not a draft intent box.
+    # `kind:"module"` + `status:"built"` say so explicitly; `type` stays "dotted" (editable — the
+    # FDE can still refine it). originIntent (above) keeps the provenance. Generic for any flow.
+    box["kind"] = "module"           # intent scaffolding → architecture artifact
+    box["status"] = "built"
     box.pop("runState", None)        # no longer an intent lifecycle card
     return box
