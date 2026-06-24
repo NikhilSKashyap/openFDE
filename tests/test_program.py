@@ -147,6 +147,69 @@ class ProgramRunTest(unittest.TestCase):
             self.assertIn("session bridge", out)                   # honest: not chat injection
         self.assertEqual(pg.program_status(None, "architect"), "No active program.")
 
+    def test_providers_from_settings_maps_to_adapters_and_blocks(self):
+        self.p.save_agent_settings({"architect": {"provider": "codex-local", "enabled": True},
+                                    "senior_dev": {"provider": "claude-code-local", "enabled": True},
+                                    "verifier": {"provider": "echo", "enabled": True}})
+        self.assertEqual(pg.providers_from_settings(self.p),
+                         {"architect": "codex", "srDev": "claude-code", "verifier": "echo"})
+        # a non-coding provider (anthropic) → '' for that role → start blocks honestly
+        self.p.save_agent_settings({"architect": {"provider": "anthropic", "enabled": True},
+                                    "senior_dev": {"provider": "claude-code-local", "enabled": True},
+                                    "verifier": {"provider": "codex-local", "enabled": True}})
+        prov = pg.providers_from_settings(self.p)
+        self.assertEqual(prov["architect"], "")
+        prog = pg.start_program(self.p, prompt="Add a /healthz endpoint", providers=prov)
+        self.assertEqual(prog["blockerReason"], pg.BLOCKED_NO_PROVIDER_FOR_ROLE)
+
+    def test_reconcile_lands_verified_slice_and_keeps_it_product(self):
+        prog = self._run("1. Add a /healthz endpoint.")
+        sl = prog["slices"][0]
+        ep = self.p.get_episode(sl["episodeId"])
+        ep["status"], ep["internal"], ep["signal"] = "open", True, "operational"   # simulate the drift
+        self.p.upsert_episode(ep)
+        self.assertGreaterEqual(pg.reconcile_program_slices(self.p), 1)
+        healed = self.p.get_episode(sl["episodeId"])
+        self.assertEqual(healed["status"], "landed")          # verified + commit → landed
+        self.assertFalse(healed["internal"])
+        self.assertEqual(healed["signal"], "product")         # never demoted — it's product journey
+
+    def test_program_slice_never_classified_internal(self):
+        from openfde.episode_summary import internal_council_kind
+        self.assertIsNone(internal_council_kind({"title": "Implementation Prompt", "programId": "program_x"}))
+        self.assertEqual(internal_council_kind({"title": "Implementation Prompt"}), "implementation_prompt")
+
+    def test_status_shows_final_report_and_all_commits_when_complete(self):
+        prog = self._run("1. Add a /healthz endpoint. 2. Add request logging.")
+        out = pg.program_status(prog, "architect")
+        self.assertIn("final report:", out)
+        self.assertIn("commits:", out)
+        for s in prog["slices"]:
+            for c in s["commits"]:
+                self.assertIn(c[:7], out)                     # every slice commit appears
+
+    def test_rail_payload_carries_program_grouping_and_lands_slices(self):
+        from openfde.server import build_rail_payload
+        prog = self._run("1. Add a /healthz endpoint. 2. Add request logging.")
+        # simulate the stale-open drift on one slice; the rail's reconcile must heal it
+        ep = self.p.get_episode(prog["slices"][0]["episodeId"])
+        ep["status"] = "open"
+        self.p.upsert_episode(ep)
+        chips = build_rail_payload(self.p)["episodes"]
+        pgm = [c for c in chips if c.get("programId") == prog["programId"]]
+        self.assertEqual(len(pgm), len(prog["slices"]))                 # all slices visible, none folded
+        self.assertTrue(all(c.get("programTitle") and c.get("sliceTitle") for c in pgm))
+        self.assertTrue(all(c["status"] == "landed" for c in pgm))      # reconciled — no stale open
+
+    def test_program_episode_not_flagged_nonimplementation(self):
+        # a Program slice that looks meta-by-effect (only a gitignored file, no commit) is NOT demoted
+        self.p.upsert_episode({"episodeId": "episode_x", "programId": "program_y", "files": ["notes.md"],
+                               "commitShas": [], "signal": "product", "sequence": 1,
+                               "createdAt": "2026-01-01T00:00:00Z"})
+        self.p.flag_nonimplementation_episodes(str(self.root), self.p.load_episodes())
+        self.assertEqual(self.p.get_episode("episode_x")["signal"], "product")
+        self.assertFalse(self.p.get_episode("episode_x").get("nonImplementation"))
+
     def test_continue_resumes_a_blocked_program(self):
         f = _echo_factory({"verifier": ["CHANGES_REQUESTED: nope"]})
         prog = self._run("1. Add a /healthz endpoint.", session_factory=f, max_loops=1)

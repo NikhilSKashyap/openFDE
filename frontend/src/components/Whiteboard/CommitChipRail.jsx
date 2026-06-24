@@ -29,6 +29,7 @@ export default function CommitChipRail({
   onSpotlightOutside, outsideActive = false,
 }) {
   const [busy, setBusy] = useState(null)
+  const [expandedPgm, setExpandedPgm] = useState({})
   const [overflow, setOverflow] = useState({ left: false, right: false })
   const scrollRef = useRef(null)
   const outsideCommits = (outsideBucket?.commits) || []
@@ -71,6 +72,28 @@ export default function CommitChipRail({
     if (el) el.scrollBy({ left: dir * Math.max(180, el.clientWidth * 0.6), behavior: 'smooth' })
   }
 
+  // One prompt-episode chip (also used as a Program's child slice chip when `child`).
+  const renderChip = (ep, child = false) => {
+    const active = ep.episodeId === activeEpisodeId
+    const landed = (ep.commitShas || []).length || (ep.commits || []).length
+    const operational = ep.signal === 'operational' || (ep.storyFacts && ep.storyFacts.operational)
+    return (
+      <button key={ep.episodeId} type="button" role="listitem"
+        className={`commit-chip prompt-chip st-${ep.status || 'open'}${active ? ' active' : ''}${operational ? ' ops' : ''}${child ? ' slice-child' : ''}${busy === ep.episodeId ? ' busy' : ''}`}
+        onClick={() => pickEpisode(ep)}
+        title={`${operational ? 'operational · ' : ep.tag ? ep.tag + ' · ' : ''}${ep.sliceTitle || ep.title || promptLabel(ep)}\n${promptSub(ep)}`}>
+        <span className={`prompt-chip-dot st-${ep.status || 'open'}`} aria-hidden="true" />
+        {operational
+          ? <span className="prompt-chip-ops" title="Operational / meta — not a Story concept">ops</span>
+          : ep.tag && <span className="prompt-chip-tag">{ep.tag}</span>}
+        <span className="commit-chip-msg">{child ? (ep.sliceTitle || promptLabel(ep)) : promptLabel(ep)}</span>
+        {landed > 0
+          ? <span className="prompt-chip-commits" title={`${landed} commit${landed === 1 ? '' : 's'} landed`}>✓{landed}</span>
+          : ep.status === 'reviewing' ? <span className="prompt-chip-reviewing">review</span> : null}
+      </button>
+    )
+  }
+
   return (
     <div className="commit-rail">
       <button className={`commit-rail-arrow${overflow.left ? '' : ' hidden'}`}
@@ -89,31 +112,26 @@ export default function CommitChipRail({
           </button>
         )}
 
-        {/* Prompt episode chips — the chapters. Label is the short story title;
-            commits live in the episode detail card, never as rail items. */}
-        {episodes.map(ep => {
-          const active = ep.episodeId === activeEpisodeId
-          const landed = (ep.commitShas || []).length || (ep.commits || []).length
-          // Operational/meta captures (chatter, file-lists, "Here's the CC prompt") stay in
-          // the rail for history but are muted + tagged "ops" — never a Story concept.
-          const operational = ep.signal === 'operational' || (ep.storyFacts && ep.storyFacts.operational)
+        {/* Prompt episode chips. A Program shows ONE parent chip with collapsible child slice chips,
+            so its slices read as one journey instead of separate beats. */}
+        {groupEpisodes(episodes).map(grp => {
+          if (!grp.programId) return renderChip(grp.episodes[0], false)
+          const verified = grp.episodes.filter(e => e.status === 'landed').length
+          const commits = grp.episodes.reduce((n, e) => n + ((e.commitShas || e.commits || []).length), 0)
+          const exp = !!expandedPgm[grp.programId]
           return (
-            <button
-              key={ep.episodeId} type="button" role="listitem"
-              className={`commit-chip prompt-chip st-${ep.status || 'open'}${active ? ' active' : ''}${operational ? ' ops' : ''}${busy === ep.episodeId ? ' busy' : ''}`}
-              onClick={() => pickEpisode(ep)}
-              title={`${operational ? 'operational · ' : ep.tag ? ep.tag + ' · ' : ''}${ep.title || promptLabel(ep)}\n${promptSub(ep)}`}>
-              <span className={`prompt-chip-dot st-${ep.status || 'open'}`} aria-hidden="true" />
-              {operational
-                ? <span className="prompt-chip-ops" title="Operational / meta — not a Story concept">ops</span>
-                : ep.tag && <span className="prompt-chip-tag">{ep.tag}</span>}
-              <span className="commit-chip-msg">{promptLabel(ep)}</span>
-              {landed > 0
-                ? <span className="prompt-chip-commits" title={`${landed} commit${landed === 1 ? '' : 's'} landed`}>✓{landed}</span>
-                : ep.status === 'reviewing'
-                  ? <span className="prompt-chip-reviewing">review</span>
-                  : null}
-            </button>
+            <span key={grp.programId} className="pgm-group" role="listitem">
+              <button type="button"
+                className={`commit-chip program-parent${exp ? ' expanded' : ''}`}
+                onClick={() => setExpandedPgm(s => ({ ...s, [grp.programId]: !exp }))}
+                title={`Program: ${grp.programTitle || 'Program'} — ${verified}/${grp.episodes.length} verified · ${commits} commit${commits === 1 ? '' : 's'}`}>
+                <span className="program-parent-dot" aria-hidden="true" />
+                <span className="commit-chip-msg">▣ {grp.programTitle || 'Program'}</span>
+                <span className="program-parent-meta">{verified}/{grp.episodes.length} · ✓{commits}</span>
+                <span className="program-parent-caret">{exp ? '▾' : '▸'}</span>
+              </button>
+              {exp && grp.episodes.map(e => renderChip(e, true))}
+            </span>
           )
         })}
 
@@ -141,6 +159,19 @@ export default function CommitChipRail({
 }
 
 // Rail chip label: the short story title, falling back to the prompt's first line.
+// Group consecutive episodes of the same Program → one parent chip + its child slices.
+function groupEpisodes(episodes) {
+  const out = []
+  for (const ep of episodes || []) {
+    const pid = ep.programId
+    const last = out[out.length - 1]
+    if (pid && last && last.programId === pid) last.episodes.push(ep)
+    else if (pid) out.push({ programId: pid, programTitle: ep.programTitle, episodes: [ep] })
+    else out.push({ programId: null, episodes: [ep] })
+  }
+  return out
+}
+
 function promptLabel(ep) {
   const t = (ep.title || '').trim()
   if (t) return t.length > 34 ? t.slice(0, 33) + '…' : t

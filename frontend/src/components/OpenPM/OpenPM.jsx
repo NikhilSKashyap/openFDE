@@ -541,6 +541,17 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
 
       {/* Prompt tag — the chapter this card belongs to (e.g. "P12 · Polish prompt
           story"). Cards from one prompt repeat the same tag, which groups them. */}
+      {task.programId && (
+        <div title={`Program: ${task.programTitle || 'Program'} · slice: ${task.sliceTitle || task.promptTitle || ''}`}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3, fontSize: 9,
+                   color: 'var(--accent)', fontWeight: 600 }}>
+          <span style={{ flexShrink: 0, border: '1px solid color-mix(in srgb, var(--accent) 40%, var(--border))',
+            background: 'color-mix(in srgb, var(--accent) 10%, transparent)', borderRadius: 5, padding: '0 5px' }}>
+            ▣ {task.programTitle || 'Program'}</span>
+          {task.sliceTitle && <span style={{ color: 'var(--text-muted)', overflow: 'hidden',
+            textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {task.sliceTitle}</span>}
+        </div>
+      )}
       {(task.episodeTag || task.promptLabel) && (
         <div
           title={`Prompt ${task.episodeTag ? task.episodeTag + ' · ' : ''}${task.promptTitle || task.promptLabel}`}

@@ -875,6 +875,8 @@ class Persistence:
 
         changed = False
         for e in eps:
+            if e.get("programId"):
+                continue                # a Program slice is product journey — never meta-by-effect
             if _content_operational(e):
                 continue
             files = e.get("files") or []

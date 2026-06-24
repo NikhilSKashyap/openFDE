@@ -150,8 +150,8 @@ def internal_council_kind(episode: dict):
     ``council`` loop) is never internal. General — by vocabulary, never by id."""
     if not isinstance(episode, dict):
         return None
-    if episode.get("council"):
-        return None                       # a real autonomous run (a recorded loop) → product
+    if episode.get("council") or episode.get("programId"):
+        return None                       # a real autonomous run / a Program slice → product, never folded
     title = str(episode.get("title") or "")
     for rx, kind in _COUNCIL_MACHINERY:
         if rx.search(title):

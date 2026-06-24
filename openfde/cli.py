@@ -185,6 +185,8 @@ def main() -> None:
         from openfde.persistence import Persistence
         pc = getattr(args, "program_command", None)
         if pc == "status":
+            persistence = Persistence(Path(args.path) / ".openfde")
+            pg.reconcile_program_slices(persistence)     # heal slice episode status before reporting
             prog = pg.active_program(args.path) or pg.latest_program(args.path)
             print(pg.program_status(prog, args.role))
         elif pc == "start":
@@ -194,7 +196,7 @@ def main() -> None:
                 print(f"Cannot read prompt file: {e}")
                 sys.exit(1)
             persistence = Persistence(Path(args.path) / ".openfde")
-            providers = {"architect": "codex", "srDev": "claude-code", "verifier": "codex"}
+            providers = pg.providers_from_settings(persistence)   # selected role/provider config
             prog = pg.start_program(persistence, prompt=prompt, providers=providers,
                                     allow_edits=args.allow_edits)
             if prog["status"] == pg.STATUS_RUNNING:

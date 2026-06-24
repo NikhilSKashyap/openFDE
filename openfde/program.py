@@ -55,6 +55,77 @@ BLOCKED_ADAPTER_UNAVAILABLE = "BLOCKED_ADAPTER_UNAVAILABLE"
 _ROLE_KEY = {"architect": "architect", "senior-dev": "srDev", "senior_dev": "srDev",
              "sr_dev": "srDev", "srdev": "srDev", "verifier": "verifier"}
 
+# Agent-settings provider id → council relay adapter id (the coding-agent transports the relay drives).
+# A settings provider that isn't a coding adapter (anthropic/openai/ollama/…) maps to '' → the role
+# has no usable Program provider → BLOCKED_NO_PROVIDER_FOR_ROLE. No hardcoded role↔provider.
+_SETTINGS_TO_ADAPTER = {
+    "claude-code-local": "claude-code", "claude-code": "claude-code",
+    "codex-local": "codex", "codex": "codex", "echo": "echo",
+}
+
+
+def providers_from_settings(persistence) -> dict:
+    """Resolve the role→provider council adapters from OpenFDE agent settings (architect / senior_dev /
+    verifier). A disabled role, or one whose selected provider isn't a coding adapter, resolves to ''
+    so start_program blocks honestly. Used when the API/CLI caller doesn't pass explicit providers."""
+    s = persistence.load_agent_settings() or {}
+
+    def adapter(role):
+        cfg = s.get(role) or {}
+        if cfg.get("enabled") is False:
+            return ""
+        return _SETTINGS_TO_ADAPTER.get(cfg.get("provider"), "")
+    return {"architect": adapter("architect"), "srDev": adapter("senior_dev"), "verifier": adapter("verifier")}
+
+
+def reconcile_program_slices(persistence) -> int:
+    """Heal program slice episodes so Program state is trustworthy on load (idempotent; returns the
+    count fixed): a VERIFIED slice that landed a commit must be ``landed`` (never left ``open`` after
+    the program completed), and a program slice is NEVER demoted to operational/internal machinery —
+    it is part of the user's product journey even when its title or files look small/docs-like."""
+    repo_root = persistence.openfde_dir.parent
+    fixed = 0
+    # Backfill program/slice titles onto existing program tasks so OpenPM cards name their program.
+    by_ep = {}
+    for prog in load_programs(repo_root):
+        for sl in prog.get("slices", []):
+            if sl.get("episodeId"):
+                by_ep[sl["episodeId"]] = (prog.get("title"), sl.get("title"))
+    if by_ep:
+        tasks = persistence.load_tasks()
+        tchanged = False
+        for t in tasks:
+            pts = by_ep.get(t.get("episodeId"))
+            if pts and (t.get("programTitle") != pts[0] or t.get("sliceTitle") != pts[1]):
+                t["programTitle"], t["sliceTitle"] = pts
+                tchanged = True
+        if tchanged:
+            persistence.save_tasks(tasks)
+
+    for prog in load_programs(repo_root):
+        for sl in prog.get("slices", []):
+            eid = sl.get("episodeId")
+            ep = persistence.get_episode(eid) if eid else None
+            if not ep:
+                continue
+            changed = False
+            if sl.get("status") == SLICE_VERIFIED and (sl.get("commits") or sl.get("latestCommit")) \
+                    and ep.get("status") != "landed":
+                ep["status"] = "landed"
+                changed = True
+            if ep.get("internal") or ep.get("nonImplementation") or ep.get("signal") == "operational":
+                ep["internal"], ep["nonImplementation"], ep["signal"] = False, False, "product"
+                ep.pop("internalKind", None)
+                changed = True
+            if prog.get("title") and ep.get("programTitle") != prog["title"]:
+                ep["programTitle"] = prog["title"]
+                changed = True
+            if changed:
+                ep["updatedAt"] = _now()
+                persistence.upsert_episode(ep)
+                fixed += 1
+    return fixed
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -257,7 +328,8 @@ def advance_program(persistence, program, *, session_factory=None, on_event=None
         rec = ac.run(persistence, prompt=sl["prompt"], providers=program["roleAssignments"],
                      allow_edits=program["allowEdits"], max_loops=program["maxLoops"],
                      program_id=program["programId"], slice_id=sl["sliceId"], slice_title=sl["title"],
-                     acceptance=sl["acceptance"], session_factory=session_factory, on_event=_turn)
+                     program_title=program["title"], acceptance=sl["acceptance"],
+                     session_factory=session_factory, on_event=_turn)
 
         sl["episodeId"], sl["taskIds"] = rec["episodeId"], rec["taskIds"]
         sl["latestCommit"], sl["retryCount"] = rec["latestCommit"], rec.get("loop", 0)
@@ -371,15 +443,21 @@ def program_status(program: dict | None, role: str) -> str:
     role_key = _ROLE_KEY.get((role or "").strip().lower(), "architect")
     summ = program_summary(program)
     provider = (program.get("roleAssignments") or {}).get(role_key) or "(unassigned)"
-    cur = next((s for s in program.get("slices", []) if s["sliceId"] == program.get("currentSliceId")), None)
+    slices = program.get("slices", [])
+    cur = next((s for s in slices if s["sliceId"] == program.get("currentSliceId")), None)
+    all_commits = [c[:7] for s in slices for c in (s.get("commits") or ([s["latestCommit"]] if s.get("latestCommit") else []))]
+    latest = (cur.get("latestCommit") or "—") if cur else (all_commits[-1] if all_commits else "—")
     lines = [
         f"Program {summ['programId']} — {summ['title']}",
         f"  status: {summ['status']}" + (f" · {summ['blockerReason']}" if summ.get("blockerReason") else ""),
         f"  slice: {summ['sliceIndex']}/{summ['sliceCount']}" + (f" — {summ['currentSliceTitle']}" if summ.get("currentSliceTitle") else ""),
         f"  your role: {role} → {provider}",
-        f"  latest commit: {(cur.get('latestCommit') or '—') if cur else '—'}",
-        f"  latest handoff: {cur['status'] if cur else (summ['status'])}",
+        f"  commits: {', '.join(all_commits) or '—'}",
+        f"  latest commit: {latest}",
+        f"  latest handoff: {cur['status'] if cur else summ['status']}",
         f"  next action: {_next_action(program, cur, role_key)}",
-        "  (session bridge — read-only; OpenFDE never injects into your chat)",
     ]
+    if summ["status"] == STATUS_COMPLETE and program.get("finalReport"):
+        lines.insert(2, f"  final report: {program['finalReport']}")
+    lines.append("  (session bridge — read-only; OpenFDE never injects into your chat)")
     return "\n".join(lines)

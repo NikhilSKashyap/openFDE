@@ -3532,6 +3532,16 @@
 .pgm-sl { display: inline-flex; align-items: center; gap: 3px; font-size: 9px; color: var(--text-muted); }
 .pgm-sl-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .pgm-final { margin-top: 4px; font-size: 10.5px; color: var(--text-muted); }
+/* Prompt rail — Program parent chip + collapsible child slice chips. */
+.pgm-group { display: inline-flex; align-items: center; gap: 6px; }
+.commit-chip.program-parent { border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.commit-chip.program-parent.expanded { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.program-parent-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); flex-shrink: 0; }
+.program-parent-meta { font-size: 9px; color: var(--accent); font-weight: 600; }
+.program-parent-caret { font-size: 9px; color: var(--text-muted); }
+.commit-chip.slice-child { border-style: dashed; opacity: 0.92; }
+.commit-chip.slice-child::before { content: '↳'; color: var(--text-muted); margin-right: 2px; font-size: 10px; }
 .council-run-hint { font-size: 9.5px; color: var(--text-muted); line-height: 1.4; margin-top: 4px; padding: 0 2px; }
 .acr-banner { margin-bottom: 8px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border);
   border-left-width: 3px; background: var(--surface-2); }

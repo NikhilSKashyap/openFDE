@@ -428,6 +428,8 @@ def build_rail_payload(persistence, *, limit=None) -> dict:
     an empty rail only after that. ``totalCount`` lets the UI know more chips are hydrating.
     """
     persistence.backfill_episode_meta()                    # tag/title/seq + council-noise demotion, no git
+    from openfde import program as _pg
+    _pg.reconcile_program_slices(persistence)              # heal Program slice episodes (landed, product)
     # Deterministic order (sequence desc) for BOTH boot and full — never the store's file order,
     # which a reconciliation upsert reorders. Boot then takes the latest N off the top. Internal
     # council artifacts (verification/review/OPS/smoke machinery) are folded under the council, not
@@ -746,8 +748,9 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
             web.Response — JSON array of task objects (repaired in place when needed).
         """
         episodes = episode_llm_summary.ensure_facts(persistence)   # ensure clean episode titles first
-        from openfde import autonomous_council
+        from openfde import autonomous_council, program as _pg
         autonomous_council.hydrate_phase_cards(persistence)        # parents with council data get phase cards
+        _pg.reconcile_program_slices(persistence)                  # backfill program/slice titles onto cards
         tasks = persistence.load_tasks()
         repaired, changed = repair_episode_tasks(tasks, episodes)
         # Heal stale commit mappings: a card showing a commit its owning episode no longer claims is
@@ -1022,7 +1025,10 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         prompt = (body.get("prompt") or "").strip()
         if not prompt:
             return web.json_response({"ok": False, "error": "prompt is required"}, status=400)
-        providers = body.get("providers") or {"architect": "codex", "srDev": "claude-code", "verifier": "codex"}
+        # Role→provider comes from the SELECTED agent settings (no hardcoded codex=architect …). An
+        # explicit body.providers overrides (e.g. echo for tests). A role with no coding provider →
+        # start_program blocks BLOCKED_NO_PROVIDER_FOR_ROLE.
+        providers = body.get("providers") or pg.providers_from_settings(persistence)
         program = pg.start_program(persistence, prompt=prompt, providers=providers,
                                    allow_edits=bool(body.get("allowEdits", False)),
                                    max_loops=int(body.get("maxLoops") or 2), title=body.get("title"))
@@ -1040,6 +1046,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     async def get_programs(request: web.Request) -> web.Response:
         from openfde import program as pg
+        pg.reconcile_program_slices(persistence)     # heal slice episode status on load (no stale open)
         return web.json_response({"ok": True, "programs": [pg.program_summary(p) for p in pg.load_programs(path)],
                                   "active": pg.latest_program_summary(path)})
 

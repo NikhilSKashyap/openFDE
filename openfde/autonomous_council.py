@@ -505,7 +505,7 @@ def _add_edge(rec, edge, role):
 # ── Public API: init → advance → run ──────────────────────────────────────────
 def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
              allow_edits=False, product=True, parent_episode_id=None, run_id=None,
-             program_id=None, slice_id=None, slice_title=None, acceptance=None) -> dict:
+             program_id=None, slice_id=None, slice_title=None, program_title=None, acceptance=None) -> dict:
     """Create the run record (+ for a PRODUCT run: the parent episode, five OpenPM phase cards, and the
     bus work item) and record the opening user turn. FAST + synchronous — returns the ids the API
     responds with before the relay advances. Reuses OpenFDE ids; the runId is the run's own.
@@ -555,11 +555,13 @@ def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, 
         if program_id or slice_id:
             ep = persistence.get_episode(episode_id)
             if ep:
-                ep["programId"], ep["sliceId"], ep["sliceTitle"] = program_id, slice_id, slice_title
+                ep["programId"], ep["sliceId"] = program_id, slice_id
+                ep["sliceTitle"], ep["programTitle"] = slice_title, program_title
                 persistence.upsert_episode(ep)
             for t in persistence.load_tasks():
                 if t.get("episodeId") == episode_id:
-                    persistence.update_task(t["id"], {"programId": program_id, "sliceId": slice_id})
+                    persistence.update_task(t["id"], {"programId": program_id, "sliceId": slice_id,
+                                                      "programTitle": program_title, "sliceTitle": slice_title})
 
     _add_turn(repo_root, rec, "user", "user", "prompt", summary=prompt[:140], body=prompt)
     _update_episode_council(persistence, rec)
@@ -757,13 +759,14 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
 
 def run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
         allow_edits=False, product=True, parent_episode_id=None, run_id=None,
-        program_id=None, slice_id=None, slice_title=None, acceptance=None,
+        program_id=None, slice_id=None, slice_title=None, program_title=None, acceptance=None,
         session_factory=None, on_event=None) -> dict:
     """Synchronous convenience: init + advance to terminal. The testable core of the relay."""
     rec = init_run(persistence, prompt=prompt, box_ids=box_ids, providers=providers,
                    max_loops=max_loops, auto_push=auto_push, allow_edits=allow_edits,
                    product=product, parent_episode_id=parent_episode_id, run_id=run_id,
-                   program_id=program_id, slice_id=slice_id, slice_title=slice_title, acceptance=acceptance)
+                   program_id=program_id, slice_id=slice_id, slice_title=slice_title,
+                   program_title=program_title, acceptance=acceptance)
     return advance_run(persistence, rec, session_factory=session_factory, on_event=on_event)
 
 
