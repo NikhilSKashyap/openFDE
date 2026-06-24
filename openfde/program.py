@@ -109,12 +109,62 @@ def _role_providers(adapters: dict, ids: dict) -> list:
     return out
 
 
+def repair_stale_program_slices(persistence) -> int:
+    """Conservative migration so Program state can't lie after a crash or an OLD (pre-fix) cancel: a
+    TERMINAL program (cancelled / blocked / complete) must have NO child slice still ``running``. Heal
+    the stale slice WITHOUT rewriting successful history (verified slices + commits are never touched):
+
+      • cancelled parent → a running slice → ``cancelled`` (+ repairNote)
+      • blocked parent WITH a blockerReason → the running slice → ``blocked`` (failureReason ← blockerReason)
+      • complete parent → a stray running slice → ``verified`` if it has a commit, else ``cancelled``
+
+    Idempotent (only ever touches a ``running`` slice under a terminal parent). Returns #slices repaired.
+    """
+    repo_root = persistence.openfde_dir.parent
+    repaired = 0
+    for prog in load_programs(repo_root):
+        status = prog.get("status")
+        if status not in (STATUS_CANCELLED, STATUS_BLOCKED, STATUS_COMPLETE):
+            continue
+        changed = False
+        for sl in prog.get("slices", []):
+            if sl.get("status") != SLICE_RUNNING:
+                continue
+            if status == STATUS_CANCELLED:
+                sl["status"] = SLICE_CANCELLED
+                sl["repairNote"] = "repaired on load: parent program cancelled; slice left running (pre-fix)"
+            elif status == STATUS_BLOCKED:
+                if not prog.get("blockerReason"):
+                    continue                       # don't fabricate a block reason for an active slice
+                sl["status"] = SLICE_BLOCKED
+                sl["failureReason"] = sl.get("failureReason") or prog.get("blockerReason")
+                sl["repairNote"] = "repaired on load: parent program blocked; active slice left running"
+            else:                                  # STATUS_COMPLETE — all slices were verified to complete
+                if sl.get("commits") or sl.get("latestCommit"):
+                    sl["status"] = SLICE_VERIFIED  # it clearly succeeded (has a commit) — keep the success
+                    sl["repairNote"] = "repaired on load: completed program; running slice had a commit"
+                else:
+                    sl["status"] = SLICE_CANCELLED
+                    sl["repairNote"] = "repaired on load: completed program; stray running slice, no commit"
+            changed = True
+            repaired += 1
+        # a terminal program must not still point at a 'current' slice (no live baton on a finished arc)
+        if status in (STATUS_CANCELLED, STATUS_COMPLETE) and prog.get("currentSliceId"):
+            prog["currentSliceId"] = None
+            changed = True
+        if changed:
+            prog["updatedAt"] = _now()
+            upsert_program(repo_root, prog)
+    return repaired
+
+
 def reconcile_program_slices(persistence) -> int:
     """Heal program slice episodes so Program state is trustworthy on load (idempotent; returns the
     count fixed): a VERIFIED slice that landed a commit must be ``landed`` (never left ``open`` after
     the program completed), and a program slice is NEVER demoted to operational/internal machinery —
     it is part of the user's product journey even when its title or files look small/docs-like."""
     repo_root = persistence.openfde_dir.parent
+    repair_stale_program_slices(persistence)     # no child slice 'running' under a terminal program
     fixed = 0
     # Backfill program/slice titles onto existing program tasks so OpenPM cards name their program.
     by_ep = {}

@@ -125,6 +125,12 @@ export const postProgramRun = (prompt, opts = {}) =>
     body: JSON.stringify({ prompt, ...opts }),
   })
 export const getPrograms = () => apiFetch('/api/programs')
+// Cancel an in-flight autonomous-council run / Program — hits the real backend cancel endpoint, which
+// kills the managed subprocess + marks run/slice/program cancelled, then broadcasts the new state.
+export const cancelAutonomousCouncilRun = (runId) =>
+  apiFetch(`/api/autonomous-council/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+export const cancelProgram = (programId) =>
+  apiFetch(`/api/programs/${encodeURIComponent(programId)}/cancel`, { method: 'POST' })
 export const getAgentSessions = () => apiFetch('/api/agent-sessions')
 
 /**

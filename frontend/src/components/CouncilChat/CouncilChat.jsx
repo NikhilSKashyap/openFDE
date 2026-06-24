@@ -1,6 +1,24 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun, postProgramRun } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun, postProgramRun, cancelAutonomousCouncilRun, cancelProgram } from '../../api/backend'
 import { runIsLive, runDisplayPhase, runBannerClass } from '../../store/councilRun'
+
+// Turn a machine block/cancel reason into one plain-language line for the cockpit. Generic — works
+// for any provider; specific provider names only ever come from state, never hardcoded here.
+const REASON_PLAIN = {
+  BLOCKED_PROVIDER_TIMEOUT: 'A provider timed out and was stopped',
+  BLOCKED_ADAPTER_UNAVAILABLE: 'A provider was unavailable',
+  BLOCKED_NO_PROVIDER_FOR_ROLE: 'A role has no provider selected',
+  BLOCKED_MAX_RETRIES: 'Stopped after too many verification retries',
+  BLOCKED_NEEDS_PRODUCT_CLARITY: 'Needs a clearer product direction',
+  BLOCKED_BLAST_RADIUS: 'The direction was too broad to run safely',
+  'cancelled by user': 'Cancelled by you',
+}
+function humanizeReason(reason) {
+  if (!reason) return ''
+  return REASON_PLAIN[reason] || (typeof reason === 'string' && reason.startsWith('BLOCKED_')
+    ? reason.slice(8).replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase())
+    : reason)
+}
 
 /**
  * CouncilChat — the read-only brain of Orient, as a real chat thread (not a single answer card).
@@ -47,6 +65,7 @@ export default function CouncilChat({ onOpenAgentSettings = null,
   const [asking, setAsking]       = useState(false)
   const [busyRoles, setBusyRoles] = useState([])
   const [launching, setLaunching] = useState(false)    // autonomous relay being kicked off
+  const [cancelling, setCancelling] = useState(false)  // a cancel request is in flight
   const [allowEdits, setAllowEdits] = useState(false)  // let the senior dev write files (real commit)
 
   // The council transcript is OWNED by App — hydrated at boot, refreshed on every council websocket
@@ -77,6 +96,25 @@ export default function CouncilChat({ onOpenAgentSettings = null,
     setLaunching(false)
     if (res?.ok) { setQuestion(''); refreshTranscript() }
   }, [question, launching, allowEdits, refreshTranscript])
+
+  // Cancel the live Program / council run — hits the REAL backend cancel endpoint (kills the managed
+  // subprocess + marks run/slice/program cancelled), then refreshes so the UI shows the true state.
+  const cancelActiveProgram = useCallback(async (programId) => {
+    if (!programId || cancelling) return
+    setCancelling(true)
+    await cancelProgram(programId)
+    setCancelling(false)
+    refreshTranscript()
+    setTimeout(refreshTranscript, 900)        // catch the worker settling the run to terminal
+  }, [cancelling, refreshTranscript])
+  const cancelActiveRun = useCallback(async (runId) => {
+    if (!runId || cancelling) return
+    setCancelling(true)
+    await cancelAutonomousCouncilRun(runId)
+    setCancelling(false)
+    refreshTranscript()
+    setTimeout(refreshTranscript, 900)
+  }, [cancelling, refreshTranscript])
 
   const idRef    = useRef(0)
   const abortRef = useRef(null)
@@ -207,7 +245,8 @@ export default function CouncilChat({ onOpenAgentSettings = null,
 
       {/* Persistent council inbox — the durable handoff conversation (orange-box transcript),
           above the read-only Ask thread. Refreshes on council websocket events. */}
-      <CouncilTranscript data={transcript} launching={launching} />
+      <CouncilTranscript data={transcript} launching={launching} cancelling={cancelling}
+        onCancelRun={cancelActiveRun} onCancelProgram={cancelActiveProgram} />
 
       {/* Scrolling conversation — grows; composer below stays docked. */}
       <div className="council-thread" ref={threadRef}>
@@ -362,23 +401,31 @@ function providersLabel(p) {
   if (vals.every(v => v === 'echo')) return 'echo (demo)'
   return 'Codex + Claude Code'
 }
-function RunBanner({ run }) {
+function RunBanner({ run, programTerminal = false, onCancel, cancelling }) {
   if (!run) return null
-  // The banner reflects the run's TRUE state: once finished it shows the terminal status (from
-  // councilRun, which reads status — never a stale in-flight phase). The baton only shows while live.
-  const live = runIsLive(run)
+  // The banner reflects the run's TRUE state. A council run BELONGS to its program: once the program
+  // is terminal (cancelled/blocked/complete) the run is no longer live — so we never show a stale
+  // baton or Cancel even if a racing run snapshot still says "running". Standalone runs (no program)
+  // keep the pure run-state behaviour.
+  const live = runIsLive(run) && !programTerminal
+  const cls = (programTerminal && run.running) ? 'blocked' : runBannerClass(run)
+  const phase = (programTerminal && run.running) ? 'cancelled' : runDisplayPhase(run)
   const provs = providersLabel(run.providers)
   return (
-    <div className={`acr-banner acr-${runBannerClass(run)}`}>
+    <div className={`acr-banner acr-${cls}`}>
       <div className="acr-line1">
         <span className="acr-dot" />
-        <span className="acr-phase">Autonomous council — {runDisplayPhase(run)}</span>
+        <span className="acr-phase">Autonomous council — {phase}</span>
         {live && run.activeRole && <span className="acr-baton">{batonLabel(run)} has the baton</span>}
         {run.loop > 0 && <span className="acr-loop">loop {run.loop}/{run.maxLoops}</span>}
         {provs && <span className="acr-provs">{provs}</span>}
+        {live && onCancel && run.runId && (
+          <button className="acr-cancel" disabled={cancelling} onClick={() => onCancel(run.runId)}
+            title="Stop this run and its managed provider">{cancelling ? 'Cancelling…' : '■ Cancel'}</button>
+        )}
       </div>
       {run.latestTurn?.summary && <div className="acr-last">{run.latestTurn.summary}</div>}
-      {run.blockedReason && <div className="acr-blockedreason">{run.blockedReason}</div>}
+      {run.blockedReason && <div className="acr-blockedreason">{humanizeReason(run.blockedReason)}</div>}
     </div>
   )
 }
@@ -390,16 +437,19 @@ const PHASE_VERB = {
   ARCHITECT_DECIDING: ['architect', 'is deciding'], SR_DEV_IMPLEMENTING: ['sr_dev', 'is implementing'],
   CODEX_VERIFYING: ['verifier', 'is verifying'], CHANGES_REQUESTED: ['sr_dev', 'is fixing'],
 }
-const ROLE_FULL = { architect: 'architect (Codex)', sr_dev: 'sr dev (Claude Code)', verifier: 'verifier (Codex)' }
 function LivePhaseRow({ run }) {
   const pv = PHASE_VERB[run.phase]
   if (!pv) return null
   const [role, verb] = pv
   const accent = rowAccent({ role })
+  // Label derives from the role's ASSIGNED provider (from state) — never a hardcoded Codex/Claude.
+  const provider = (run.providers || {})[_ROLE_KEY[role]]
+  const pd = _PROVIDER_DISP[provider] || provider
+  const label = pd ? `${_ROLE_DISP[role] || role} (${pd})` : (_ROLE_DISP[role] || role)
   return (
     <div className="ctx-row ctx-live" style={{ borderLeftColor: accent }}>
       <div className="ctx-row-head">
-        <span className="ctx-role" style={{ color: accent }}>{ROLE_FULL[role]}</span>
+        <span className="ctx-role" style={{ color: accent }}>{label}</span>
         <span className="ctx-summary">{verb}<span className="ctx-live-dots">…</span></span>
       </div>
     </div>
@@ -409,17 +459,22 @@ function LivePhaseRow({ run }) {
 // Program banner — the parent arc above the council run: title, slice N/M, per-slice status dots.
 const SLICE_DOT = {
   verified: 'var(--solid)', running: 'var(--accent-orange)', blocked: 'var(--violation)',
-  failed: 'var(--violation)', queued: 'var(--text-muted)',
+  failed: 'var(--violation)', cancelled: 'var(--text-muted)', queued: 'var(--text-muted)',
 }
-function ProgramBanner({ program }) {
+function ProgramBanner({ program, onCancel, cancelling }) {
   if (!program) return null
   const terminal = ['complete', 'blocked', 'cancelled'].includes(program.status)
+  const reason = humanizeReason(program.blockerReason)
   return (
     <div className={`pgm-banner pgm-${program.status}`}>
       <div className="pgm-line1">
         <span className="pgm-title">Program — {program.title}</span>
         <span className="pgm-slice">slice {program.sliceIndex}/{program.sliceCount}</span>
-        <span className="pgm-status">{program.status}{program.blockerReason ? ` · ${program.blockerReason}` : ''}</span>
+        <span className="pgm-status">{program.status}{reason ? ` · ${reason}` : ''}</span>
+        {!terminal && onCancel && program.programId && (
+          <button className="acr-cancel" disabled={cancelling} onClick={() => onCancel(program.programId)}
+            title="Stop the Program and its active slice">{cancelling ? 'Cancelling…' : '■ Cancel Program'}</button>
+        )}
       </div>
       {program.currentSliceTitle && !terminal && <div className="pgm-cur">▸ {program.currentSliceTitle}</div>}
       {(program.slices || []).length > 0 && (
@@ -436,10 +491,12 @@ function ProgramBanner({ program }) {
   )
 }
 
-function CouncilTranscript({ data, launching = false }) {
+function CouncilTranscript({ data, launching = false, cancelling = false, onCancelRun, onCancelProgram }) {
   const [open, setOpen] = useState({})
   const [showPrev, setShowPrev] = useState(false)
-  // Boot/loading: the transcript hasn't hydrated yet → a clear skeleton, never a blank panel.
+  // Boot/loading: the transcript hasn't hydrated yet → a clear skeleton, never a blank panel. Once the
+  // first fetch resolves, App always sets a (possibly empty) object, so this never hangs on a blocked/
+  // cancelled run — it resolves to the terminal banner + turns below.
   if (!data) {
     return (
       <div className="ctx">
@@ -450,12 +507,14 @@ function CouncilTranscript({ data, launching = false }) {
   }
   const items = data.items || []
   const run = data.run
+  const program = data.program
+  const programTerminal = !!program && ['cancelled', 'blocked', 'complete'].includes(program.status)
   const prev = data.previousItems || []
   const noRuns = items.length === 0 && !run && !launching
   return (
     <div className="ctx">
-      <ProgramBanner program={data.program} />
-      <RunBanner run={run} />
+      <ProgramBanner program={program} onCancel={onCancelProgram} cancelling={cancelling} />
+      <RunBanner run={run} programTerminal={programTerminal} onCancel={onCancelRun} cancelling={cancelling} />
       <div className="ctx-head">
         <span className="ctx-title">Council inbox</span>
         {data.activeStatus && <span className="ctx-status">{data.activeStatus}</span>}
@@ -498,7 +557,7 @@ function CouncilTranscript({ data, launching = false }) {
           </div>
         )
       })}
-      {runIsLive(run) && <LivePhaseRow run={run} />}
+      {runIsLive(run) && !programTerminal && <LivePhaseRow run={run} />}
       {prev.length > 0 && (
         <div className="ctx-prev">
           <button className="ctx-prev-toggle" onClick={() => setShowPrev(s => !s)}>

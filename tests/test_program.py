@@ -51,6 +51,36 @@ def _timeout_factory(fail_role="architect", provider="claude-code"):
     return factory
 
 
+class _SleepSession(agent_sessions.AgentSession):
+    """Drives a REAL `sleep` subprocess through run_control for one role — so a test can prove cancel
+    kills the managed process AND propagates, with no external agent. The blocking call is genuinely
+    registered in the process registry (run_control.active_runs)."""
+
+    def __init__(self, role, *, run_dir=None, seconds=20, provider="claude-code"):
+        super().__init__(role, provider, run_dir=run_dir)
+        self.seconds = seconds
+
+    def start(self):
+        self._started = True
+
+    def send(self, message, metadata=None):
+        run_id = (metadata or {}).get("runId")
+        run_control.run_managed(["sleep", str(self.seconds)], run_id=run_id, provider=self.provider,
+                                role=self.role, phase=(metadata or {}).get("phase", "plan"), timeout=120)
+        return f"ok {self.role}"
+
+    def stop(self):
+        pass
+
+
+def _sleep_factory(block_role="architect", seconds=20):
+    def factory(role, prov, *, run_dir=None):
+        if role == block_role:
+            return _SleepSession(role, run_dir=run_dir, seconds=seconds)
+        return agent_sessions.EchoSession(role, run_dir=run_dir)
+    return factory
+
+
 ECHO = {"architect": "echo", "srDev": "echo", "verifier": "echo"}
 
 
@@ -275,6 +305,108 @@ class ProgramRunTest(unittest.TestCase):
         tasks = [t for t in self.p.load_tasks() if t.get("episodeId") == rec["episodeId"]]
         self.assertTrue(any(t.get("cancelled") for t in tasks))                    # active phase task cancelled
         run_control.reset(rec["runId"])
+
+    def _terminal_program(self, status, *, blocker=None, slice_extra=None):
+        """A persisted program in a TERMINAL state with one stale RUNNING child slice (the pre-fix bug)."""
+        prog = pg.start_program(self.p, prompt="Add a /healthz endpoint. Add request logging.", providers=ECHO)
+        prog["status"], prog["blockerReason"] = status, blocker
+        prog["currentSliceId"] = prog["slices"][0]["sliceId"]
+        prog["slices"][0]["status"] = pg.SLICE_RUNNING        # stale: running under a terminal parent
+        prog["slices"][0].pop("runId", None)                  # pre-fix slices had no runId
+        if slice_extra:
+            prog["slices"][0].update(slice_extra)
+        return pg.upsert_program(self.root, prog)
+
+    def test_repair_cancelled_parent_marks_running_slice_cancelled(self):
+        self._terminal_program(pg.STATUS_CANCELLED)
+        n = pg.repair_stale_program_slices(self.p)
+        self.assertGreaterEqual(n, 1)
+        prog = pg.active_program(self.root) or pg.latest_program(self.root)
+        self.assertEqual(prog["slices"][0]["status"], pg.SLICE_CANCELLED)
+        self.assertIn("repaired", prog["slices"][0].get("repairNote", ""))
+        self.assertIsNone(prog["currentSliceId"])                  # no live baton on a finished arc
+        self.assertNotIn(pg.SLICE_RUNNING, [s["status"] for s in prog["slices"]])
+
+    def test_repair_blocked_parent_marks_running_slice_blocked_with_reason(self):
+        self._terminal_program(pg.STATUS_BLOCKED, blocker=pg.BLOCKED_PROVIDER_TIMEOUT)
+        pg.repair_stale_program_slices(self.p)
+        sl = (pg.latest_program(self.root))["slices"][0]
+        self.assertEqual(sl["status"], pg.SLICE_BLOCKED)
+        self.assertEqual(sl["failureReason"], pg.BLOCKED_PROVIDER_TIMEOUT)
+
+    def test_repair_blocked_parent_without_reason_does_not_fabricate(self):
+        self._terminal_program(pg.STATUS_BLOCKED, blocker=None)
+        pg.repair_stale_program_slices(self.p)
+        sl = (pg.latest_program(self.root))["slices"][0]
+        self.assertEqual(sl["status"], pg.SLICE_RUNNING)           # left as-is — no reason to fabricate
+        self.assertNotIn("repairNote", sl)
+
+    def test_repair_never_rewrites_verified_history(self):
+        prog = self._terminal_program(pg.STATUS_CANCELLED)
+        prog["slices"][1]["status"] = pg.SLICE_VERIFIED
+        prog["slices"][1]["commits"] = ["abc1234"]
+        pg.upsert_program(self.root, prog)
+        pg.repair_stale_program_slices(self.p)
+        sl1 = (pg.latest_program(self.root))["slices"][1]
+        self.assertEqual(sl1["status"], pg.SLICE_VERIFIED)         # success untouched
+        self.assertEqual(sl1["commits"], ["abc1234"])
+
+    def test_repair_complete_parent_running_slice_with_commit_becomes_verified(self):
+        self._terminal_program(pg.STATUS_COMPLETE, slice_extra={"commits": ["dead123"], "latestCommit": "dead123"})
+        pg.repair_stale_program_slices(self.p)
+        self.assertEqual((pg.latest_program(self.root))["slices"][0]["status"], pg.SLICE_VERIFIED)
+
+    def test_repair_is_idempotent_and_runs_inside_reconcile(self):
+        self._terminal_program(pg.STATUS_CANCELLED)
+        pg.reconcile_program_slices(self.p)                        # reconcile invokes the repair on load
+        first = (pg.latest_program(self.root))["slices"][0]["status"]
+        self.assertEqual(first, pg.SLICE_CANCELLED)
+        self.assertEqual(pg.repair_stale_program_slices(self.p), 0)  # nothing left to repair
+
+    def test_cancel_propagates_through_a_live_managed_provider(self):
+        import threading
+        import time
+        prog = pg.start_program(self.p, prompt="Add a /healthz endpoint",
+                                providers={"architect": "claude-code", "srDev": "echo", "verifier": "echo"})
+        pid = prog["programId"]
+        th = threading.Thread(target=lambda: pg.advance_program(self.p, prog, session_factory=_sleep_factory("architect")))
+        th.start()
+        try:
+            run_id = None                                     # wait until the architect's sleep is LIVE
+            for _ in range(60):
+                cur = pg.get_program(self.root, pid)["slices"][0]
+                run_id = cur.get("runId")
+                if run_id and run_id in run_control.active_runs():
+                    break
+                time.sleep(0.1)
+            self.assertTrue(run_id, "slice never recorded a runId")
+            self.assertIn(run_id, run_control.active_runs(), "managed subprocess never registered")
+
+            out = pg.cancel_program(self.p, pid)              # cancel as the UI would
+            th.join(timeout=15)
+            self.assertFalse(th.is_alive(), "advance_program did not return after cancel")
+
+            fresh = pg.get_program(self.root, pid)
+            self.assertEqual(out["status"], pg.STATUS_CANCELLED)                          # program
+            self.assertEqual(fresh["status"], pg.STATUS_CANCELLED)
+            self.assertNotIn(pg.SLICE_RUNNING, [s["status"] for s in fresh["slices"]])    # slice: none running
+            self.assertEqual(ac.load_run(self.root, run_id)["status"], ac.STATUS_CANCELLED)  # autonomous run
+            self.assertNotIn(run_id, run_control.active_runs())                           # process registry cleared
+            tasks = [t for t in self.p.load_tasks() if t.get("episodeId") == fresh["slices"][0].get("episodeId")]
+            self.assertTrue(any(t.get("cancelled") for t in tasks))                       # tasks no longer active
+        finally:
+            run_control.request_cancel(run_id) if run_id else None
+            th.join(timeout=10)
+            if run_id:
+                run_control.reset(run_id)
+
+    def test_terminal_run_status_is_sticky_against_inflight_save(self):
+        rec = ac.init_run(self.p, prompt="x", providers=ECHO, product=False)
+        ac.cancel_run(self.root, rec["runId"])                       # external cancel → cancelled on disk
+        self.assertEqual(ac.load_run(self.root, rec["runId"])["status"], ac.STATUS_CANCELLED)
+        rec["status"], rec["phase"] = ac.STATUS_RUNNING, "ARCHITECT_PLANNING"  # a late relay turn
+        ac.save_run(self.root, rec)
+        self.assertEqual(ac.load_run(self.root, rec["runId"])["status"], ac.STATUS_CANCELLED)  # not resurrected
 
     def test_one_file_docs_prompt_makes_a_single_slice(self):
         for prompt in ("Add exactly one sentence to the README. Also mention the license. And the author.",

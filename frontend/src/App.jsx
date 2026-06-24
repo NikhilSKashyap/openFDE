@@ -120,9 +120,13 @@ export default function App() {
   const refreshCouncilTranscript = useCallback(async () => {
     const seq = ++councilTxSeqRef.current
     const t = await getCouncilTranscript()
-    if (seq !== councilTxSeqRef.current || !t?.ok) return
-    // Don't let an empty/late response wipe a populated transcript (same guard as the prompt rail).
+    if (seq !== councilTxSeqRef.current) return
     setCouncilTranscript(prev => {
+      // A failed/non-ok fetch must never wipe a populated transcript — but on the FIRST load it must
+      // still resolve the "Restoring latest council run…" skeleton to an empty state, never spin forever
+      // (a blocked/cancelled run otherwise hydrates normally, with its terminal turn).
+      if (!t?.ok) return prev || { ok: true, items: [], run: null, program: null, active: false }
+      // Don't let an empty/late response wipe a populated transcript (same guard as the prompt rail).
       const hadContent = (prev?.items?.length || 0) > 0 || prev?.run
       const isEmpty = (t.items?.length || 0) === 0 && !t.run
       return (hadContent && isEmpty) ? prev : t

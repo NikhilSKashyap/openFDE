@@ -140,6 +140,16 @@ def _run_path(repo_root, run_id: str) -> str:
 
 
 def save_run(repo_root, rec: dict) -> dict:
+    # Terminal is STICKY: never let an in-flight relay turn (status=running, saved from the worker
+    # thread) overwrite a run that was already terminated externally — e.g. cancel_run marked it
+    # cancelled while the relay was mid-phase. The UI reads this file, so it must not flicker back to
+    # "running" after a cancel; the worker converges on the terminal status at its next cancel guard.
+    if rec.get("status") == STATUS_RUNNING:
+        prior = load_run(repo_root, rec["runId"])
+        if prior and prior.get("status") in TERMINAL_STATUSES:
+            rec = {**rec, "status": prior["status"], "phase": prior.get("phase", rec.get("phase")),
+                   "activeRole": prior.get("activeRole"),
+                   "blockedReason": prior.get("blockedReason"), "timeoutInfo": prior.get("timeoutInfo")}
     with open(_run_path(repo_root, rec["runId"]), "w", encoding="utf-8") as fh:
         json.dump(rec, fh, indent=2)
     return rec
