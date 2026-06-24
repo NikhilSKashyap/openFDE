@@ -103,6 +103,20 @@ def main() -> None:
     ack_parser.add_argument("--path", default=".",
                             help="Repository path (default: current directory)")
 
+    # Autonomous Program Mode — the session bridge (status) + optional start/continue.
+    program_parser = sub.add_parser("program", help="Autonomous Program Mode — status bridge + start")
+    program_sub = program_parser.add_subparsers(dest="program_command", metavar="<action>")
+    pstatus = program_sub.add_parser("status", help="Show the active program's status for your role (session bridge)")
+    pstatus.add_argument("--role", choices=["architect", "senior-dev", "verifier"], default="architect",
+                         help="Which role's status to print")
+    pstatus.add_argument("--path", default=".", help="Repository path (default: current directory)")
+    pstart = program_sub.add_parser("start", help="Start a program from a prompt file (runs synchronously)")
+    pstart.add_argument("--prompt-file", required=True, help="File holding the high-level product direction")
+    pstart.add_argument("--allow-edits", action="store_true", help="Let the senior dev write files (real commit)")
+    pstart.add_argument("--path", default=".", help="Repository path (default: current directory)")
+    pcontinue = program_sub.add_parser("continue", help="Resume the active blocked program")
+    pcontinue.add_argument("--path", default=".", help="Repository path (default: current directory)")
+
     args = parser.parse_args()
 
     if args.command == "watch":
@@ -164,6 +178,38 @@ def main() -> None:
                 print("Claude Code can now run:  openfde council status --role claude")
         else:
             council_parser.print_help()
+            sys.exit(1)
+    elif args.command == "program":
+        from pathlib import Path
+        from openfde import program as pg
+        from openfde.persistence import Persistence
+        pc = getattr(args, "program_command", None)
+        if pc == "status":
+            prog = pg.active_program(args.path) or pg.latest_program(args.path)
+            print(pg.program_status(prog, args.role))
+        elif pc == "start":
+            try:
+                prompt = Path(args.prompt_file).read_text()
+            except OSError as e:
+                print(f"Cannot read prompt file: {e}")
+                sys.exit(1)
+            persistence = Persistence(Path(args.path) / ".openfde")
+            providers = {"architect": "codex", "srDev": "claude-code", "verifier": "codex"}
+            prog = pg.start_program(persistence, prompt=prompt, providers=providers,
+                                    allow_edits=args.allow_edits)
+            if prog["status"] == pg.STATUS_RUNNING:
+                prog = pg.advance_program(persistence, prog)     # synchronous (real providers)
+            print(pg.program_status(prog, "architect"))
+        elif pc == "continue":
+            prog = pg.active_program(args.path) or pg.latest_program(args.path)
+            if not prog:
+                print("No program to continue.")
+                sys.exit(1)
+            persistence = Persistence(Path(args.path) / ".openfde")
+            prog = pg.continue_program(persistence, prog["programId"])
+            print(pg.program_status(prog, "architect"))
+        else:
+            program_parser.print_help()
             sys.exit(1)
     else:
         parser.print_help()

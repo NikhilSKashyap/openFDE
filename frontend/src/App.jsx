@@ -1004,6 +1004,11 @@ export default function App() {
         setCouncilNonce(n => n + 1)                    // refetch the full transcript + replace snapshot
         if (msg.run?.taskIds?.length) refetchTasks()  // OpenPM advances with the relay
       }
+      else if (msg?.type === 'program') {
+        if (msg.program) setCouncilTranscript(prev => (prev ? { ...prev, program: msg.program } : prev))
+        setCouncilNonce(n => n + 1)                    // refetch transcript (carries program + run)
+        refetchTasks()                                 // program slices move OpenPM cards
+      }
       // A commit landed (the only commit path) — refresh the rail's nested beats,
       // the OpenPM commit cards, and the git timeline so all three stay in sync.
       else if (msg?.type === 'commit_created') {

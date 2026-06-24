@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun, postProgramRun } from '../../api/backend'
 import { runIsLive, runDisplayPhase, runBannerClass } from '../../store/councilRun'
 
 /**
@@ -63,6 +63,17 @@ export default function CouncilChat({ onOpenAgentSettings = null,
     // Real adapters by default (Codex architect/verifier, Claude Code senior dev). allowEdits lets
     // the senior dev write files so the run produces an actual commit; default off (plan-only).
     const res = await postAutonomousCouncilRun(prompt, { allowEdits })
+    setLaunching(false)
+    if (res?.ok) { setQuestion(''); refreshTranscript() }
+  }, [question, launching, allowEdits, refreshTranscript])
+
+  // Run a PROGRAM — OpenFDE decomposes the product direction into ≤3 scoped slices and runs each
+  // through the council loop, auto-advancing on verify. One active program at a time.
+  const runProgram = useCallback(async (q) => {
+    const prompt = (q ?? question).trim()
+    if (!prompt || launching) return
+    setLaunching(true)
+    const res = await postProgramRun(prompt, { allowEdits })
     setLaunching(false)
     if (res?.ok) { setQuestion(''); refreshTranscript() }
   }, [question, launching, allowEdits, refreshTranscript])
@@ -294,8 +305,13 @@ export default function CouncilChat({ onOpenAgentSettings = null,
       <div className="council-run-auto-row">
         <button className="council-run-auto" disabled={!question.trim() || launching}
           onClick={() => runAutonomous()}
-          title="OpenFDE drives the real loop — Codex (architect/verifier) + Claude Code (senior dev) — and streams every turn here">
-          {launching ? 'Starting…' : '▶ Run autonomous council'}
+          title="One scoped task → the council loop (architect → consult → decide → implement → verify), streamed here">
+          {launching ? 'Starting…' : '▶ Run council'}
+        </button>
+        <button className="council-run-auto council-run-program" disabled={!question.trim() || launching}
+          onClick={() => runProgram()}
+          title="A product direction → a managed Program of up to 3 scoped slices, each run through the council loop, auto-advancing on verify">
+          {launching ? '…' : '▶▶ Run Program'}
         </button>
         <label className="council-run-edits" title="Let the senior dev write files and produce a real commit (off = plan only, no repo changes)">
           <input type="checkbox" checked={allowEdits} onChange={e => setAllowEdits(e.target.checked)} />
@@ -329,7 +345,17 @@ function rowAccent(it) {
 }
 
 // Live autonomous-relay banner — who has the baton, what happened last, whether it is stuck/done.
-const BATON_LABEL = { architect: 'Codex (architect)', sr_dev: 'Claude Code (sr dev)', verifier: 'Codex (verifier)' }
+// The baton label is DYNAMIC — derived from the role's assigned provider, never hardcoded.
+const _PROVIDER_DISP = { codex: 'Codex', 'claude-code': 'Claude Code', echo: 'echo' }
+const _ROLE_DISP = { architect: 'architect', sr_dev: 'sr dev', verifier: 'verifier' }
+const _ROLE_KEY = { architect: 'architect', sr_dev: 'srDev', verifier: 'verifier' }
+function batonLabel(run) {
+  const role = run.activeRole
+  const provider = (run.providers || {})[_ROLE_KEY[role]]
+  const rd = _ROLE_DISP[role] || role
+  const pd = _PROVIDER_DISP[provider] || provider
+  return pd ? `${pd} (${rd})` : rd
+}
 function providersLabel(p) {
   const vals = Object.values(p || {})
   if (!vals.length) return ''
@@ -347,7 +373,7 @@ function RunBanner({ run }) {
       <div className="acr-line1">
         <span className="acr-dot" />
         <span className="acr-phase">Autonomous council — {runDisplayPhase(run)}</span>
-        {live && run.activeRole && <span className="acr-baton">{BATON_LABEL[run.activeRole] || run.activeRole} has the baton</span>}
+        {live && run.activeRole && <span className="acr-baton">{batonLabel(run)} has the baton</span>}
         {run.loop > 0 && <span className="acr-loop">loop {run.loop}/{run.maxLoops}</span>}
         {provs && <span className="acr-provs">{provs}</span>}
       </div>
@@ -380,6 +406,36 @@ function LivePhaseRow({ run }) {
   )
 }
 
+// Program banner — the parent arc above the council run: title, slice N/M, per-slice status dots.
+const SLICE_DOT = {
+  verified: 'var(--solid)', running: 'var(--accent-orange)', blocked: 'var(--violation)',
+  failed: 'var(--violation)', queued: 'var(--text-muted)',
+}
+function ProgramBanner({ program }) {
+  if (!program) return null
+  const terminal = ['complete', 'blocked', 'cancelled'].includes(program.status)
+  return (
+    <div className={`pgm-banner pgm-${program.status}`}>
+      <div className="pgm-line1">
+        <span className="pgm-title">Program — {program.title}</span>
+        <span className="pgm-slice">slice {program.sliceIndex}/{program.sliceCount}</span>
+        <span className="pgm-status">{program.status}{program.blockerReason ? ` · ${program.blockerReason}` : ''}</span>
+      </div>
+      {program.currentSliceTitle && !terminal && <div className="pgm-cur">▸ {program.currentSliceTitle}</div>}
+      {(program.slices || []).length > 0 && (
+        <div className="pgm-slices">
+          {program.slices.map((s, i) => (
+            <span key={s.sliceId} className="pgm-sl" title={`${s.title} — ${s.status}`}>
+              <span className="pgm-sl-dot" style={{ background: SLICE_DOT[s.status] || 'var(--text-muted)' }} />{i + 1}
+            </span>
+          ))}
+        </div>
+      )}
+      {program.finalReport && terminal && <div className="pgm-final">{program.finalReport}</div>}
+    </div>
+  )
+}
+
 function CouncilTranscript({ data, launching = false }) {
   const [open, setOpen] = useState({})
   const [showPrev, setShowPrev] = useState(false)
@@ -398,6 +454,7 @@ function CouncilTranscript({ data, launching = false }) {
   const noRuns = items.length === 0 && !run && !launching
   return (
     <div className="ctx">
+      <ProgramBanner program={data.program} />
       <RunBanner run={run} />
       <div className="ctx-head">
         <span className="ctx-title">Council inbox</span>

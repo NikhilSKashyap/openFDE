@@ -112,8 +112,8 @@ class AutonomousCouncilTest(unittest.TestCase):
     def test_transcript_role_order(self):
         self._run()
         labels = [t["label"] for t in ec.load_recorded_transcript(self.root)]
-        self.assertEqual(labels, ["user", "architect (Codex)", "sr dev (Claude Code)",
-                                  "architect (Codex)", "sr dev (Claude Code)", "verifier (Codex)", "system"])
+        self.assertEqual(labels, ["user", "architect (echo)", "sr dev (echo)",
+                                  "architect (echo)", "sr dev (echo)", "verifier (echo)", "system"])
         kinds = [t["kind"] for t in ec.load_recorded_transcript(self.root)]
         self.assertEqual(kinds, ["prompt", "proposal", "consultation", "decision",
                                  "implementation", "verified", "ready_to_push"])
@@ -122,7 +122,7 @@ class AutonomousCouncilTest(unittest.TestCase):
         self._run()
         tx = ec.build_council_transcript(self.root)
         labels = [it["label"] for it in tx["items"]]
-        for lbl in ("architect (Codex)", "sr dev (Claude Code)", "verifier (Codex)"):
+        for lbl in ("architect (echo)", "sr dev (echo)", "verifier (echo)"):
             self.assertIn(lbl, labels)
         self.assertFalse(tx["active"])                                 # VERIFIED → inactive
 
@@ -317,7 +317,7 @@ class CouncilNoiseMigrationTest(unittest.TestCase):
         self.assertEqual(c["status"], ac.STATUS_READY_TO_PUSH)
         self.assertEqual(c["edges"], ["proposed", "consulted", "decided", "implemented", "verified"])
         labels = [t["label"] for t in c["turns"]]
-        for lbl in ("user", "architect (Codex)", "sr dev (Claude Code)", "verifier (Codex)", "system"):
+        for lbl in ("user", "architect (echo)", "sr dev (echo)", "verifier (echo)", "system"):
             self.assertIn(lbl, labels)
 
 

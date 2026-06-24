@@ -347,3 +347,73 @@ def default_session_factory(role: str, provider: str, *, run_dir=None) -> AgentS
     """Factory for echo-only / test use (no repo binding). Real providers still report availability
     via :func:`build_session`, but the relay should prefer :func:`session_factory_for` for real runs."""
     return build_session(role, provider, run_dir=run_dir)
+
+
+# ── Repo session discovery — route a role to a real local session for the watched repo ──────────────
+def _git_root(repo_root) -> str:
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else str(repo_root)
+    except (OSError, subprocess.SubprocessError):
+        return str(repo_root)
+
+
+def _mtime_iso(path) -> str:
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc).isoformat()
+    except OSError:
+        return ""
+
+
+def discover_repo_sessions(repo_root, *, home=None) -> list:
+    """Local agent sessions/transcripts whose cwd/repo matches the watched repo (or its git root), per
+    provider, NEWEST-FIRST; the latest match per provider is the default ``selected``. Cached to
+    ``.openfde/agent_sessions.json``. Honest: empty when none — the role then falls back to a managed
+    subprocess (if the provider supports it), never a pretend session. No native chat injection."""
+    from openfde import prompt_capture as pc
+    repo_root = str(repo_root)
+    git_root = _git_root(repo_root)
+    roots = {os.path.realpath(repo_root), os.path.realpath(git_root)}
+    out, seen = [], set()
+
+    # Claude Code — the encoded-cwd directory IS the repo match (all sessions in it have this cwd).
+    for root in {repo_root, git_root}:
+        d = pc.claude_projects_dir(root, home)
+        try:
+            files = list(d.glob("*.jsonl")) if d.exists() else []
+        except OSError:
+            files = []
+        for f in files:
+            if str(f) in seen:
+                continue
+            seen.add(str(f))
+            out.append({"provider": "claude-code", "sessionId": f.stem, "path": str(f),
+                        "repoRoot": root, "lastActivity": _mtime_iso(f), "selected": False})
+
+    # Codex — read each rollout's session_meta cwd and match the git root (cap the scan to recent ones).
+    try:
+        rollouts = sorted(pc.codex_transcripts(home), key=os.path.getmtime, reverse=True)[:60]
+    except (OSError, ValueError):
+        rollouts = []
+    for f in rollouts:
+        ctx = pc._codex_init_ctx(f)
+        cwd = ctx.get("cwd")
+        if cwd and os.path.realpath(cwd) in roots:
+            out.append({"provider": "codex", "sessionId": ctx["sessionId"], "path": str(f),
+                        "repoRoot": cwd, "lastActivity": _mtime_iso(f), "selected": False})
+
+    out.sort(key=lambda c: c["lastActivity"], reverse=True)
+    defaulted = set()
+    for c in out:
+        c["selected"] = c["provider"] not in defaulted   # default = latest match per provider
+        defaulted.add(c["provider"])
+
+    try:
+        cache = os.path.join(repo_root, ".openfde", "agent_sessions.json")
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w", encoding="utf-8") as fh:
+            json.dump(out, fh, indent=2)
+    except OSError:
+        pass
+    return out

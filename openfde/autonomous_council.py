@@ -458,9 +458,31 @@ def _verdict_from_text(text: str) -> str:
     return council_bus.STATUS_VERIFIED
 
 
+# ── Generic role/provider labels — NO hardcoded Codex=Architect / Claude=Senior Dev ──
+# The transcript/banner label for a role is derived from the ASSIGNED provider, so "architect (Codex)"
+# only renders when the architect provider is codex; swap providers and the labels follow.
+_PROVIDER_DISPLAY = {"codex": "Codex", "claude-code": "Claude Code", "echo": "echo"}
+_ROLE_DISPLAY = {"architect": "architect", "sr_dev": "sr dev", "verifier": "verifier"}
+
+
+def _role_label(role: str, provider: str) -> str:
+    rd = _ROLE_DISPLAY.get(role, role)
+    pd = _PROVIDER_DISPLAY.get((provider or "").lower(), provider or "")
+    return f"{rd} ({pd})" if pd else rd
+
+
+def _labels_for(providers: dict) -> dict:
+    """The display label per council role for a providers map (architect/srDev/verifier)."""
+    p = providers or {}
+    return {"architect": _role_label("architect", p.get("architect")),
+            "sr_dev": _role_label("sr_dev", p.get("srDev") or p.get("sr_dev")),
+            "verifier": _role_label("verifier", p.get("verifier"))}
+
+
 def _add_turn(repo_root, rec, role, label, kind, **fields) -> dict:
     """Record a council turn. Always updates the run record (debug); for PRODUCT runs it also appends
-    to the durable Orient transcript (a smoke run never pollutes the inbox)."""
+    to the durable Orient transcript (a smoke run never pollutes the inbox). Stamps program/slice ids
+    so OpenPM + Story can group a program's slices."""
     summary = fields.get("summary", "")
     at = _now()
     compact = {"role": role, "label": label, "kind": kind, "summary": summary, "at": at,
@@ -471,7 +493,8 @@ def _add_turn(repo_root, rec, role, label, kind, **fields) -> dict:
     if rec.get("product") and rec.get("episodeId"):
         external_council.append_transcript_turn(repo_root, {
             "role": role, "label": label, "kind": kind, "episodeId": rec["episodeId"],
-            "taskIds": rec["taskIds"], "runId": rec["runId"], "boxIds": rec["boxIds"], "at": at, **fields})
+            "taskIds": rec["taskIds"], "runId": rec["runId"], "boxIds": rec["boxIds"],
+            "programId": rec.get("programId"), "sliceId": rec.get("sliceId"), "at": at, **fields})
     return compact
 
 
@@ -481,7 +504,8 @@ def _add_edge(rec, edge, role):
 
 # ── Public API: init → advance → run ──────────────────────────────────────────
 def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
-             allow_edits=False, product=True, parent_episode_id=None, run_id=None) -> dict:
+             allow_edits=False, product=True, parent_episode_id=None, run_id=None,
+             program_id=None, slice_id=None, slice_title=None, acceptance=None) -> dict:
     """Create the run record (+ for a PRODUCT run: the parent episode, five OpenPM phase cards, and the
     bus work item) and record the opening user turn. FAST + synchronous — returns the ids the API
     responds with before the relay advances. Reuses OpenFDE ids; the runId is the run's own.
@@ -500,6 +524,7 @@ def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, 
         "runId": run_id, "episodeId": "", "taskIds": [], "boxIds": box_ids, "prompt": prompt,
         "title": "", "providers": providers, "maxLoops": int(max_loops), "autoPush": bool(auto_push),
         "allowEdits": bool(allow_edits), "product": bool(product), "parentEpisodeId": parent_episode_id,
+        "programId": program_id, "sliceId": slice_id, "sliceTitle": slice_title,
         "status": STATUS_RUNNING, "phase": PHASE_ARCHITECT_PLANNING, "activeRole": "architect",
         "loop": 0, "latestCommit": None, "blockedReason": None,
         "storyEvents": [], "turns": [], "latestTurn": None, "turnCount": 0,
@@ -525,6 +550,16 @@ def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, 
             _patch_work_item_header(repo_root, episode_id, {"runId": run_id})
             _attach_run_to_episode(persistence, episode_id, run_id)
         rec["title"] = title
+        # Stamp program/slice provenance on the episode + phase cards so OpenPM + Story group a
+        # program's slices under their parent (general — null for a plain single run).
+        if program_id or slice_id:
+            ep = persistence.get_episode(episode_id)
+            if ep:
+                ep["programId"], ep["sliceId"], ep["sliceTitle"] = program_id, slice_id, slice_title
+                persistence.upsert_episode(ep)
+            for t in persistence.load_tasks():
+                if t.get("episodeId") == episode_id:
+                    persistence.update_task(t["id"], {"programId": program_id, "sliceId": slice_id})
 
     _add_turn(repo_root, rec, "user", "user", "prompt", summary=prompt[:140], body=prompt)
     _update_episode_council(persistence, rec)
@@ -602,6 +637,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
     factory = session_factory or agent_sessions.session_factory_for(
         repo_root, allow_edits=rec.get("allowEdits", False), run_id=rec["runId"])
     rdir = run_dir(repo_root, rec["runId"])
+    labels = _labels_for(rec["providers"])   # dynamic per assigned provider — never hardcoded
 
     sessions = {}
     try:
@@ -619,7 +655,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         _set_phase_task(persistence, rec, "plan", "doing", "pending")
         _emit(persistence, rec, on_event)
         plan = arch.send(_plan_prompt(rec["prompt"]), {"phase": "plan", "runId": rec["runId"]})
-        _add_turn(repo_root, rec, "architect", "architect (Codex)", "proposal",
+        _add_turn(repo_root, rec, "architect", labels["architect"], "proposal",
                   summary=_first_line(plan), body=plan)
         _add_edge(rec, EDGE_PROPOSED, "architect")
         _set_phase_task(persistence, rec, "plan", "done", "passed")
@@ -630,7 +666,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         _set_phase_task(persistence, rec, "consult", "doing", "pending")
         _emit(persistence, rec, on_event)
         consult = srdev.send(_consult_prompt(plan), {"phase": "consult", "runId": rec["runId"]})
-        _add_turn(repo_root, rec, "sr_dev", "sr dev (Claude Code)", "consultation",
+        _add_turn(repo_root, rec, "sr_dev", labels["sr_dev"], "consultation",
                   summary=_first_line(consult), body=consult)
         _add_edge(rec, EDGE_CONSULTED, "sr_dev")
         _set_phase_task(persistence, rec, "consult", "done", "passed")
@@ -640,7 +676,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_DECIDING, "architect"
         _emit(persistence, rec, on_event)
         decision = arch.send(_decide_prompt(consult, rec["prompt"]), {"phase": "decide", "runId": rec["runId"]})
-        _add_turn(repo_root, rec, "architect", "architect (Codex)", "decision",
+        _add_turn(repo_root, rec, "architect", labels["architect"], "decision",
                   summary=_first_line(decision), body=decision)
         _add_edge(rec, EDGE_DECIDED, "architect")
         _emit(persistence, rec, on_event)
@@ -665,7 +701,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
                 rec["latestCommit"] = sha
                 _attach_commit_to_episode(persistence, rec["episodeId"], sha)
             is_fix = rec["loop"] > 0
-            _add_turn(repo_root, rec, "sr_dev", "sr dev (Claude Code)", "implementation",
+            _add_turn(repo_root, rec, "sr_dev", labels["sr_dev"], "implementation",
                       summary=_first_line(impl), body=impl, latestCommit=(sha or None), checks=checks)
             _add_edge(rec, EDGE_FIXED if is_fix else EDGE_IMPLEMENTED, "sr_dev")
             _set_phase_task(persistence, rec, "implement", "done" if sha else "doing",
@@ -684,7 +720,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
                                   {"phase": "verify", "commit": sha, "loop": rec["loop"]})
             rec["loop"] += 1
             if _verdict_from_text(vtext) == council_bus.STATUS_VERIFIED:
-                _add_turn(repo_root, rec, "verifier", "verifier (Codex)", "verified",
+                _add_turn(repo_root, rec, "verifier", labels["verifier"], "verified",
                           summary=_first_line(vtext), body=vtext, latestCommit=(sha or None),
                           findings=[_first_line(vtext)] if vtext.strip() else [])
                 _add_edge(rec, EDGE_VERIFIED, "verifier")
@@ -697,7 +733,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
                 return rec
 
             # changes requested
-            _add_turn(repo_root, rec, "verifier", "verifier (Codex)", "changes_requested",
+            _add_turn(repo_root, rec, "verifier", labels["verifier"], "changes_requested",
                       summary=_first_line(vtext), body=vtext, latestCommit=(sha or None),
                       findings=[_first_line(vtext)] if vtext.strip() else ["changes requested"])
             _add_edge(rec, EDGE_CHANGES_REQUESTED, "verifier")
@@ -721,11 +757,13 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
 
 def run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
         allow_edits=False, product=True, parent_episode_id=None, run_id=None,
+        program_id=None, slice_id=None, slice_title=None, acceptance=None,
         session_factory=None, on_event=None) -> dict:
     """Synchronous convenience: init + advance to terminal. The testable core of the relay."""
     rec = init_run(persistence, prompt=prompt, box_ids=box_ids, providers=providers,
                    max_loops=max_loops, auto_push=auto_push, allow_edits=allow_edits,
-                   product=product, parent_episode_id=parent_episode_id, run_id=run_id)
+                   product=product, parent_episode_id=parent_episode_id, run_id=run_id,
+                   program_id=program_id, slice_id=slice_id, slice_title=slice_title, acceptance=acceptance)
     return advance_run(persistence, rec, session_factory=session_factory, on_event=on_event)
 
 

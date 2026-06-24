@@ -912,10 +912,11 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         (user → architect proposal → sr-dev handoffs → verifier verdicts → pending wakeup) built from
         the bus + deliveries + council_chat. Never invents turns; ``active: false`` when no bus. Also
         carries ``run`` — the latest autonomous-relay summary (phase / role / loop) for the banner."""
-        from openfde import autonomous_council, external_council
+        from openfde import autonomous_council, external_council, program as pg
         return web.json_response({
             **external_council.build_council_transcript(path, council_chat=persistence.load_council_chat()),
             "run": autonomous_council.latest_run_summary(path),
+            "program": pg.latest_program_summary(path),     # active Program (title / slice N/M) or null
         })
 
     # ================================================================== #
@@ -992,6 +993,93 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         await manager.broadcast({"type": "autonomous_council", "run": autonomous_council.run_summary(rec),
                                  "at": time.time()})
         return web.json_response({"ok": True, "run": autonomous_council.run_summary(rec)})
+
+    # ================================================================== #
+    #  REST — /api/programs  (Autonomous Program Mode v1)                 #
+    # ================================================================== #
+    # One product direction → a managed Program of ≤3 scoped slices, each run
+    # through the autonomous council loop. One active program at a time; no
+    # auto-push; generic role/provider routing. Slices auto-advance on verify.
+
+    def _program_on_event(loop):
+        def on_event(summary):
+            msg = {"type": "program", "program": summary, "at": time.time()}
+            try:
+                asyncio.run_coroutine_threadsafe(manager.broadcast(msg), loop)
+            except RuntimeError:
+                pass
+        return on_event
+
+    async def post_programs_run(request: web.Request) -> web.Response:
+        """Plan + start a Program: decompose the direction into slices synchronously (ids come back
+        immediately), then run the slices through the council loop off the event loop."""
+        from openfde import program as pg
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            return web.json_response({"ok": False, "error": "prompt is required"}, status=400)
+        providers = body.get("providers") or {"architect": "codex", "srDev": "claude-code", "verifier": "codex"}
+        program = pg.start_program(persistence, prompt=prompt, providers=providers,
+                                   allow_edits=bool(body.get("allowEdits", False)),
+                                   max_loops=int(body.get("maxLoops") or 2), title=body.get("title"))
+        if program["status"] == pg.STATUS_RUNNING:
+            loop = asyncio.get_running_loop()
+            on_event = _program_on_event(loop)
+
+            async def _advance():
+                await asyncio.to_thread(pg.advance_program, persistence, program, on_event=on_event)
+                await manager.broadcast({"type": "tasks_updated"})
+
+            asyncio.create_task(_advance())
+            on_event(pg.program_summary(program))
+        return web.json_response({"ok": True, "program": pg.program_summary(program)})
+
+    async def get_programs(request: web.Request) -> web.Response:
+        from openfde import program as pg
+        return web.json_response({"ok": True, "programs": [pg.program_summary(p) for p in pg.load_programs(path)],
+                                  "active": pg.latest_program_summary(path)})
+
+    async def get_program_one(request: web.Request) -> web.Response:
+        from openfde import program as pg
+        prog = pg.get_program(path, request.match_info["program_id"])
+        if not prog:
+            return web.json_response({"ok": False, "error": "unknown program"}, status=404)
+        return web.json_response({"ok": True, "program": pg.program_summary(prog)})
+
+    async def post_program_cancel(request: web.Request) -> web.Response:
+        from openfde import program as pg
+        prog = pg.cancel_program(path, request.match_info["program_id"])
+        if not prog:
+            return web.json_response({"ok": False, "error": "unknown program"}, status=404)
+        await manager.broadcast({"type": "program", "program": pg.program_summary(prog), "at": time.time()})
+        return web.json_response({"ok": True, "program": pg.program_summary(prog)})
+
+    async def post_program_continue(request: web.Request) -> web.Response:
+        from openfde import program as pg
+        prog = pg.get_program(path, request.match_info["program_id"])
+        if not prog:
+            return web.json_response({"ok": False, "error": "unknown program"}, status=404)
+        loop = asyncio.get_running_loop()
+        on_event = _program_on_event(loop)
+
+        async def _resume():
+            await asyncio.to_thread(pg.continue_program, persistence, prog["programId"], on_event=on_event)
+            await manager.broadcast({"type": "tasks_updated"})
+
+        asyncio.create_task(_resume())
+        return web.json_response({"ok": True, "program": pg.program_summary(prog), "status": "resuming"})
+
+    # ================================================================== #
+    #  REST — /api/agent-sessions  (repo-matching agent session discovery) #
+    # ================================================================== #
+    async def get_agent_sessions(request: web.Request) -> web.Response:
+        """Local agent sessions/transcripts whose cwd/repo matches the watched repo, per provider,
+        newest-first — so a role can be routed to a real repo session (or fall back to managed)."""
+        from openfde import agent_sessions
+        return web.json_response({"ok": True, "sessions": agent_sessions.discover_repo_sessions(path)})
 
     # ================================================================== #
     #  REST — /api/issues/github  (durable intent v1)                     #
@@ -5176,6 +5264,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/autonomous-council/run", post_autonomous_council_run)
     app.router.add_get( "/api/autonomous-council/runs/{run_id}", get_autonomous_council_run)
     app.router.add_post("/api/autonomous-council/runs/{run_id}/cancel", post_autonomous_council_cancel)
+    app.router.add_post("/api/programs/run", post_programs_run)
+    app.router.add_get( "/api/programs", get_programs)
+    app.router.add_get( "/api/programs/{program_id}", get_program_one)
+    app.router.add_post("/api/programs/{program_id}/cancel", post_program_cancel)
+    app.router.add_post("/api/programs/{program_id}/continue", post_program_continue)
+    app.router.add_get( "/api/agent-sessions", get_agent_sessions)
     app.router.add_get( "/api/issues/github/list",    get_github_issues)
     app.router.add_post("/api/issues/github/import",  post_github_issue_import)
     app.router.add_post("/api/issues/reproduce",       post_issue_reproduce)

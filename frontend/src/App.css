@@ -3514,6 +3514,24 @@
   white-space: nowrap; cursor: pointer; user-select: none; }
 .council-run-edits input { margin: 0; cursor: pointer; }
 .acr-provs { font-size: 9px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+.council-run-program { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); }
+.council-run-program:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+/* Program banner — the parent arc above the council run. */
+.pgm-banner { margin-bottom: 8px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  border-left-width: 3px; border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.pgm-banner.pgm-complete { border-left-color: var(--solid); background: color-mix(in srgb, var(--solid) 7%, transparent); }
+.pgm-banner.pgm-blocked, .pgm-banner.pgm-cancelled { border-left-color: var(--violation);
+  background: color-mix(in srgb, var(--violation) 7%, transparent); }
+.pgm-line1 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.pgm-title { font-size: 11.5px; font-weight: 700; color: var(--text); }
+.pgm-slice { font-size: 9.5px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; }
+.pgm-status { font-size: 9.5px; color: var(--accent); font-weight: 600; }
+.pgm-cur { margin-top: 3px; font-size: 11px; color: var(--text-muted); }
+.pgm-slices { display: flex; gap: 8px; margin-top: 5px; }
+.pgm-sl { display: inline-flex; align-items: center; gap: 3px; font-size: 9px; color: var(--text-muted); }
+.pgm-sl-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.pgm-final { margin-top: 4px; font-size: 10.5px; color: var(--text-muted); }
 .council-run-hint { font-size: 9.5px; color: var(--text-muted); line-height: 1.4; margin-top: 4px; padding: 0 2px; }
 .acr-banner { margin-bottom: 8px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border);
   border-left-width: 3px; background: var(--surface-2); }

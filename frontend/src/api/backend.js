@@ -117,6 +117,16 @@ export const postAutonomousCouncilRun = (prompt, opts = {}) =>
   })
 export const getAutonomousCouncilRun = (runId) => apiFetch(`/api/autonomous-council/runs/${runId}`)
 
+// Autonomous Program Mode — a product direction → a managed program of ≤3 scoped council slices.
+export const postProgramRun = (prompt, opts = {}) =>
+  apiFetch('/api/programs/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, ...opts }),
+  })
+export const getPrograms = () => apiFetch('/api/programs')
+export const getAgentSessions = () => apiFetch('/api/agent-sessions')
+
 /**
  * Persist the canvas state (boxes and arrows only; Sets are not serialisable).
  *
