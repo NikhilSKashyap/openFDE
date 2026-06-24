@@ -195,6 +195,28 @@ class AutonomousCouncilTest(unittest.TestCase):
         self.assertEqual(rec["status"], ac.STATUS_RUNNING)
         self.assertEqual(ac.load_run(self.root, rec["runId"])["runId"], rec["runId"])
 
+    def test_run_summary_reports_terminal_after_completion(self):
+        # A run that advanced through SR_DEV_CONSULTING etc. must report a TERMINAL summary once done —
+        # not an older in-flight phase/role — and survive a reload from disk (the Orient banner truth).
+        rec = self._run()
+        summ = ac.run_summary(rec)
+        self.assertEqual((summ["status"], summ["phase"]), (ac.STATUS_READY_TO_PUSH, ac.PHASE_READY_TO_PUSH))
+        self.assertFalse(summ["running"])
+        self.assertIsNone(summ["activeRole"])
+        self.assertEqual(summ["latestTurn"]["kind"], "ready_to_push")    # terminal turn, not in-flight
+        reloaded = ac.latest_run_summary(self.root)                      # reload from run.json
+        self.assertEqual(reloaded["status"], ac.STATUS_READY_TO_PUSH)
+        self.assertFalse(reloaded["running"])
+        self.assertIsNone(reloaded["activeRole"])
+
+    def test_blocked_run_summary_is_terminal_not_in_flight(self):
+        f = _echo_factory({"verifier": ["CHANGES_REQUESTED: nope"]})
+        rec = self._run(session_factory=f, max_loops=1)
+        summ = ac.run_summary(rec)
+        self.assertEqual(summ["status"], ac.STATUS_BLOCKED_NEEDS_HUMAN)
+        self.assertFalse(summ["running"])
+        self.assertIsNone(summ["activeRole"])
+
     def test_auto_push_hands_off_to_cc_to_push(self):
         rec = self._run(auto_push=True)
         self.assertEqual(rec["status"], ac.STATUS_VERIFIED)

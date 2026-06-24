@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun } from '../../api/backend'
+import { runIsLive, runDisplayPhase, runBannerClass } from '../../store/councilRun'
 
 /**
  * CouncilChat — the read-only brain of Orient, as a real chat thread (not a single answer card).
@@ -328,12 +329,6 @@ function rowAccent(it) {
 }
 
 // Live autonomous-relay banner — who has the baton, what happened last, whether it is stuck/done.
-const PHASE_LABEL = {
-  USER_PROMPT: 'queued', ARCHITECT_PLANNING: 'architect planning', SR_DEV_CONSULTING: 'sr dev consulting',
-  ARCHITECT_DECIDING: 'architect deciding', SR_DEV_IMPLEMENTING: 'sr dev implementing',
-  CODEX_VERIFYING: 'verifier verifying', CHANGES_REQUESTED: 'changes requested',
-  VERIFIED: 'verified', READY_TO_PUSH: 'ready to push', BLOCKED: 'blocked',
-}
 const BATON_LABEL = { architect: 'Codex (architect)', sr_dev: 'Claude Code (sr dev)', verifier: 'Codex (verifier)' }
 function providersLabel(p) {
   const vals = Object.values(p || {})
@@ -343,15 +338,16 @@ function providersLabel(p) {
 }
 function RunBanner({ run }) {
   if (!run) return null
-  const blocked = String(run.status || '').startsWith('blocked')
-  const cls = run.running ? 'running' : (blocked ? 'blocked' : 'done')
+  // The banner reflects the run's TRUE state: once finished it shows the terminal status (from
+  // councilRun, which reads status — never a stale in-flight phase). The baton only shows while live.
+  const live = runIsLive(run)
   const provs = providersLabel(run.providers)
   return (
-    <div className={`acr-banner acr-${cls}`}>
+    <div className={`acr-banner acr-${runBannerClass(run)}`}>
       <div className="acr-line1">
         <span className="acr-dot" />
-        <span className="acr-phase">Autonomous council — {PHASE_LABEL[run.phase] || run.phase}</span>
-        {run.running && run.activeRole && <span className="acr-baton">{BATON_LABEL[run.activeRole] || run.activeRole} has the baton</span>}
+        <span className="acr-phase">Autonomous council — {runDisplayPhase(run)}</span>
+        {live && run.activeRole && <span className="acr-baton">{BATON_LABEL[run.activeRole] || run.activeRole} has the baton</span>}
         {run.loop > 0 && <span className="acr-loop">loop {run.loop}/{run.maxLoops}</span>}
         {provs && <span className="acr-provs">{provs}</span>}
       </div>
@@ -445,7 +441,7 @@ function CouncilTranscript({ data, launching = false }) {
           </div>
         )
       })}
-      {run?.running && <LivePhaseRow run={run} />}
+      {runIsLive(run) && <LivePhaseRow run={run} />}
       {prev.length > 0 && (
         <div className="ctx-prev">
           <button className="ctx-prev-toggle" onClick={() => setShowPrev(s => !s)}>

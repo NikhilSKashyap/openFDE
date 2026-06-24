@@ -996,7 +996,12 @@ export default function App() {
         if (msg.taskIds?.length) refetchTasks()       // OpenPM moved on a verdict
       }
       else if (msg?.type === 'autonomous_council') {
-        setCouncilNonce(n => n + 1)                    // each relay turn → refresh transcript + run banner
+        // Apply the event's run snapshot IMMEDIATELY (it is the freshest truth) so the banner flips to
+        // the real phase / terminal state without waiting on the racing refetch — a finished run must
+        // never keep showing an older in-flight phase. We replace `run` wholesale, never merge the old
+        // phase. The refetch below then reconciles the full transcript (items).
+        if (msg.run) setCouncilTranscript(prev => (prev ? { ...prev, run: msg.run } : prev))
+        setCouncilNonce(n => n + 1)                    // refetch the full transcript + replace snapshot
         if (msg.run?.taskIds?.length) refetchTasks()  // OpenPM advances with the relay
       }
       // A commit landed (the only commit path) — refresh the rail's nested beats,
