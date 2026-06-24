@@ -183,6 +183,11 @@ is the source of truth. See `AGENTS.md` for the full protocol. _Verify:_ running
 `▶ Resume council handoff ...` / inbox banner when work is pending, or
 `No active council handoff.` on a clean checkout.
 
+A single autonomous council run is recorded as one parent episode. Inside that
+episode, the role turns stay ordered as user → Architect → Senior Dev → Verifier.
+OpenPM tracks the phase cards against that same parent episode, so the council
+timeline and OpenPM work view describe one shared lifecycle.
+
 ### Codex (local CLI): keyless thinking roles
 
 Set **Architect** and/or **Verifier** to provider **Codex (local CLI)**.
