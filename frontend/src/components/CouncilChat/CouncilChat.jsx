@@ -392,7 +392,7 @@ function CouncilTranscript({ data, launching = false }) {
     return (
       <div className="ctx">
         <div className="ctx-head"><span className="ctx-title">Council inbox</span></div>
-        <div className="ctx-skeleton">{launching ? 'Starting autonomous council…' : 'Loading latest council run…'}</div>
+        <div className="ctx-skeleton">{launching ? 'Starting autonomous council…' : 'Restoring latest council run…'}</div>
       </div>
     )
   }

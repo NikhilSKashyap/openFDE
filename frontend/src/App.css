@@ -3497,6 +3497,10 @@
   padding: 2px 2px 4px; }
 .ctx-prev-toggle:hover { color: var(--text); }
 .ctx-prev-row { opacity: 0.55; }
+/* OpenPM boot skeleton — shown while /api/tasks is still confirming, never "0 done". */
+.pm-skeleton-card { height: 34px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border);
+  animation: pm-shimmer 1.4s ease-in-out infinite; }
+@keyframes pm-shimmer { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.75; } }
 
 /* Autonomous relay — "Run autonomous council" launcher + the live run banner. */
 .council-run-auto-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }

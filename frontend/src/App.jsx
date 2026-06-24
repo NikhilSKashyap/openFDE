@@ -20,6 +20,7 @@ import { pickPrimaryFn } from './lib/flowResolve'
 import { watchActivityTargets } from './lib/watchTarget'
 import { useCanvasState } from './store/canvasState'
 import { usePMState } from './store/pmState'
+import { HYDRATION, resolveHydration } from './store/hydration'
 import {
   isBackendAvailable,
   getState, putState, getExternalCouncilStatus,
@@ -134,6 +135,9 @@ export default function App() {
   // (a module can only EXPAND to show files/functions once the arch is present).
   const archGraphRef = useRef(null)
   const [tasks, pmDispatch] = usePMState()
+  // OpenPM hydration readiness — drives "Restoring task board…" vs a real "0 done" empty state, so the
+  // board never flashes a false-empty before /api/tasks has confirmed.
+  const [tasksHydration, setTasksHydration] = useState(HYDRATION.LOADING)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [raiseOpen, setRaiseOpen] = useState(false)   // top-bar "Raise OpenFDE issue"
   const [panelMode, setPanelMode] = useState('Agent')
@@ -351,7 +355,11 @@ export default function App() {
   const refetchTasks = async () => {
     if (document.hidden) return
     const savedTasks = await getTasks()
-    if (Array.isArray(savedTasks) && savedTasks.length > 0) {
+    const responded = Array.isArray(savedTasks)
+    // Cache-first: a confirmed response (even an empty one) sets readiness; a transient/null never
+    // downgrades it. We still only DISPATCH non-empty (the reducer keeps the board on a transient).
+    setTasksHydration(prev => resolveHydration(prev, { responded, hasData: responded && savedTasks.length > 0 }))
+    if (responded && savedTasks.length > 0) {
       skipTasksSaveRef.current = true
       pmDispatch({ type: 'HYDRATE_TASKS', tasks: savedTasks })
     }
@@ -774,9 +782,13 @@ export default function App() {
       // ── DEFERRED: not needed for the first canvas paint ───────────────────────
       // Hydrate tasks — only when backend has data (non-empty task list)
       const savedTasks = await getTasks()
-      if (!cancelled && savedTasks?.length > 0) {
-        skipTasksSaveRef.current = true
-        pmDispatch({ type: 'HYDRATE_TASKS', tasks: savedTasks })
+      if (!cancelled) {
+        const responded = Array.isArray(savedTasks)
+        setTasksHydration(prev => resolveHydration(prev, { responded, hasData: responded && savedTasks.length > 0 }))
+        if (responded && savedTasks.length > 0) {
+          skipTasksSaveRef.current = true
+          pmDispatch({ type: 'HYDRATE_TASKS', tasks: savedTasks })
+        }
       }
 
       // Hydrate persisted OpenFDE events into the Timeline (oldest-first from
@@ -2379,6 +2391,7 @@ export default function App() {
               onSelectConcept={onSelectConcept}
               highlightTags={highlightTags}
               tasks={tasks}
+              tasksHydration={tasksHydration}
               pmDispatch={pmDispatch}
               designEvents={designEvents}
               onTaskEvent={onTaskEvent}

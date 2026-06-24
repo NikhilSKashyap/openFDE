@@ -159,7 +159,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
       )}
 
       {!graph ? (
-        <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>Restoring Story…</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>Restoring story memory…</div>
       ) : (confirmed && concepts.length === 0) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12, lineHeight: 1.5 }}>
           No concepts yet. Prompt episodes (captured from any agent, or landed through OpenFDE)
@@ -170,7 +170,7 @@ export default function Story({ episodes = [], onSpotlightEpisode, onSpotlightCo
         // Cached/boot says empty but the authoritative full graph hasn't confirmed yet — never
         // claim "No concepts yet" here.
         <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>
-          {graph.building ? 'Restoring Story…' : 'Refreshing full Story…'}
+          {graph.building ? 'Restoring story memory…' : 'Refreshing full Story…'}
         </div>
       ) : tellMode ? (
         <div style={{ display: 'flex', flex: 1, minHeight: 0, gap: 10 }}>

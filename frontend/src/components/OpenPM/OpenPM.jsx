@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { getTasks, importGithubIssue, reproduceIssue } from '../../api/backend'
+import { surfaceView } from '../../store/hydration'
 
 const COLS = [
   { id: 'todo',    label: 'To Do' },
@@ -29,6 +30,7 @@ const verifyShort = ch => VERIFY_SHORT[ch.id] || (ch.id || 'check').replace(/-/g
 // ── OpenPM ────────────────────────────────────────────────────────────
 export default function OpenPM({
   tasks,
+  hydration = 'live',
   pmDispatch,
   canvasState,
   canvasDispatch,
@@ -181,6 +183,9 @@ export default function OpenPM({
 
   const totalOpen = tasks.filter(t => t.column !== 'done').length
   const totalDone = tasks.filter(t => t.column === 'done').length
+  // Never claim "0 open · 0 done" until /api/tasks confirms an empty board — show a restoring state
+  // while hydration is still pending (boot memory must feel present immediately).
+  const restoring = surfaceView(hydration, tasks.length > 0) === 'restoring'
 
   return (
     <div style={{
@@ -193,7 +198,7 @@ export default function OpenPM({
           OpenPM
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          {totalOpen} open · {totalDone} done
+          {restoring ? 'Restoring task board…' : `${totalOpen} open · ${totalDone} done`}
         </span>
         {filterTags && (
           <button
@@ -282,7 +287,15 @@ export default function OpenPM({
 
       {/* Board */}
       <div style={{ display: 'flex', gap: 8, flex: 1, overflow: 'hidden', minHeight: 0 }}>
-        {COLS.map(col => {
+        {restoring && COLS.map(col => (
+          <div key={`sk-${col.id}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: colHeaderColor[col.id], textTransform: 'uppercase',
+              letterSpacing: '0.4px', padding: '0 2px 6px', opacity: 0.55 }}>{col.label}</div>
+            <div className="pm-skeleton-card" />
+            <div className="pm-skeleton-card" />
+          </div>
+        ))}
+        {!restoring && COLS.map(col => {
           const colTasks = orderTasks(tasks.filter(t => t.column === col.id))
           const isOver   = dragOverCol === col.id
 

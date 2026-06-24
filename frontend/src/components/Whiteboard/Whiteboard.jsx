@@ -62,7 +62,7 @@ export default function Whiteboard({
   onSelectConcept,
   highlightTags = null,
   // PM props
-  tasks, pmDispatch,
+  tasks, tasksHydration, pmDispatch,
   designEvents, onTaskEvent,
   selectedTaskId, setSelectedTaskId,
   setPanelMode,
@@ -87,6 +87,7 @@ export default function Whiteboard({
     return (
       <OpenPM
         tasks={tasks}
+        hydration={tasksHydration}
         pmDispatch={pmDispatch}
         canvasState={canvasState}
         canvasDispatch={canvasDispatch}
