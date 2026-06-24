@@ -14,6 +14,7 @@ from pathlib import Path
 from openfde import agent_sessions
 from openfde import autonomous_council as ac
 from openfde import external_council as ec
+from openfde import run_control
 from openfde.episode_summary import internal_council_kind
 from openfde.persistence import Persistence
 
@@ -38,6 +39,67 @@ def _block_factory(role_to_block, reason):
             return agent_sessions._UnavailableSession(role, provider, reason, run_dir=run_dir)
         return agent_sessions.EchoSession(role, run_dir=run_dir)
     return factory
+
+
+class _RecordingSession(agent_sessions.AgentSession):
+    """Records every send (role, phase, message) and returns deterministic, parseable replies — so a
+    test can see WHICH provider calls happened (was ARCHITECT_DECIDING invoked?) and inspect the exact
+    implementation prompt, with no real agent. Optionally times out on one phase."""
+
+    def __init__(self, role, *, run_dir=None, calls, consult_reply=None, timeout_on=None):
+        super().__init__(role, "echo", run_dir=run_dir)
+        self.calls, self.consult_reply, self.timeout_on = calls, consult_reply, timeout_on
+
+    def start(self):
+        self._started = True
+
+    def send(self, message, metadata=None):
+        phase = (metadata or {}).get("phase", "")
+        self.calls.append({"role": self.role, "phase": phase, "message": message})
+        if self.timeout_on and phase == self.timeout_on:
+            raise run_control.ProviderTimeout("claude-code", self.role, phase, 7)
+        if phase == "plan":
+            return "PLAN: do X minimally.\n- task: change X\nacceptance: X works."
+        if phase == "consult":
+            return self.consult_reply if self.consult_reply is not None else "The plan is reasonable; minor notes."
+        if phase == "decide":
+            return "DECISION: implement X minimally; scope stays small."
+        if phase == "implement":
+            return "IMPLEMENTED: changed X commit=abc1234567 checks=did X"
+        if phase == "verify":
+            return "VERIFIED looks correct"
+        return f"{self.role} {phase}"
+
+    def stop(self):
+        pass
+
+
+def _recording_factory(calls, *, consult_reply=None, timeout_on=None, timeout_role="architect"):
+    def factory(role, provider, *, run_dir=None):
+        return _RecordingSession(role, run_dir=run_dir, calls=calls, consult_reply=consult_reply,
+                                 timeout_on=(timeout_on if role == timeout_role else None))
+    return factory
+
+
+class ConsultationClassifierTest(unittest.TestCase):
+    def test_clear_phrases_are_clear_to_implement(self):
+        for txt in ("Looks good.", "Plan approved.", "This is reasonable.", "Minor notes only.",
+                    "Keep scope small.", "Add a test for the parser.", "Watch the retry count.", "",
+                    "lgtm, proceed", "The plan is reasonable; push back: keep the surface small, add a test."):
+            self.assertEqual(ac.classify_consultation(txt), ac.CLEAR_TO_IMPLEMENT, txt)
+
+    def test_blocking_phrases_need_architect_decision(self):
+        for txt in ("This is blocked until we decide the schema.", "Do not proceed.",
+                    "This needs an architect decision.", "There is a security concern here.",
+                    "This crosses a permission boundary.", "The scope is wrong.",
+                    "The architect must decide between A and B.", "This is a conflicting approach.",
+                    "Major risk: this could corrupt data."):
+            self.assertEqual(ac.classify_consultation(txt), ac.NEEDS_ARCHITECT_DECISION, txt)
+
+    def test_negated_blocker_is_not_a_blocker(self):
+        for txt in ("No security concern; proceed.", "There is not a blocker here.",
+                    "No major risk — looks fine."):
+            self.assertEqual(ac.classify_consultation(txt), ac.CLEAR_TO_IMPLEMENT, txt)
 
 
 class AutonomousCouncilTest(unittest.TestCase):
@@ -110,10 +172,12 @@ class AutonomousCouncilTest(unittest.TestCase):
 
     # ── Transcript ────────────────────────────────────────────────────────────
     def test_transcript_role_order(self):
+        # The echo consult is minor notes (no blocker) → the decision is an HONEST automatic system
+        # turn, not a second architect provider call.
         self._run()
         labels = [t["label"] for t in ec.load_recorded_transcript(self.root)]
         self.assertEqual(labels, ["user", "architect (echo)", "sr dev (echo)",
-                                  "architect (echo)", "sr dev (echo)", "verifier (echo)", "system"])
+                                  "architect decision (automatic)", "sr dev (echo)", "verifier (echo)", "system"])
         kinds = [t["kind"] for t in ec.load_recorded_transcript(self.root)]
         self.assertEqual(kinds, ["prompt", "proposal", "consultation", "decision",
                                  "implementation", "verified", "ready_to_push"])
@@ -164,6 +228,50 @@ class AutonomousCouncilTest(unittest.TestCase):
         self.assertIn("not found", rec["blockedReason"])
         kinds = [t["kind"] for t in rec["turns"]]
         self.assertEqual(kinds, ["prompt", "blocked"])                 # no fabricated relay turns
+
+    # ── Conditional second architect decision ─────────────────────────────────
+    def test_clear_consultation_skips_the_architect_decision_call(self):
+        calls = []
+        rec = self._run(product=False, session_factory=_recording_factory(calls, consult_reply="Looks good — add a test."))
+        self.assertEqual(rec["status"], ac.STATUS_READY_TO_PUSH)
+        self.assertEqual(rec.get("decisionMode"), "automatic")
+        self.assertNotIn("decide", [c["phase"] for c in calls])        # NO second architect provider call
+        dec = next(t for t in rec["turns"] if t["kind"] == "decision")
+        self.assertEqual(dec["role"], "system")                        # honest: not a provider response
+        self.assertEqual(dec["label"], "architect decision (automatic)")
+        self.assertIn("no blocking pushback", dec["summary"].lower())
+
+    def test_blocking_consultation_invokes_the_architect_decision(self):
+        calls = []
+        rec = self._run(product=False, session_factory=_recording_factory(
+            calls, consult_reply="Do not proceed — the architect must decide the schema first."))
+        self.assertEqual(rec.get("decisionMode"), "architect")
+        self.assertIn("decide", [c["phase"] for c in calls])           # architect WAS called again
+        dec = next(t for t in rec["turns"] if t["kind"] == "decision")
+        self.assertEqual(dec["role"], "architect")
+
+    def test_implementation_prompt_includes_plan_and_consultation(self):
+        calls = []
+        self._run(product=False, session_factory=_recording_factory(calls, consult_reply="Looks good; please add a test."))
+        impl = next(c for c in calls if c["phase"] == "implement")["message"]
+        self.assertIn("ARCHITECT PLAN", impl)
+        self.assertIn("SENIOR DEV CONSULTATION", impl)
+        self.assertIn("please add a test", impl)                       # the real consultation text is present
+        self.assertIn("do X minimally", impl)                          # the real architect plan text is present
+
+    def test_timeout_reason_visible_in_run_payload_when_architect_called(self):
+        calls = []
+        rec = self._run(product=False,
+                        provider_ids={"architect": "claude-code-local", "srDev": "echo", "verifier": "echo"},
+                        session_factory=_recording_factory(
+                            calls, consult_reply="Security concern — the architect must decide.", timeout_on="decide"))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_TIMEOUT)
+        self.assertIn("decide", [c["phase"] for c in calls])           # it DID call the architect, which timed out
+        summ = ac.run_summary(rec)
+        self.assertIn("timed out", (summ["blockedReason"] or "").lower())   # the ACTUAL reason…
+        self.assertNotIn("BLOCKED_NEEDS_HUMAN", summ["blockedReason"] or "")  # …not the generic bus status
+        self.assertEqual(summ["timeoutInfo"]["phase"], "decide")
+        self.assertEqual(summ["timeoutInfo"]["providerId"], "claude-code-local")
 
     # ── Real-adapter availability (offline, monkeypatched) ────────────────────
     def test_real_codex_adapter_precise_unavailable_reason_when_cli_missing(self):

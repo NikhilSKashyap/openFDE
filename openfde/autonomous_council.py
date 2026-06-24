@@ -109,11 +109,16 @@ def _decide_prompt(consult: str, prompt: str) -> str:
             f"within the task.\n\nTASK:\n{prompt}\n\nSENIOR DEV FEEDBACK:\n{consult}")
 
 
-def _implement_prompt(decision: str, prompt: str) -> str:
+def _implement_prompt(prompt: str, plan: str, consult: str, decision: str) -> str:
+    # Full context so implementation can proceed WITHOUT a second architect round-trip: the original
+    # task, the architect's plan, the senior dev's consultation, and the decision/constraints.
     return ("You are the SENIOR DEV. Implement the decision now by editing files in this repository. "
             "Make the minimal real change. Do NOT run git and do NOT push — the runtime commits for "
             "you. When done, summarize what you changed in one line starting with `IMPLEMENTED:`.\n\n"
-            f"TASK:\n{prompt}\n\nDECISION:\n{decision}")
+            f"TASK:\n{prompt}\n\n"
+            f"ARCHITECT PLAN:\n{plan}\n\n"
+            f"SENIOR DEV CONSULTATION:\n{consult}\n\n"
+            f"DECISION / CONSTRAINTS:\n{decision}")
 
 
 def _verify_prompt(sha: str, prompt: str) -> str:
@@ -194,7 +199,7 @@ def run_summary(rec: dict | None) -> dict | None:
         "blockedReason": rec.get("blockedReason"), "autoPush": rec.get("autoPush", False),
         "product": rec.get("product", True), "providers": rec.get("providers") or {},
         "providerIds": rec.get("providerIds") or {}, "timeoutInfo": rec.get("timeoutInfo"),
-        "running": rec.get("status") == STATUS_RUNNING,
+        "decisionMode": rec.get("decisionMode"), "running": rec.get("status") == STATUS_RUNNING,
     }
 
 
@@ -469,6 +474,52 @@ def _verdict_from_text(text: str) -> str:
     if "CHANGES_REQUESTED" in up or "CHANGES REQUESTED" in up:
         return council_bus.STATUS_CHANGES_REQUESTED
     return council_bus.STATUS_VERIFIED
+
+
+# ── Consultation classifier — is a second (architect) decision call actually needed? ──
+CLEAR_TO_IMPLEMENT = "clear_to_implement"
+NEEDS_ARCHITECT_DECISION = "needs_architect_decision"
+
+# Phrases in a senior-dev consultation that mean "don't just proceed — the architect/user must weigh
+# in": a hard stop, a security/permission concern, a scope or architecture conflict, an explicit
+# "architect/user must decide". Soft notes ("add a test", "watch X", "keep scope small") are NOT here.
+_ESCALATE_PAT = re.compile(
+    r"do not (?:proceed|implement)|don't (?:proceed|implement)|must not proceed|"
+    r"needs? (?:an? )?(?:architect|user|human)\b|(?:architect|user|human) (?:must|should|needs? to|has to) decide|"
+    r"requires? (?:an? )?(?:architect|user|human) (?:review|decision|sign|approval|input)|"
+    r"(?:security|permission) (?:concern|boundary|risk|issue|problem|violation|vulnerabilit\w*)|"
+    r"scope is wrong|wrong scope|out of scope|scope (?:disagreement|conflict|creep)|"
+    r"conflicting approach|architectural (?:conflict|disagreement|concern|mismatch)|"
+    r"major (?:risk|blocker|concern|problem|rewrite|redesign)|"
+    r"\bblocked?\b|\bblocker\b|\bhalt\b|\bescalat\w+|needs? (?:a )?decision|must decide|"
+    r"needs? clarification|cannot proceed|can't proceed",
+    re.I)
+# A negation right before an escalate phrase neutralises it ("no security concern", "not a blocker").
+_NEGATION_PAT = re.compile(r"(?:\bno\b|\bnot\b|n't|\bwithout\b|\bnon-?\b|\bzero\b)\W+\w*\W*$", re.I)
+
+
+def classify_consultation(text) -> str:
+    """Deterministic: does a senior-dev consultation clear implementation, or need the architect/user
+    to decide? DEFAULTS to ``clear_to_implement`` (the consult already happened) and escalates only on a
+    real blocker. Conservative but not paranoid — soft notes never escalate; an obvious negation in
+    front of a blocker word ("no security concern") is not treated as a blocker. No LLM."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return CLEAR_TO_IMPLEMENT
+    for m in _ESCALATE_PAT.finditer(t):
+        if _NEGATION_PAT.search(t[max(0, m.start() - 18):m.start()]):
+            continue                       # negated ("no …", "not a …") → not a real blocker
+        return NEEDS_ARCHITECT_DECISION
+    return CLEAR_TO_IMPLEMENT
+
+
+# The deterministic decision recorded when the senior dev raises no blocking pushback. Honest: it names
+# itself as automatic and states the architect provider was NOT called (no fake provider attribution).
+_AUTO_DECISION = (
+    "Decision: proceed with the architect plan, incorporating the Senior Dev's notes. Keep the change "
+    "minimal and in scope; address the Senior Dev's notes inline; the runtime makes the commit.\n"
+    "(Automatic decision recorded by OpenFDE — the Senior Dev raised no blocking pushback, so the "
+    "architect provider was not called for a second decision.)")
 
 
 # ── Generic role/provider labels — NO hardcoded Codex=Architect / Claude=Senior Dev ──
@@ -781,15 +832,29 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         _set_phase_task(persistence, rec, "consult", "done", "passed")
         _emit(persistence, rec, on_event)
 
-        # 3. Architect makes the final implementation decision.
-        rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_DECIDING, "architect"
-        _emit(persistence, rec, on_event)
-        _guard_cancel(rec)
-        decision = arch.send(_decide_prompt(consult, rec["prompt"]), {"phase": "decide", "runId": rec["runId"]})
-        _add_turn(repo_root, rec, "architect", labels["architect"], "decision",
-                  summary=_first_line(decision), body=decision)
-        _add_edge(rec, EDGE_DECIDED, "architect")
-        _emit(persistence, rec, on_event)
+        # 3. Decision. The second architect call is CONDITIONAL: if the senior dev's consultation has no
+        #    blocking pushback, OpenFDE records a deterministic decision and goes straight to
+        #    implementation (no provider call). A real blocker / scope or architecture conflict /
+        #    security or permission concern / explicit "architect must decide" routes back to the
+        #    architect provider for the final decision.
+        if classify_consultation(consult) == CLEAR_TO_IMPLEMENT:
+            decision = _AUTO_DECISION
+            rec["decisionMode"] = "automatic"          # honest: no architect provider responded
+            _add_turn(repo_root, rec, "system", "architect decision (automatic)", "decision",
+                      summary="Senior Dev had no blocking pushback; OpenFDE proceeded with the plan.",
+                      body=decision, decisionMode="automatic")
+            _add_edge(rec, EDGE_DECIDED, "system")      # Story/OpenPM still show the decision beat
+            _emit(persistence, rec, on_event)
+        else:
+            rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_DECIDING, "architect"
+            rec["decisionMode"] = "architect"
+            _emit(persistence, rec, on_event)
+            _guard_cancel(rec)
+            decision = arch.send(_decide_prompt(consult, rec["prompt"]), {"phase": "decide", "runId": rec["runId"]})
+            _add_turn(repo_root, rec, "architect", labels["architect"], "decision",
+                      summary=_first_line(decision), body=decision)
+            _add_edge(rec, EDGE_DECIDED, "architect")
+            _emit(persistence, rec, on_event)
 
         work_input = decision
         while True:
@@ -799,7 +864,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             _emit(persistence, rec, on_event)
             _guard_cancel(rec)
             before = _porcelain(repo_root)
-            impl = srdev.send(_implement_prompt(work_input, rec["prompt"]),
+            impl = srdev.send(_implement_prompt(rec["prompt"], plan, consult, work_input),
                               {"phase": "implement", "runId": rec["runId"], "loop": rec["loop"]})
             if srdev.provider == "echo":
                 sha, checks = _parse_impl(impl)
