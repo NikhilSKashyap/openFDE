@@ -157,8 +157,8 @@ def _make_slice(text: str) -> dict:
     return {
         "sliceId": "slice_" + secrets.token_hex(4), "title": title, "prompt": text.strip(),
         "acceptance": [f"{title} is implemented and the verifier passes"],
-        "risk": _risk_note(text), "status": SLICE_QUEUED, "episodeId": "", "taskIds": [],
-        "latestCommit": None, "retryCount": 0, "blockerReason": None,
+        "blastRadius": _risk_note(text), "status": SLICE_QUEUED, "episodeId": "", "taskIds": [],
+        "commits": [], "latestCommit": None, "retryCount": 0, "failureReason": None,
     }
 
 
@@ -195,8 +195,9 @@ def start_program(persistence, *, prompt, providers, allow_edits=False, max_loop
     raw_providers = providers or {}          # the caller's explicit assignment — checked before defaults
     ts = _now()
     program = {
-        "programId": program_id, "title": title or _slug_title(prompt), "originalPrompt": (prompt or "").strip(),
-        "status": STATUS_PLANNING, "currentSliceId": None, "slices": [],
+        "programId": program_id, "title": title or _slug_title(prompt),
+        "prompt": (prompt or "").strip(), "originalPrompt": (prompt or "").strip(),
+        "status": STATUS_PLANNING, "currentSliceIndex": 0, "currentSliceId": None, "slices": [],
         "roleAssignments": ac._norm_providers(providers), "allowEdits": bool(allow_edits),
         "maxLoops": int(max_loops),
         "createdAt": ts, "updatedAt": ts, "summary": "", "finalReport": "", "blockerReason": None,
@@ -241,9 +242,10 @@ def advance_program(persistence, program, *, session_factory=None, on_event=None
     for sl in program["slices"]:
         if sl["status"] == SLICE_VERIFIED:
             continue
+        program["currentSliceIndex"] = program["slices"].index(sl)
         program["currentSliceId"] = sl["sliceId"]
         program["status"] = STATUS_RUNNING
-        sl["status"], sl["blockerReason"] = SLICE_RUNNING, None
+        sl["status"], sl["failureReason"] = SLICE_RUNNING, None
         _save(persistence, program, on_event)
 
         def _turn(_rec, _sl=sl):                      # mirror the live council turn up to the program
@@ -259,12 +261,17 @@ def advance_program(persistence, program, *, session_factory=None, on_event=None
 
         sl["episodeId"], sl["taskIds"] = rec["episodeId"], rec["taskIds"]
         sl["latestCommit"], sl["retryCount"] = rec["latestCommit"], rec.get("loop", 0)
+        ep = persistence.get_episode(rec["episodeId"]) if rec.get("episodeId") else None
+        sl["commits"] = (ep.get("commitShas") if ep else None) or ([rec["latestCommit"]] if rec["latestCommit"] else [])
+        if ep and ep.get("programTitle") != program["title"]:    # link the slice beat to its program parent
+            ep["programTitle"] = program["title"]
+            persistence.upsert_episode(ep)
         if rec["status"] in (ac.STATUS_READY_TO_PUSH, ac.STATUS_VERIFIED):
             sl["status"] = SLICE_VERIFIED
             _save(persistence, program, on_event)
             continue                                  # auto-start the next queued slice
-        sl["status"], sl["blockerReason"] = SLICE_BLOCKED, _map_block_reason(rec["status"], rec.get("blockedReason"))
-        program["status"], program["blockerReason"] = STATUS_BLOCKED, sl["blockerReason"]
+        sl["status"], sl["failureReason"] = SLICE_BLOCKED, _map_block_reason(rec["status"], rec.get("blockedReason"))
+        program["status"], program["blockerReason"] = STATUS_BLOCKED, sl["failureReason"]
         _save(persistence, program, on_event)
         return program
 
@@ -282,7 +289,7 @@ def continue_program(persistence, program_id, *, session_factory=None, on_event=
         return program
     for sl in program["slices"]:
         if sl["status"] in (SLICE_BLOCKED, SLICE_FAILED):
-            sl["status"], sl["blockerReason"] = SLICE_QUEUED, None
+            sl["status"], sl["failureReason"] = SLICE_QUEUED, None
     program["status"], program["blockerReason"] = STATUS_RUNNING, None
     upsert_program(repo_root, program)
     return advance_program(persistence, program, session_factory=session_factory, on_event=on_event)
@@ -316,8 +323,8 @@ def _final_report(program: dict) -> str:
 
 
 def slice_summary(sl: dict) -> dict:
-    return {k: sl.get(k) for k in ("sliceId", "title", "status", "episodeId", "taskIds",
-                                   "latestCommit", "retryCount", "blockerReason", "acceptance", "risk")}
+    return {k: sl.get(k) for k in ("sliceId", "title", "status", "episodeId", "taskIds", "commits",
+                                   "latestCommit", "retryCount", "failureReason", "acceptance", "blastRadius")}
 
 
 def program_summary(program: dict | None) -> dict | None:
@@ -330,8 +337,8 @@ def program_summary(program: dict | None) -> dict | None:
     return {
         "programId": program.get("programId"), "title": program.get("title"),
         "status": program.get("status"), "blockerReason": program.get("blockerReason"),
-        "sliceIndex": idx, "sliceCount": len(slices), "currentSliceId": program.get("currentSliceId"),
-        "currentSliceTitle": cur.get("title") if cur else None,
+        "sliceIndex": idx, "sliceCount": len(slices), "currentSliceIndex": idx,
+        "currentSliceId": program.get("currentSliceId"), "currentSliceTitle": cur.get("title") if cur else None,
         "roleAssignments": program.get("roleAssignments", {}),
         "slices": [slice_summary(s) for s in slices],
         "finalReport": program.get("finalReport"), "updatedAt": program.get("updatedAt"),

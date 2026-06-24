@@ -621,6 +621,7 @@ function StoryDrawer({ detail, epById, setDetail, onClose, onSpotlightEpisode, o
         {head(`${node.tag} · episode`)}
         <div className="tlv3-drawer-title">{node.title}</div>
         {node.summary && <div className="tlv3-drawer-summary">{node.summary}</div>}
+        {ep?.programId && row('program', `${ep.programTitle || 'Program'} · ${ep.sliceTitle || node.title}`)}
         {row('status', node.status)}
         {node.verify && row('verification',
           `${node.verify.status}${(node.verify.checks || []).length ? ' — ' + node.verify.checks.map(c => `${c.label} ${c.status === 'passed' ? '✓' : '✕'}`).join(' · ') : ''}`)}

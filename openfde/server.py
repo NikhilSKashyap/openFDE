@@ -391,6 +391,7 @@ def _rail_chip(e: dict) -> dict:
         "episodeId": e.get("episodeId"), "tag": e.get("tag"), "sequence": e.get("sequence"),
         "title": e.get("title"), "status": e.get("status"), "kind": e.get("kind"),
         "signal": e.get("signal"), "createdAt": e.get("createdAt"), "updatedAt": e.get("updatedAt"),
+        "programId": e.get("programId"), "programTitle": e.get("programTitle"), "sliceTitle": e.get("sliceTitle"),
         "fileCount": len(e.get("files") or []), "commitCount": len(shas), "commitShas": shas,
         "commits": [{"sha": s, "shortSha": (s or "")[:7],
                      "displayTitle": (cm.get(s) or {}).get("title") or (e.get("title") or "")}

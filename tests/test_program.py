@@ -32,8 +32,10 @@ class ProgramPlannerTest(unittest.TestCase):
         self.assertIsNone(block)
         self.assertLessEqual(len(slices), pg.MAX_SLICES)            # max 3 — overflow folds into the last
         for s in slices:
-            self.assertTrue(s["title"] and s["prompt"] and s["acceptance"] and s["risk"])
+            self.assertTrue(s["title"] and s["prompt"] and s["acceptance"] and s["blastRadius"])
             self.assertEqual(s["status"], pg.SLICE_QUEUED)
+            self.assertEqual(s["commits"], [])
+            self.assertIsNone(s["failureReason"])
 
     def test_vague_prompt_blocks_for_clarity(self):
         for vague in ("make it better", "improve everything", "do stuff", "fix"):
@@ -69,6 +71,7 @@ class ProgramRunTest(unittest.TestCase):
             self.assertEqual(sl["status"], pg.SLICE_VERIFIED)       # every slice verified
             self.assertTrue(sl["episodeId"].startswith("episode_")) # receipts linked per slice
             self.assertTrue(sl["taskIds"])
+            self.assertTrue(sl["commits"])                          # commit receipt(s) from episode truth
         # exactly one episode per slice, each stamped with program + slice ids
         eps = self.p.load_episodes()
         self.assertEqual(len(eps), len(prog["slices"]))
@@ -109,6 +112,31 @@ class ProgramRunTest(unittest.TestCase):
         p1 = pg.start_program(self.p, prompt="Add a /healthz endpoint", providers=ECHO)
         p2 = pg.start_program(self.p, prompt="Add request logging", providers=ECHO)
         self.assertEqual(p1["programId"], p2["programId"])          # the active program is returned
+
+    def test_labels_come_from_provider_config_not_hardcoded(self):
+        from openfde import external_council as ec
+        # Configure codex/claude-code providers but RUN via echo sessions (factory override) → the
+        # transcript labels reflect the CONFIG, proving they are not hardcoded to the adapter.
+        self._run("Add a /healthz endpoint",
+                  providers={"architect": "codex", "srDev": "claude-code", "verifier": "codex"},
+                  session_factory=_echo_factory())
+        labels = {t["label"] for t in ec.load_recorded_transcript(self.root)}
+        self.assertIn("architect (Codex)", labels)
+        self.assertIn("sr dev (Claude Code)", labels)
+        self.assertIn("verifier (Codex)", labels)
+        # swap the role/provider config → labels follow it (architect now Claude Code)
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.p = Persistence(self.root / ".openfde")
+        self._run("Add a /healthz endpoint",
+                  providers={"architect": "claude-code", "srDev": "codex", "verifier": "echo"},
+                  session_factory=_echo_factory())
+        labels2 = {t["label"] for t in ec.load_recorded_transcript(self.root)}
+        self.assertIn("architect (Claude Code)", labels2)
+        self.assertIn("sr dev (Codex)", labels2)
+        self.assertIn("verifier (echo)", labels2)
+        self.assertNotIn("architect (Codex)", labels2)              # not hardcoded
 
     def test_status_bridge_is_role_specific(self):
         prog = self._run("1. Add a /healthz endpoint. 2. Add request logging.")
