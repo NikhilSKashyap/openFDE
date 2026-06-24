@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { isOperationalChip, groupEpisodes } from '../../store/railChips.js'
 
 /**
  * Prompt Chapter Rail — canvas-native, prompt-first, **chapters only**.
@@ -76,7 +77,9 @@ export default function CommitChipRail({
   const renderChip = (ep, child = false) => {
     const active = ep.episodeId === activeEpisodeId
     const landed = (ep.commitShas || []).length || (ep.commits || []).length
-    const operational = ep.signal === 'operational' || (ep.storyFacts && ep.storyFacts.operational)
+    // A Program slice is never operational — isOperationalChip ignores noisy-title / stale storyFacts
+    // heuristics when ep.programId is set, so a docs-y slice still renders as a product Program slice.
+    const operational = isOperationalChip(ep)
     return (
       <button key={ep.episodeId} type="button" role="listitem"
         className={`commit-chip prompt-chip st-${ep.status || 'open'}${active ? ' active' : ''}${operational ? ' ops' : ''}${child ? ' slice-child' : ''}${busy === ep.episodeId ? ' busy' : ''}`}
@@ -159,19 +162,6 @@ export default function CommitChipRail({
 }
 
 // Rail chip label: the short story title, falling back to the prompt's first line.
-// Group consecutive episodes of the same Program → one parent chip + its child slices.
-function groupEpisodes(episodes) {
-  const out = []
-  for (const ep of episodes || []) {
-    const pid = ep.programId
-    const last = out[out.length - 1]
-    if (pid && last && last.programId === pid) last.episodes.push(ep)
-    else if (pid) out.push({ programId: pid, programTitle: ep.programTitle, episodes: [ep] })
-    else out.push({ programId: null, episodes: [ep] })
-  }
-  return out
-}
-
 function promptLabel(ep) {
   const t = (ep.title || '').trim()
   if (t) return t.length > 34 ? t.slice(0, 33) + '…' : t
