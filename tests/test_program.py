@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openfde import agent_sessions
+from openfde import agent_sessions, run_control
+from openfde import autonomous_council as ac
 from openfde import program as pg
 from openfde.persistence import Persistence
 
@@ -18,6 +19,34 @@ def _echo_factory(scripts=None):
     def factory(role, provider, *, run_dir=None):
         if role in scripts:
             return agent_sessions.EchoSession(role, run_dir=run_dir, responses=scripts[role])
+        return agent_sessions.EchoSession(role, run_dir=run_dir)
+    return factory
+
+
+class _TimeoutSession(agent_sessions.AgentSession):
+    """A managed session that raises ProviderTimeout for one role — simulates a hung provider without
+    spawning a real subprocess (the run_control kill path is covered in test_run_control)."""
+
+    def __init__(self, role, *, run_dir=None, fail_role="architect", provider="claude-code"):
+        super().__init__(role, provider, run_dir=run_dir)
+        self.fail_role = fail_role
+
+    def start(self):
+        self._started = True
+
+    def send(self, message, metadata=None):
+        if self.role == self.fail_role:
+            raise run_control.ProviderTimeout(self.provider, self.role, (metadata or {}).get("phase", "plan"), 5)
+        return f"ok {self.role}"
+
+    def stop(self):
+        pass
+
+
+def _timeout_factory(fail_role="architect", provider="claude-code"):
+    def factory(role, prov, *, run_dir=None):
+        if role == fail_role:
+            return _TimeoutSession(role, run_dir=run_dir, fail_role=fail_role, provider=provider)
         return agent_sessions.EchoSession(role, run_dir=run_dir)
     return factory
 
@@ -209,6 +238,69 @@ class ProgramRunTest(unittest.TestCase):
         self.p.flag_nonimplementation_episodes(str(self.root), self.p.load_episodes())
         self.assertEqual(self.p.get_episode("episode_x")["signal"], "product")
         self.assertFalse(self.p.get_episode("episode_x").get("nonImplementation"))
+
+    def test_provider_timeout_blocks_run_slice_and_program(self):
+        prog = pg.run(self.p, prompt="Add a /healthz endpoint",
+                      providers={"architect": "claude-code", "srDev": "echo", "verifier": "echo"},
+                      provider_ids={"architect": "claude-code-local", "srDev": "echo", "verifier": "echo"},
+                      session_factory=_timeout_factory("architect", "claude-code"), max_loops=1)
+        self.assertEqual(prog["status"], pg.STATUS_BLOCKED)
+        self.assertEqual(prog["blockerReason"], pg.BLOCKED_PROVIDER_TIMEOUT)
+        sl = prog["slices"][0]
+        self.assertEqual(sl["status"], pg.SLICE_BLOCKED)
+        self.assertEqual(sl["failureReason"], pg.BLOCKED_PROVIDER_TIMEOUT)
+        rec = ac.load_run(self.root, sl["runId"])
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_TIMEOUT)
+        self.assertEqual(rec["timeoutInfo"]["role"], "architect")
+        self.assertEqual(rec["timeoutInfo"]["providerId"], "claude-code-local")   # exact id, not adapter
+        self.assertEqual(rec["timeoutInfo"]["displayLabel"], "Claude Code local")
+        msg = [t["summary"] for t in rec["turns"] if "timed out while using" in (t.get("summary") or "")]
+        self.assertEqual(msg, ["Architect timed out while using Claude Code local."])
+
+    def test_cancel_program_propagates_to_slice_run_and_task(self):
+        prog = pg.start_program(self.p, prompt="Add a /healthz endpoint. Add request logging.", providers=ECHO)
+        sl = prog["slices"][0]
+        rec = ac.init_run(self.p, prompt=sl["prompt"], providers=prog["roleAssignments"],
+                          program_id=prog["programId"], slice_id=sl["sliceId"], slice_title=sl["title"])
+        sl["status"], sl["runId"], sl["episodeId"] = pg.SLICE_RUNNING, rec["runId"], rec["episodeId"]
+        prog["status"], prog["currentSliceId"] = pg.STATUS_RUNNING, sl["sliceId"]
+        pg.upsert_program(self.root, prog)
+
+        out = pg.cancel_program(self.p, prog["programId"])
+        self.assertEqual(out["status"], pg.STATUS_CANCELLED)
+        self.assertEqual(out["slices"][0]["status"], pg.SLICE_CANCELLED)
+        self.assertNotIn(pg.SLICE_RUNNING, [s["status"] for s in out["slices"]])   # nothing left running
+        self.assertEqual(ac.load_run(self.root, rec["runId"])["status"], ac.STATUS_CANCELLED)
+        self.assertTrue(run_control.is_cancelled(rec["runId"]))                    # subprocess poll will abort
+        tasks = [t for t in self.p.load_tasks() if t.get("episodeId") == rec["episodeId"]]
+        self.assertTrue(any(t.get("cancelled") for t in tasks))                    # active phase task cancelled
+        run_control.reset(rec["runId"])
+
+    def test_one_file_docs_prompt_makes_a_single_slice(self):
+        for prompt in ("Add exactly one sentence to the README. Also mention the license. And the author.",
+                       "README only: add a build badge. Then add a logo. Then a table of contents.",
+                       "Make the smallest change to fix the header typo. Then reformat. Then rename the file."):
+            slices, block = pg.plan_program(prompt)
+            self.assertIsNone(block)
+            self.assertEqual(len(slices), 1, prompt)        # one-change intent → one slice, not per-sentence
+        # a genuinely multi-part direction still decomposes
+        slices, _ = pg.plan_program("Add a /healthz endpoint. Add request logging. Add a metrics route.")
+        self.assertGreater(len(slices), 1)
+
+    def test_provider_ids_preserved_distinct_from_display_labels(self):
+        prog = pg.start_program(self.p, prompt="Add a /healthz endpoint",
+                                providers={"architect": "claude-code", "srDev": "codex", "verifier": "echo"},
+                                provider_ids={"architect": "claude-code-local", "srDev": "codex-local",
+                                              "verifier": "echo"})
+        self.assertEqual(prog["roleProviderIds"]["architect"], "claude-code-local")   # exact id kept
+        self.assertEqual(prog["roleAssignments"]["architect"], "claude-code")         # adapter distinct
+        arch = next(r for r in prog["roleProviders"] if r["role"] == "architect")
+        self.assertEqual(arch["providerId"], "claude-code-local")
+        self.assertEqual(arch["displayLabel"], "Claude Code local")
+        self.assertEqual(arch["adapter"], "claude-code")
+        # the CLI status shows the REAL provider id, not just the adapter
+        status = pg.program_status(prog, "architect")
+        self.assertIn("claude-code-local", status)
 
     def test_continue_resumes_a_blocked_program(self):
         f = _echo_factory({"verifier": ["CHANGES_REQUESTED: nope"]})

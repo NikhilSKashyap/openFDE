@@ -1028,8 +1028,12 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         # Role→provider comes from the SELECTED agent settings (no hardcoded codex=architect …). An
         # explicit body.providers overrides (e.g. echo for tests). A role with no coding provider →
         # start_program blocks BLOCKED_NO_PROVIDER_FOR_ROLE.
+        # Adapters drive the relay; the EXACT selected ids (claude-code-local …) are preserved beside
+        # them for debug/status/timeout reasons. An explicit body.providers IS its own exact id set.
         providers = body.get("providers") or pg.providers_from_settings(persistence)
+        provider_ids = body.get("providers") or pg.provider_ids_from_settings(persistence)
         program = pg.start_program(persistence, prompt=prompt, providers=providers,
+                                   provider_ids=provider_ids,
                                    allow_edits=bool(body.get("allowEdits", False)),
                                    max_loops=int(body.get("maxLoops") or 2), title=body.get("title"))
         if program["status"] == pg.STATUS_RUNNING:
@@ -1059,7 +1063,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
 
     async def post_program_cancel(request: web.Request) -> web.Response:
         from openfde import program as pg
-        prog = pg.cancel_program(path, request.match_info["program_id"])
+        prog = pg.cancel_program(persistence, request.match_info["program_id"])
         if not prog:
             return web.json_response({"ok": False, "error": "unknown program"}, status=404)
         await manager.broadcast({"type": "program", "program": pg.program_summary(prog), "at": time.time()})

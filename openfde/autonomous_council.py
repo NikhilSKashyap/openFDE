@@ -35,7 +35,7 @@ import secrets
 import subprocess
 from datetime import datetime, timezone
 
-from openfde import agent_sessions, council_bus, external_council
+from openfde import agent_sessions, council_bus, external_council, run_control
 
 # ── Run phases (the relay's internal state machine) ───────────────────────────
 PHASE_USER_PROMPT = "USER_PROMPT"
@@ -55,9 +55,11 @@ STATUS_VERIFIED = "verified"
 STATUS_READY_TO_PUSH = "ready_to_push"
 STATUS_BLOCKED_NEEDS_HUMAN = "blocked_needs_human"
 STATUS_BLOCKED_ADAPTER_UNAVAILABLE = "blocked_adapter_unavailable"
+STATUS_BLOCKED_PROVIDER_TIMEOUT = "blocked_provider_timeout"
 STATUS_CANCELLED = "cancelled"
 TERMINAL_STATUSES = (STATUS_VERIFIED, STATUS_READY_TO_PUSH, STATUS_BLOCKED_NEEDS_HUMAN,
-                     STATUS_BLOCKED_ADAPTER_UNAVAILABLE, STATUS_CANCELLED)
+                     STATUS_BLOCKED_ADAPTER_UNAVAILABLE, STATUS_BLOCKED_PROVIDER_TIMEOUT,
+                     STATUS_CANCELLED)
 
 # ── Story loop edges (the data model preserves loop structure, not a flat line) ─
 EDGE_PROPOSED = "proposed"
@@ -181,6 +183,7 @@ def run_summary(rec: dict | None) -> dict | None:
         "latestCommit": rec.get("latestCommit"), "latestTurn": rec.get("latestTurn"),
         "blockedReason": rec.get("blockedReason"), "autoPush": rec.get("autoPush", False),
         "product": rec.get("product", True), "providers": rec.get("providers") or {},
+        "providerIds": rec.get("providerIds") or {}, "timeoutInfo": rec.get("timeoutInfo"),
         "running": rec.get("status") == STATUS_RUNNING,
     }
 
@@ -479,6 +482,27 @@ def _labels_for(providers: dict) -> dict:
             "verifier": _role_label("verifier", p.get("verifier"))}
 
 
+# Human label for an EXACT provider id (claude-code-local stays distinct from the claude-code adapter).
+_PROVIDER_ID_LABEL = {
+    "claude-code-local": "Claude Code local", "claude-code": "Claude Code",
+    "codex-local": "Codex local", "codex": "Codex", "echo": "Echo",
+}
+
+
+def _provider_id_label(provider_id: str) -> str:
+    pid = (provider_id or "").strip()
+    if pid in _PROVIDER_ID_LABEL:
+        return _PROVIDER_ID_LABEL[pid]
+    if not pid:
+        return "the selected provider"
+    words = [w if w in ("local", "cli") else w.capitalize() for w in pid.replace("_", "-").split("-")]
+    return " ".join(words)
+
+
+def _role_title(role: str) -> str:
+    return {"architect": "Architect", "sr_dev": "Senior Dev", "verifier": "Verifier"}.get(role, role.title())
+
+
 def _add_turn(repo_root, rec, role, label, kind, **fields) -> dict:
     """Record a council turn. Always updates the run record (debug); for PRODUCT runs it also appends
     to the durable Orient transcript (a smoke run never pollutes the inbox). Stamps program/slice ids
@@ -503,8 +527,8 @@ def _add_edge(rec, edge, role):
 
 
 # ── Public API: init → advance → run ──────────────────────────────────────────
-def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
-             allow_edits=False, product=True, parent_episode_id=None, run_id=None,
+def init_run(persistence, *, prompt, box_ids=None, providers=None, provider_ids=None, max_loops=3,
+             auto_push=False, allow_edits=False, product=True, parent_episode_id=None, run_id=None,
              program_id=None, slice_id=None, slice_title=None, program_title=None, acceptance=None) -> dict:
     """Create the run record (+ for a PRODUCT run: the parent episode, five OpenPM phase cards, and the
     bus work item) and record the opening user turn. FAST + synchronous — returns the ids the API
@@ -515,6 +539,9 @@ def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, 
     repo_root = persistence.openfde_dir.parent
     run_id = run_id or ("run_" + secrets.token_hex(6))
     providers = _norm_providers(providers)
+    # The EXACT selected provider ids (e.g. claude-code-local) kept beside the council adapters
+    # (claude-code) so debug/status/timeout reasons name the real provider, not just the adapter.
+    provider_ids = _norm_providers(provider_ids) if provider_ids else dict(providers)
     box_ids = [b for b in (box_ids or []) if b]
     prompt = (prompt or "").strip()
     ts = _now()
@@ -522,7 +549,8 @@ def init_run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, 
     episode_id, task_ids, title = "", [], ""
     rec = {
         "runId": run_id, "episodeId": "", "taskIds": [], "boxIds": box_ids, "prompt": prompt,
-        "title": "", "providers": providers, "maxLoops": int(max_loops), "autoPush": bool(auto_push),
+        "title": "", "providers": providers, "providerIds": provider_ids,
+        "maxLoops": int(max_loops), "autoPush": bool(auto_push),
         "allowEdits": bool(allow_edits), "product": bool(product), "parentEpisodeId": parent_episode_id,
         "programId": program_id, "sliceId": slice_id, "sliceTitle": slice_title,
         "status": STATUS_RUNNING, "phase": PHASE_ARCHITECT_PLANNING, "activeRole": "architect",
@@ -630,6 +658,73 @@ def _block_adapter(persistence, rec, exc, on_event):
     return rec
 
 
+_ROLE_KEY = {"architect": "architect", "sr_dev": "srDev", "verifier": "verifier"}
+_PHASE_TASK = {PHASE_ARCHITECT_PLANNING: "plan", PHASE_SR_DEV_CONSULTING: "consult",
+               PHASE_ARCHITECT_DECIDING: "consult", PHASE_SR_DEV_IMPLEMENTING: "implement",
+               PHASE_CODEX_VERIFYING: "verify"}
+
+
+def _provider_id_for_role(rec, role):
+    return (rec.get("providerIds") or {}).get(_ROLE_KEY.get(role, role)) or \
+        (rec.get("providers") or {}).get(_ROLE_KEY.get(role, role)) or ""
+
+
+def _guard_cancel(rec):
+    """Raise ProviderCancelled if a cancel landed between provider turns (so a run stops promptly even
+    when no subprocess is mid-flight)."""
+    if run_control.is_cancelled(rec["runId"]):
+        role = rec.get("activeRole") or "architect"
+        raise run_control.ProviderCancelled(_provider_id_for_role(rec, role), role, rec.get("phase") or "")
+
+
+def _block_provider_timeout(persistence, rec, exc, on_event):
+    """Terminal: a managed provider call exceeded its budget. Records role/provider/phase + a turn that
+    reads, in Orient, e.g. 'Architect timed out while using Claude Code local.'"""
+    repo_root = persistence.openfde_dir.parent
+    role = exc.role or rec.get("activeRole") or "architect"
+    phase, seconds = exc.phase or rec.get("phase") or "", exc.seconds
+    provider_id = _provider_id_for_role(rec, role)
+    label = _provider_id_label(provider_id)
+    rec["phase"], rec["status"], rec["activeRole"] = PHASE_BLOCKED, STATUS_BLOCKED_PROVIDER_TIMEOUT, None
+    rec["blockedReason"] = f"{_role_title(role)} timed out while using {label} after {seconds}s ({phase})."
+    rec["timeoutInfo"] = {"role": role, "providerId": provider_id, "displayLabel": label,
+                          "phase": phase, "seconds": seconds}
+    _add_turn(repo_root, rec, "system", "system", "blocked",
+              summary=f"{_role_title(role)} timed out while using {label}.",
+              body=f"The {role} provider ({provider_id or label}) did not return within {seconds}s during "
+                   f"{phase}. Blocked (BLOCKED_PROVIDER_TIMEOUT); the managed subprocess was stopped.")
+    _add_edge(rec, EDGE_BLOCKED, "system")
+    _set_phase_task(persistence, rec, _PHASE_TASK.get(phase, "plan"), "doing", "failed")
+    if rec.get("episodeId"):
+        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+        _mark_episode(persistence, rec["episodeId"], "blocked")
+    _emit(persistence, rec, on_event)
+    return rec
+
+
+def _cancelled_inflight(persistence, rec, exc, on_event):
+    """Terminal: the run was cancelled mid-flight. The managed subprocess is already being killed by
+    run_control.request_cancel; here we just record the cancelled status + a visible system turn."""
+    repo_root = persistence.openfde_dir.parent
+    role = getattr(exc, "role", None) or rec.get("activeRole") or "architect"
+    phase = getattr(exc, "phase", None) or rec.get("phase") or ""
+    provider_id = _provider_id_for_role(rec, role)
+    label = _provider_id_label(provider_id)
+    rec["phase"], rec["status"], rec["activeRole"] = PHASE_BLOCKED, STATUS_CANCELLED, None
+    rec["blockedReason"] = "cancelled by user"
+    _add_turn(repo_root, rec, "system", "system", "cancelled",
+              summary=f"Run cancelled — {_role_title(role)} stopped while using {label}.",
+              body=f"Cancelled by user during {phase}. The managed {role} subprocess ({provider_id or label}) "
+                   "was terminated; no slice was left running.")
+    _add_edge(rec, EDGE_BLOCKED, "system")
+    _set_phase_task(persistence, rec, _PHASE_TASK.get(phase, "plan"), "doing", "failed")
+    if rec.get("episodeId"):
+        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+        _mark_episode(persistence, rec["episodeId"], "blocked")
+    _emit(persistence, rec, on_event)
+    return rec
+
+
 def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dict:
     """Drive the relay from ARCHITECT_PLANNING to a terminal status. Synchronous (the caller may run
     it off the event loop). ``session_factory(role, provider, run_dir=...)`` builds managed sessions —
@@ -656,6 +751,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_PLANNING, "architect"
         _set_phase_task(persistence, rec, "plan", "doing", "pending")
         _emit(persistence, rec, on_event)
+        _guard_cancel(rec)
         plan = arch.send(_plan_prompt(rec["prompt"]), {"phase": "plan", "runId": rec["runId"]})
         _add_turn(repo_root, rec, "architect", labels["architect"], "proposal",
                   summary=_first_line(plan), body=plan)
@@ -667,6 +763,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         rec["phase"], rec["activeRole"] = PHASE_SR_DEV_CONSULTING, "sr_dev"
         _set_phase_task(persistence, rec, "consult", "doing", "pending")
         _emit(persistence, rec, on_event)
+        _guard_cancel(rec)
         consult = srdev.send(_consult_prompt(plan), {"phase": "consult", "runId": rec["runId"]})
         _add_turn(repo_root, rec, "sr_dev", labels["sr_dev"], "consultation",
                   summary=_first_line(consult), body=consult)
@@ -677,6 +774,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         # 3. Architect makes the final implementation decision.
         rec["phase"], rec["activeRole"] = PHASE_ARCHITECT_DECIDING, "architect"
         _emit(persistence, rec, on_event)
+        _guard_cancel(rec)
         decision = arch.send(_decide_prompt(consult, rec["prompt"]), {"phase": "decide", "runId": rec["runId"]})
         _add_turn(repo_root, rec, "architect", labels["architect"], "decision",
                   summary=_first_line(decision), body=decision)
@@ -689,6 +787,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             rec["phase"], rec["activeRole"] = PHASE_SR_DEV_IMPLEMENTING, "sr_dev"
             _set_phase_task(persistence, rec, "implement", "doing", "pending")
             _emit(persistence, rec, on_event)
+            _guard_cancel(rec)
             before = _porcelain(repo_root)
             impl = srdev.send(_implement_prompt(work_input, rec["prompt"]),
                               {"phase": "implement", "runId": rec["runId"], "loop": rec["loop"]})
@@ -718,6 +817,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             rec["phase"], rec["activeRole"] = PHASE_CODEX_VERIFYING, "verifier"
             _set_phase_task(persistence, rec, "verify", "doing", "pending")
             _emit(persistence, rec, on_event)
+            _guard_cancel(rec)
             vtext = verifier.send(_verify_prompt(sha, rec["prompt"]),
                                   {"phase": "verify", "commit": sha, "loop": rec["loop"]})
             rec["loop"] += 1
@@ -749,6 +849,12 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             rec["phase"] = PHASE_CHANGES_REQUESTED
             _emit(persistence, rec, on_event)
             work_input = vtext       # the next fix attempt works from the change request
+    except run_control.ProviderTimeout as exc:
+        return _block_provider_timeout(persistence, rec, exc, on_event)
+    except run_control.ProviderCancelled as exc:
+        return _cancelled_inflight(persistence, rec, exc, on_event)
+    except agent_sessions.AdapterUnavailable as exc:        # a send-path failure (not just start())
+        return _block_adapter(persistence, rec, exc, on_event)
     finally:
         for s in sessions.values():
             try:
@@ -757,21 +863,24 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
                 pass
 
 
-def run(persistence, *, prompt, box_ids=None, providers=None, max_loops=3, auto_push=False,
-        allow_edits=False, product=True, parent_episode_id=None, run_id=None,
+def run(persistence, *, prompt, box_ids=None, providers=None, provider_ids=None, max_loops=3,
+        auto_push=False, allow_edits=False, product=True, parent_episode_id=None, run_id=None,
         program_id=None, slice_id=None, slice_title=None, program_title=None, acceptance=None,
         session_factory=None, on_event=None) -> dict:
     """Synchronous convenience: init + advance to terminal. The testable core of the relay."""
     rec = init_run(persistence, prompt=prompt, box_ids=box_ids, providers=providers,
-                   max_loops=max_loops, auto_push=auto_push, allow_edits=allow_edits,
-                   product=product, parent_episode_id=parent_episode_id, run_id=run_id,
-                   program_id=program_id, slice_id=slice_id, slice_title=slice_title,
+                   provider_ids=provider_ids, max_loops=max_loops, auto_push=auto_push,
+                   allow_edits=allow_edits, product=product, parent_episode_id=parent_episode_id,
+                   run_id=run_id, program_id=program_id, slice_id=slice_id, slice_title=slice_title,
                    program_title=program_title, acceptance=acceptance)
     return advance_run(persistence, rec, session_factory=session_factory, on_event=on_event)
 
 
 def cancel_run(repo_root, run_id: str) -> dict | None:
-    """Mark a still-running run cancelled (best-effort; the relay checks terminal status on save)."""
+    """Cancel a still-running run: flag + KILL any managed provider subprocess for it (so a hung
+    `claude -p` / `codex exec` dies now, not at its timeout), then mark the record cancelled. The
+    in-flight relay turn raises ProviderCancelled and converges on the same terminal status."""
+    run_control.request_cancel(run_id)        # stop the live subprocess + flag for the poll loop
     rec = load_run(repo_root, run_id)
     if not rec or rec.get("status") in TERMINAL_STATUSES:
         return rec

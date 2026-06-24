@@ -26,6 +26,7 @@ import secrets
 from datetime import datetime, timezone
 
 from openfde import autonomous_council as ac
+from openfde import external_council, run_control
 
 MAX_SLICES = 3
 
@@ -43,6 +44,7 @@ SLICE_RUNNING = "running"
 SLICE_VERIFIED = "verified"
 SLICE_FAILED = "failed"
 SLICE_BLOCKED = "blocked"
+SLICE_CANCELLED = "cancelled"
 
 # ── Block reasons (honest, named) ─────────────────────────────────────────────
 BLOCKED_NEEDS_PRODUCT_CLARITY = "BLOCKED_NEEDS_PRODUCT_CLARITY"
@@ -50,6 +52,7 @@ BLOCKED_BLAST_RADIUS = "BLOCKED_BLAST_RADIUS"
 BLOCKED_NO_PROVIDER_FOR_ROLE = "BLOCKED_NO_PROVIDER_FOR_ROLE"
 BLOCKED_MAX_RETRIES = "BLOCKED_MAX_RETRIES"
 BLOCKED_ADAPTER_UNAVAILABLE = "BLOCKED_ADAPTER_UNAVAILABLE"
+BLOCKED_PROVIDER_TIMEOUT = "BLOCKED_PROVIDER_TIMEOUT"
 
 # role name (CLI/UI) → providers-map key
 _ROLE_KEY = {"architect": "architect", "senior-dev": "srDev", "senior_dev": "srDev",
@@ -76,6 +79,34 @@ def providers_from_settings(persistence) -> dict:
             return ""
         return _SETTINGS_TO_ADAPTER.get(cfg.get("provider"), "")
     return {"architect": adapter("architect"), "srDev": adapter("senior_dev"), "verifier": adapter("verifier")}
+
+
+def provider_ids_from_settings(persistence) -> dict:
+    """The EXACT selected provider ids per role (e.g. claude-code-local / codex-local), preserving the
+    real identity that ``providers_from_settings`` collapses to a council adapter. Kept on the program/
+    run so debug/status name the real provider, not just the adapter it routes to."""
+    s = persistence.load_agent_settings() or {}
+
+    def pid(role):
+        cfg = s.get(role) or {}
+        if cfg.get("enabled") is False:
+            return ""
+        # only keep ids that map to a usable coding adapter (so '' here mirrors a blocked role)
+        prov = cfg.get("provider")
+        return prov if _SETTINGS_TO_ADAPTER.get(prov) else ""
+    return {"architect": pid("architect"), "srDev": pid("senior_dev"), "verifier": pid("verifier")}
+
+
+def _role_providers(adapters: dict, ids: dict) -> list:
+    """A per-role record carrying BOTH the exact providerId and its display label (+ adapter), for the
+    program/run summary and the CLI status — provider identity is never reduced to just the label."""
+    ids = ids or {}
+    out = []
+    for role, key in (("architect", "architect"), ("senior_dev", "srDev"), ("verifier", "verifier")):
+        pid = ids.get(key) or (adapters or {}).get(key) or ""
+        out.append({"role": role, "providerId": pid, "adapter": (adapters or {}).get(key) or "",
+                    "displayLabel": ac._provider_id_label(pid)})
+    return out
 
 
 def reconcile_program_slices(persistence) -> int:
@@ -189,6 +220,11 @@ _BLAST = re.compile(r"\b(rewrite (everything|the (whole|entire) (app|codebase|re
                     r"(the )?(entire|whole) (app|codebase|repo|project)|all (the )?files|"
                     r"everything from scratch|migrate the (whole|entire))\b", re.I)
 _SPLIT = re.compile(r"(?:^|\n)\s*(?:\d+[.)]\s+|[-*•]\s+)|;\s+|\.\s+(?=[A-Z])|\bthen\b|\band then\b", re.I)
+# Explicit "keep it to one change" intent → never decompose into multiple slices, however many
+# sentences the prompt has. Decompose by actual independent work, not by every sentence.
+_SINGLE_SLICE = re.compile(r"\b(exactly one file|one file only|single file|one sentence|one line|"
+                           r"smallest( possible)? change|readme only|just the readme|only the readme|"
+                           r"a single (line|sentence|change|edit)|one-line)\b", re.I)
 
 
 def _slug_title(text: str) -> str:
@@ -244,6 +280,8 @@ def plan_program(prompt: str, *, max_slices: int = MAX_SLICES):
         return None, BLOCKED_NEEDS_PRODUCT_CLARITY
     if _BLAST.search(prompt):
         return None, BLOCKED_BLAST_RADIUS
+    if _SINGLE_SLICE.search(prompt):     # "exactly one file" / "README only" / "smallest change" → 1 slice
+        max_slices = 1
     return [_make_slice(c) for c in _split_into_slices(prompt, max_slices)], None
 
 
@@ -254,22 +292,28 @@ def _provider_for_role_ok(providers: dict) -> bool:
 
 
 # ── Program lifecycle ─────────────────────────────────────────────────────────
-def start_program(persistence, *, prompt, providers, allow_edits=False, max_loops=2,
+def start_program(persistence, *, prompt, providers, provider_ids=None, allow_edits=False, max_loops=2,
                   title=None, program_id=None) -> dict:
     """Plan + persist a program (NO slices run yet — the caller advances it off the event loop). One
-    active program at a time; a second start while one is active returns that active program untouched."""
+    active program at a time; a second start while one is active returns that active program untouched.
+
+    ``providers`` are council adapters (claude-code/codex/echo). ``provider_ids`` are the EXACT selected
+    ids (claude-code-local/…) preserved beside them; default to the adapters when not supplied."""
     repo_root = persistence.openfde_dir.parent
     existing = active_program(repo_root)
     if existing:
         return existing
     program_id = program_id or ("program_" + secrets.token_hex(6))
     raw_providers = providers or {}          # the caller's explicit assignment — checked before defaults
+    adapters = ac._norm_providers(providers)
+    role_ids = ac._norm_providers(provider_ids) if provider_ids else dict(adapters)
     ts = _now()
     program = {
         "programId": program_id, "title": title or _slug_title(prompt),
         "prompt": (prompt or "").strip(), "originalPrompt": (prompt or "").strip(),
         "status": STATUS_PLANNING, "currentSliceIndex": 0, "currentSliceId": None, "slices": [],
-        "roleAssignments": ac._norm_providers(providers), "allowEdits": bool(allow_edits),
+        "roleAssignments": adapters, "roleProviderIds": role_ids,
+        "roleProviders": _role_providers(adapters, role_ids), "allowEdits": bool(allow_edits),
         "maxLoops": int(max_loops),
         "createdAt": ts, "updatedAt": ts, "summary": "", "finalReport": "", "blockerReason": None,
     }
@@ -289,6 +333,8 @@ def start_program(persistence, *, prompt, providers, allow_edits=False, max_loop
 def _map_block_reason(run_status: str, run_reason: str) -> str:
     if run_status == ac.STATUS_BLOCKED_ADAPTER_UNAVAILABLE:
         return BLOCKED_ADAPTER_UNAVAILABLE
+    if run_status == ac.STATUS_BLOCKED_PROVIDER_TIMEOUT:
+        return BLOCKED_PROVIDER_TIMEOUT
     if run_status == ac.STATUS_BLOCKED_NEEDS_HUMAN:
         return BLOCKED_MAX_RETRIES
     return run_reason or run_status
@@ -308,6 +354,7 @@ def _save(persistence, program, on_event):
 def advance_program(persistence, program, *, session_factory=None, on_event=None) -> dict:
     """Run the program's queued slices in order through the council loop, auto-advancing on a verified
     slice and stopping the whole program (honest reason) on the first blocked slice. Synchronous."""
+    repo_root = persistence.openfde_dir.parent
     if program.get("status") in TERMINAL_PROGRAM:
         return program
     for sl in program["slices"]:
@@ -322,10 +369,12 @@ def advance_program(persistence, program, *, session_factory=None, on_event=None
         def _turn(_rec, _sl=sl):                      # mirror the live council turn up to the program
             _sl["episodeId"] = _rec.get("episodeId") or _sl["episodeId"]
             _sl["taskIds"] = _rec.get("taskIds") or _sl["taskIds"]
+            _sl["runId"] = _rec.get("runId") or _sl.get("runId")    # so cancel can reach this slice's run
             _sl["latestCommit"] = _rec.get("latestCommit") or _sl["latestCommit"]
             _save(persistence, program, on_event)
 
         rec = ac.run(persistence, prompt=sl["prompt"], providers=program["roleAssignments"],
+                     provider_ids=program.get("roleProviderIds"),
                      allow_edits=program["allowEdits"], max_loops=program["maxLoops"],
                      program_id=program["programId"], slice_id=sl["sliceId"], slice_title=sl["title"],
                      program_title=program["title"], acceptance=sl["acceptance"],
@@ -333,11 +382,21 @@ def advance_program(persistence, program, *, session_factory=None, on_event=None
 
         sl["episodeId"], sl["taskIds"] = rec["episodeId"], rec["taskIds"]
         sl["latestCommit"], sl["retryCount"] = rec["latestCommit"], rec.get("loop", 0)
+        sl["runId"] = rec.get("runId") or sl.get("runId")
         ep = persistence.get_episode(rec["episodeId"]) if rec.get("episodeId") else None
         sl["commits"] = (ep.get("commitShas") if ep else None) or ([rec["latestCommit"]] if rec["latestCommit"] else [])
         if ep and ep.get("programTitle") != program["title"]:    # link the slice beat to its program parent
             ep["programTitle"] = program["title"]
             persistence.upsert_episode(ep)
+        # A cancel may have landed (endpoint or in-flight) while the slice ran — converge on cancelled,
+        # never resurrect a cancelled program back to running/blocked.
+        ondisk = get_program(repo_root, program["programId"])
+        if rec["status"] == ac.STATUS_CANCELLED or (ondisk and ondisk.get("status") == STATUS_CANCELLED):
+            sl["status"] = SLICE_CANCELLED
+            program["status"], program["currentSliceId"] = STATUS_CANCELLED, None
+            program["blockerReason"] = "cancelled by user"
+            _save(persistence, program, on_event)
+            return program
         if rec["status"] in (ac.STATUS_READY_TO_PUSH, ac.STATUS_VERIFIED):
             sl["status"] = SLICE_VERIFIED
             _save(persistence, program, on_event)
@@ -367,19 +426,56 @@ def continue_program(persistence, program_id, *, session_factory=None, on_event=
     return advance_program(persistence, program, session_factory=session_factory, on_event=on_event)
 
 
-def cancel_program(repo_root, program_id) -> dict | None:
+def cancel_program(persistence, program_id) -> dict | None:
+    """Fully propagate a cancel so nothing is left running: mark the PROGRAM cancelled, the active SLICE
+    cancelled, the active autonomous RUN cancelled AND kill its managed subprocess (no orphan), mark the
+    active phase TASK(s) failed/cancelled, and write a visible system turn. Idempotent on a terminal
+    program. Accepts a Persistence (the richer propagation needs task/transcript access)."""
+    repo_root = persistence.openfde_dir.parent
     program = get_program(repo_root, program_id)
     if not program or program["status"] in (STATUS_COMPLETE, STATUS_CANCELLED):
         return program
+
+    active = next((s for s in program["slices"] if s["sliceId"] == program.get("currentSliceId")), None)
+    if not active:
+        active = next((s for s in program["slices"] if s["status"] == SLICE_RUNNING), None)
+    if active:
+        run_id = active.get("runId")
+        if run_id:
+            run_control.request_cancel(run_id)          # kill the live `claude -p` / `codex exec` NOW
+            ac.cancel_run(repo_root, run_id)            # mark the run record cancelled
+        active["status"] = SLICE_CANCELLED
+        eid = active.get("episodeId")
+        if eid:
+            tasks = persistence.load_tasks()            # mark the in-flight phase task(s) cancelled
+            touched = False
+            for t in tasks:
+                if t.get("episodeId") == eid and t.get("column") in ("todo", "doing") \
+                        and t.get("verificationStatus") != "passed":
+                    t["verificationStatus"], t["cancelled"] = "failed", True
+                    touched = True
+            if touched:
+                persistence.save_tasks(tasks)
+            try:                                        # a visible system turn in Orient
+                external_council.append_transcript_turn(repo_root, {
+                    "role": "system", "label": "system", "kind": "cancelled", "episodeId": eid,
+                    "runId": run_id or "", "programId": program_id, "sliceId": active["sliceId"],
+                    "summary": f"Program cancelled — slice '{active.get('title') or ''}' stopped.",
+                    "body": "Cancelled by user. The managed provider subprocess was terminated; no run or "
+                            "slice was left running."})
+            except Exception:  # noqa: BLE001 - a transcript hiccup must not block the cancel
+                pass
+
     program["status"], program["currentSliceId"] = STATUS_CANCELLED, None
+    program["blockerReason"] = "cancelled by user"
     program["updatedAt"] = _now()
     return upsert_program(repo_root, program)
 
 
-def run(persistence, *, prompt, providers, allow_edits=False, max_loops=2,
+def run(persistence, *, prompt, providers, provider_ids=None, allow_edits=False, max_loops=2,
         session_factory=None, on_event=None, title=None) -> dict:
     """Synchronous convenience for tests: start + advance to a terminal program state."""
-    program = start_program(persistence, prompt=prompt, providers=providers,
+    program = start_program(persistence, prompt=prompt, providers=providers, provider_ids=provider_ids,
                             allow_edits=allow_edits, max_loops=max_loops, title=title)
     if program["status"] != STATUS_RUNNING:
         return program
@@ -396,7 +492,8 @@ def _final_report(program: dict) -> str:
 
 def slice_summary(sl: dict) -> dict:
     return {k: sl.get(k) for k in ("sliceId", "title", "status", "episodeId", "taskIds", "commits",
-                                   "latestCommit", "retryCount", "failureReason", "acceptance", "blastRadius")}
+                                   "latestCommit", "retryCount", "failureReason", "acceptance",
+                                   "blastRadius", "runId")}
 
 
 def program_summary(program: dict | None) -> dict | None:
@@ -412,6 +509,10 @@ def program_summary(program: dict | None) -> dict | None:
         "sliceIndex": idx, "sliceCount": len(slices), "currentSliceIndex": idx,
         "currentSliceId": program.get("currentSliceId"), "currentSliceTitle": cur.get("title") if cur else None,
         "roleAssignments": program.get("roleAssignments", {}),
+        # Exact provider identity kept distinct from the council adapter + display label.
+        "roleProviderIds": program.get("roleProviderIds", {}),
+        "roleProviders": program.get("roleProviders") or _role_providers(
+            program.get("roleAssignments", {}), program.get("roleProviderIds", {})),
         "slices": [slice_summary(s) for s in slices],
         "finalReport": program.get("finalReport"), "updatedAt": program.get("updatedAt"),
     }
@@ -442,7 +543,12 @@ def program_status(program: dict | None, role: str) -> str:
         return "No active program."
     role_key = _ROLE_KEY.get((role or "").strip().lower(), "architect")
     summ = program_summary(program)
-    provider = (program.get("roleAssignments") or {}).get(role_key) or "(unassigned)"
+    adapter = (program.get("roleAssignments") or {}).get(role_key) or "(unassigned)"
+    provider_id = (program.get("roleProviderIds") or {}).get(role_key) or adapter
+    # show the REAL provider id + its label; note the adapter only when it differs (claude-code-local→claude-code)
+    provider = f"{provider_id} ({ac._provider_id_label(provider_id)})"
+    if adapter and adapter != provider_id and adapter != "(unassigned)":
+        provider += f" via {adapter}"
     slices = program.get("slices", [])
     cur = next((s for s in slices if s["sliceId"] == program.get("currentSliceId")), None)
     all_commits = [c[:7] for s in slices for c in (s.get("commits") or ([s["latestCommit"]] if s.get("latestCommit") else []))]

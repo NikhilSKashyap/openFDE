@@ -27,12 +27,26 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 
+from openfde import run_control
+
 ADAPTER_UNAVAILABLE = "adapter_unavailable"
 
 # Known Codex.app CLI location (the `codex` binary often is not on PATH but ships inside the app).
 _CODEX_APP_CLI = "/Applications/Codex.app/Contents/Resources/codex"
-_CODEX_TIMEOUT = 300        # seconds — read-only plan/verify turns are quick; cap runaway calls
-_CLAUDE_TIMEOUT = 900       # seconds — an implement turn can edit several files
+
+
+def _timeout(env_name: str, default: int) -> int:
+    """A managed-call wall-clock budget, overridable via env (so a controlled live run can bound a
+    real provider tightly without code edits). Falls back to ``default`` on a missing/invalid value."""
+    try:
+        v = int(os.environ.get(env_name, "") or default)
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+_CODEX_TIMEOUT = _timeout("OPENFDE_CODEX_TIMEOUT", 300)    # read-only plan/verify turns are quick
+_CLAUDE_TIMEOUT = _timeout("OPENFDE_CLAUDE_TIMEOUT", 900)  # an implement turn can edit several files
 
 
 class SessionError(Exception):
@@ -241,12 +255,12 @@ class CodexExecSession(AgentSession):
         if self.model:
             cmd += ["-m", self.model]
         run_id = self.run_id or (metadata or {}).get("runId")
+        phase = (metadata or {}).get("phase", "send")
         cmd.append(_managed_prompt(run_id, message))
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=_CODEX_TIMEOUT,
-                               env=_managed_env(run_id))
-        except subprocess.TimeoutExpired as exc:
-            raise AdapterUnavailable("codex", self.role, f"codex exec timed out after {_CODEX_TIMEOUT}s") from exc
+        # Cancellable + bounded: a hung `codex exec` is killed on cancel or at the deadline and raises
+        # ProviderCancelled / ProviderTimeout (NOT AdapterUnavailable — those are distinct outcomes).
+        r = run_control.run_managed(cmd, run_id=run_id, provider="codex", role=self.role, phase=phase,
+                                    timeout=_CODEX_TIMEOUT, env=_managed_env(run_id))
         out = (r.stdout or "").strip()
         self._capture((metadata or {}).get("phase", "send"), message,
                       out + (f"\n[stderr] {r.stderr[:400]}" if r.returncode else ""))
@@ -294,11 +308,12 @@ class ClaudeCodeSession(AgentSession):
         else:
             cmd += ["--permission-mode", "plan",
                     "--disallowedTools", "Edit", "Write", "Bash"]   # read-only text turn
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=_CLAUDE_TIMEOUT,
-                               cwd=self.repo_root, env=_managed_env(run_id))
-        except subprocess.TimeoutExpired as exc:
-            raise AdapterUnavailable("claude-code", self.role, f"claude -p timed out after {_CLAUDE_TIMEOUT}s") from exc
+        phase = (metadata or {}).get("phase", "send")
+        # Cancellable + bounded: a hung `claude -p` is killed on cancel or at the deadline and raises
+        # ProviderCancelled / ProviderTimeout so the relay can end the run with the right status.
+        r = run_control.run_managed(cmd, run_id=run_id, provider="claude-code", role=self.role,
+                                    phase=phase, timeout=_CLAUDE_TIMEOUT, cwd=self.repo_root,
+                                    env=_managed_env(run_id))
         text = _parse_claude_json(r.stdout)
         self._capture((metadata or {}).get("phase", "send"), message,
                       text + (f"\n[stderr] {r.stderr[:400]}" if r.returncode else ""))
