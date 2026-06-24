@@ -205,14 +205,29 @@ def _parse_claude_json(stdout: str) -> str:
     return (stdout or "").strip()
 
 
+def _managed_prompt(run_id: str, message: str) -> str:
+    """Prefix a managed-agent prompt with the OPENFDE_MANAGED_RUN_ID marker, so OpenFDE's passive
+    prompt capture recognizes the subprocess as a council turn — not a human prompt — and never mints
+    a standalone episode for it. The marker rides in the prompt text (the agent treats the bracketed
+    line as metadata and proceeds with the task)."""
+    return (f"[OPENFDE_MANAGED_RUN_ID:{run_id or 'unknown'} — OpenFDE-managed autonomous-council agent "
+            f"call; not a user prompt. Proceed with the task below.]\n\n{message}")
+
+
+def _managed_env(run_id: str) -> dict:
+    """Subprocess env carrying OPENFDE_MANAGED_RUN_ID — belt-and-suspenders alongside the prompt marker."""
+    return {**os.environ, "OPENFDE_MANAGED_RUN_ID": str(run_id or "")}
+
+
 class CodexExecSession(AgentSession):
     """Codex driven via `codex exec` — read-only sandbox, project-scoped. Used for the architect's
     plan/decision and the verifier's verdict (Codex plans + verifies; it never edits or commits)."""
 
-    def __init__(self, role: str, *, repo_root, run_dir=None, model=None):
+    def __init__(self, role: str, *, repo_root, run_dir=None, model=None, run_id=None):
         super().__init__(role, "codex", run_dir=run_dir)
         self.repo_root = str(repo_root)
         self.model = model
+        self.run_id = run_id
 
     def start(self) -> None:
         ok, reason = codex_availability()
@@ -225,9 +240,11 @@ class CodexExecSession(AgentSession):
         cmd = [self._cli, "exec", "-s", "read-only", "--skip-git-repo-check", "-C", self.repo_root]
         if self.model:
             cmd += ["-m", self.model]
-        cmd.append(message)
+        run_id = self.run_id or (metadata or {}).get("runId")
+        cmd.append(_managed_prompt(run_id, message))
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=_CODEX_TIMEOUT)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=_CODEX_TIMEOUT,
+                               env=_managed_env(run_id))
         except subprocess.TimeoutExpired as exc:
             raise AdapterUnavailable("codex", self.role, f"codex exec timed out after {_CODEX_TIMEOUT}s") from exc
         out = (r.stdout or "").strip()
@@ -246,11 +263,12 @@ class ClaudeCodeSession(AgentSession):
     disallowed); the implement role runs with `--permission-mode acceptEdits` (file edits only, Bash
     disallowed) so the relay — not the model — makes the commit. Real edits are gated by ``allow_edits``."""
 
-    def __init__(self, role: str, *, repo_root, run_dir=None, model=None, allow_edits=False):
+    def __init__(self, role: str, *, repo_root, run_dir=None, model=None, allow_edits=False, run_id=None):
         super().__init__(role, "claude-code", run_dir=run_dir)
         self.repo_root = str(repo_root)
         self.model = model
         self.allow_edits = bool(allow_edits)
+        self.run_id = run_id
 
     def start(self) -> None:
         ok, reason = claude_code_availability()
@@ -264,7 +282,9 @@ class ClaudeCodeSession(AgentSession):
 
     def send(self, message: str, metadata: dict | None = None) -> str:
         editing = self.edits_this_turn(metadata)
-        cmd = [self._cli, "-p", message, "--output-format", "json", "--add-dir", self.repo_root]
+        run_id = self.run_id or (metadata or {}).get("runId")
+        cmd = [self._cli, "-p", _managed_prompt(run_id, message), "--output-format", "json",
+               "--add-dir", self.repo_root]
         if self.model:
             cmd += ["--model", self.model]
         if editing:
@@ -275,7 +295,8 @@ class ClaudeCodeSession(AgentSession):
             cmd += ["--permission-mode", "plan",
                     "--disallowedTools", "Edit", "Write", "Bash"]   # read-only text turn
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=_CLAUDE_TIMEOUT, cwd=self.repo_root)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=_CLAUDE_TIMEOUT,
+                               cwd=self.repo_root, env=_managed_env(run_id))
         except subprocess.TimeoutExpired as exc:
             raise AdapterUnavailable("claude-code", self.role, f"claude -p timed out after {_CLAUDE_TIMEOUT}s") from exc
         text = _parse_claude_json(r.stdout)
@@ -290,32 +311,35 @@ class ClaudeCodeSession(AgentSession):
 
 
 def build_session(role: str, provider: str, *, run_dir=None, responses=None,
-                  repo_root=None, allow_edits=False, model=None) -> AgentSession:
+                  repo_root=None, allow_edits=False, model=None, run_id=None) -> AgentSession:
     """Construct a managed session for ``role`` from a provider id.
 
     ``echo`` → a deterministic :class:`EchoSession`. ``codex`` → :class:`CodexExecSession`,
     ``claude-code`` → :class:`ClaudeCodeSession` (both real; ``start()`` raises
     :class:`AdapterUnavailable` with a precise reason if the CLI is missing/unauthed). Unknown
-    providers are honestly unavailable, never silently echoed.
+    providers are honestly unavailable, never silently echoed. ``run_id`` marks managed subprocess
+    prompts so passive capture never mints a standalone episode for them.
     """
     p = (provider or "").strip().lower()
     if p == "echo":
         return EchoSession(role, run_dir=run_dir, responses=responses)
     if p in ("claude-code", "claude", "claude_code"):
-        return ClaudeCodeSession(role, repo_root=repo_root, run_dir=run_dir, model=model, allow_edits=allow_edits)
+        return ClaudeCodeSession(role, repo_root=repo_root, run_dir=run_dir, model=model,
+                                 allow_edits=allow_edits, run_id=run_id)
     if p in ("codex", "codex-cli"):
-        return CodexExecSession(role, repo_root=repo_root, run_dir=run_dir, model=model)
+        return CodexExecSession(role, repo_root=repo_root, run_dir=run_dir, model=model, run_id=run_id)
     return _UnavailableSession(role, p or "unknown", f"unknown provider {provider!r}", run_dir=run_dir)
 
 
-def session_factory_for(repo_root, *, allow_edits=False, models=None):
+def session_factory_for(repo_root, *, allow_edits=False, models=None, run_id=None):
     """A relay session factory bound to a repo — real providers drive `codex exec` / `claude -p`
-    scoped to ``repo_root``; the implement turn edits only when ``allow_edits``."""
+    scoped to ``repo_root``; the implement turn edits only when ``allow_edits``. ``run_id`` tags every
+    managed subprocess so passive capture folds them under the run instead of minting episodes."""
     models = models or {}
 
     def factory(role: str, provider: str, *, run_dir=None) -> AgentSession:
         return build_session(role, provider, run_dir=run_dir, repo_root=repo_root,
-                             allow_edits=allow_edits, model=models.get(role))
+                             allow_edits=allow_edits, model=models.get(role), run_id=run_id)
     return factory
 
 

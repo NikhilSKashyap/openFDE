@@ -33,6 +33,7 @@ export default function WorkPanel({
   onExecute = null, onExplain = null, onOpenDiff = null, onReset = null,
   intent = '', onIntentChange = null, run = null, onStop = null,
   onOpenAgentSettings = null, councilNonce = 0,
+  councilTranscript = null, onRefreshCouncilTranscript = null,
 }) {
   const setIntent = onIntentChange || (() => {})
   const scope = scopeLabel(selectionContext)
@@ -88,7 +89,8 @@ export default function WorkPanel({
             (read-only). Building happens once you scope it (Understand / Change). ── */}
         {moment === 'orient' && (
           <Section title="Ask the council">
-            <CouncilChat onOpenAgentSettings={onOpenAgentSettings} councilNonce={councilNonce} />
+            <CouncilChat onOpenAgentSettings={onOpenAgentSettings} councilNonce={councilNonce}
+              transcript={councilTranscript} onRefreshTranscript={onRefreshCouncilTranscript} />
             <p className="work-hint">OpenFDE routes your question to the right council member.
               Select a module on the canvas to dig into its architecture and make a change.</p>
           </Section>

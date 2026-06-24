@@ -60,6 +60,7 @@ import {
   reassimilateReview,
   getReviewEpisodes,
   getRailBoot,
+  getCouncilTranscript,
   getReviewEpisodesFull,
   landEpisode,
   askConcept,
@@ -111,6 +112,21 @@ export default function App() {
   const [councilHandoff, setCouncilHandoff] = useState(null)
   // Bumps on every council websocket event → the Orient council transcript refetches.
   const [councilNonce, setCouncilNonce] = useState(0)
+  // The council transcript is hydrated at APP BOOT (not on a hover / panel reveal) so the Orient
+  // inbox renders the latest run immediately when it opens. null = still loading (skeleton).
+  const [councilTranscript, setCouncilTranscript] = useState(null)
+  const councilTxSeqRef = useRef(0)
+  const refreshCouncilTranscript = useCallback(async () => {
+    const seq = ++councilTxSeqRef.current
+    const t = await getCouncilTranscript()
+    if (seq !== councilTxSeqRef.current || !t?.ok) return
+    // Don't let an empty/late response wipe a populated transcript (same guard as the prompt rail).
+    setCouncilTranscript(prev => {
+      const hadContent = (prev?.items?.length || 0) > 0 || prev?.run
+      const isEmpty = (t.items?.length || 0) === 0 && !t.run
+      return (hadContent && isEmpty) ? prev : t
+    })
+  }, [])
   const [canvasState, _rawCanvasDispatch] = useCanvasState()
   // Live mirror of boxes so WS handlers (stable closures) can map file→module.
   const boxesRef = useRef(canvasState.boxes)
@@ -712,9 +728,15 @@ export default function App() {
       const eps = Array.isArray(r.episodes) ? r.episodes : []
       if (eps.length) setEpisodes(prev => ((prev?.length || 0) > eps.length ? prev : eps))
     })
+    // Council inbox BOOT — hydrate the latest council run at first paint (NOT on a hover / panel
+    // reveal), so the Orient inbox renders immediately when opened.
+    refreshCouncilTranscript()
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Re-fetch the council transcript on every council websocket event (run start, each phase, verdict).
+  useEffect(() => { if (councilNonce > 0) refreshCouncilTranscript() }, [councilNonce, refreshCouncilTranscript])
 
   // ------------------------------------------------------------------ //
   //  Backend probe + hydration (runs once on mount)                     //
@@ -2444,6 +2466,8 @@ export default function App() {
               <WorkPanel
                 moment={currentMoment}
                 councilNonce={councilNonce}
+                councilTranscript={councilTranscript}
+                onRefreshCouncilTranscript={refreshCouncilTranscript}
                 selectionContext={selectionContext}
                 story={flowMode === 'story' ? story : null}
                 specMarkdown={specMarkdown}

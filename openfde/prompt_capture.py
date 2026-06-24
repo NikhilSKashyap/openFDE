@@ -71,6 +71,12 @@ _SKIP_PREFIXES = (
 # A prompt containing this marker anywhere is an internal summarizer call — dropped.
 _INTERNAL_MARKER = "[OpenFDE internal summarizer]"
 
+# A prompt containing this marker is a MANAGED autonomous-council agent call (a `claude -p` /
+# `codex exec` subprocess OpenFDE launched for the relay) — it is a council turn, never a human
+# prompt, so it must never become a standalone episode/chip. The marker rides in the prompt text
+# (agent_sessions prepends it) so passive capture sees it in the recorded transcript.
+MANAGED_MARKER = "OPENFDE_MANAGED_RUN_ID"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -323,6 +329,8 @@ def is_human_prompt(entry: dict) -> bool:
         return False
     if _INTERNAL_MARKER in txt:                     # OpenFDE's own summarizer prompt
         return False
+    if MANAGED_MARKER in txt:                        # OpenFDE-managed council agent subprocess
+        return False
     if "OpenFDE owns version control" in txt:       # OpenFDE-driven runner prompt (e.g.
         return False                                # a hatch repair run) — same skip the
     return True                                     # Codex path already applies
@@ -482,7 +490,7 @@ def is_codex_human_prompt(entry: dict) -> bool:
     txt = codex_prompt_text(entry).strip()
     if not txt:
         return False
-    if _INTERNAL_MARKER in txt or "OpenFDE owns version control" in txt:
+    if _INTERNAL_MARKER in txt or MANAGED_MARKER in txt or "OpenFDE owns version control" in txt:
         return False
     if txt.lstrip().lower().startswith(_CODEX_SKIP_STARTS):
         return False

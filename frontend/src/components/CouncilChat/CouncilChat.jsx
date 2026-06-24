@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, getCouncilTranscript, postAutonomousCouncilRun } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun } from '../../api/backend'
 
 /**
  * CouncilChat — the read-only brain of Orient, as a real chat thread (not a single answer card).
@@ -38,25 +38,20 @@ const busyText = (roles) => {
   return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} mid-work — read-only chat stays available.`
 }
 
-export default function CouncilChat({ onOpenAgentSettings = null, councilNonce = 0 }) {
+export default function CouncilChat({ onOpenAgentSettings = null,
+                                      transcript = null, onRefreshTranscript = null }) {
   const [target, setTarget]       = useState('auto')
   const [question, setQuestion]   = useState('')
   const [messages, setMessages]   = useState([])   // {id, role, text, label?, contributorsLabel?, provider?, state?, retry?}
   const [asking, setAsking]       = useState(false)
   const [busyRoles, setBusyRoles] = useState([])
-  const [transcript, setTranscript] = useState(null)   // durable council conversation (Orient inbox)
   const [launching, setLaunching] = useState(false)    // autonomous relay being kicked off
   const [allowEdits, setAllowEdits] = useState(false)  // let the senior dev write files (real commit)
-  const txSeqRef = useRef(0)                            // latest-wins guard for overlapping refetches
 
-  // The persistent council transcript — refreshed on load, on each council websocket event
-  // (councilNonce bumps in App), and after an Ask. An autonomous relay fires many events in a burst,
-  // so responses can resolve out of order — the seq guard keeps the LAST request the one that wins.
-  const refreshTranscript = useCallback(async () => {
-    const seq = ++txSeqRef.current
-    const t = await getCouncilTranscript()
-    if (seq === txSeqRef.current && t?.ok) setTranscript(t)
-  }, [])
+  // The council transcript is OWNED by App — hydrated at boot, refreshed on every council websocket
+  // event — and passed in, so the Orient inbox is already populated when this panel opens (never
+  // waiting on a hover or a late websocket). Actions just ask App to refresh.
+  const refreshTranscript = useCallback(() => { onRefreshTranscript?.() }, [onRefreshTranscript])
 
   // Launch the autonomous relay for the typed prompt — OpenFDE runs the full
   // architect→consult→decide→implement→verify loop; turns stream into the transcript live.
@@ -70,10 +65,6 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
     setLaunching(false)
     if (res?.ok) { setQuestion(''); refreshTranscript() }
   }, [question, launching, allowEdits, refreshTranscript])
-  useEffect(() => {
-    const seq = ++txSeqRef.current
-    getCouncilTranscript().then(t => { if (seq === txSeqRef.current && t?.ok) setTranscript(t) })
-  }, [councilNonce])
 
   const idRef    = useRef(0)
   const abortRef = useRef(null)
@@ -204,7 +195,7 @@ export default function CouncilChat({ onOpenAgentSettings = null, councilNonce =
 
       {/* Persistent council inbox — the durable handoff conversation (orange-box transcript),
           above the read-only Ask thread. Refreshes on council websocket events. */}
-      <CouncilTranscript data={transcript} />
+      <CouncilTranscript data={transcript} launching={launching} />
 
       {/* Scrolling conversation — grows; composer below stays docked. */}
       <div className="council-thread" ref={threadRef}>
@@ -370,20 +361,56 @@ function RunBanner({ run }) {
   )
 }
 
-function CouncilTranscript({ data }) {
+// In-flight phase → "<role> is <verb>…". Fills the gap between a phase starting and its turn landing
+// so the user always sees who has the baton, never just "running".
+const PHASE_VERB = {
+  ARCHITECT_PLANNING: ['architect', 'is planning'], SR_DEV_CONSULTING: ['sr_dev', 'is reviewing'],
+  ARCHITECT_DECIDING: ['architect', 'is deciding'], SR_DEV_IMPLEMENTING: ['sr_dev', 'is implementing'],
+  CODEX_VERIFYING: ['verifier', 'is verifying'], CHANGES_REQUESTED: ['sr_dev', 'is fixing'],
+}
+const ROLE_FULL = { architect: 'architect (Codex)', sr_dev: 'sr dev (Claude Code)', verifier: 'verifier (Codex)' }
+function LivePhaseRow({ run }) {
+  const pv = PHASE_VERB[run.phase]
+  if (!pv) return null
+  const [role, verb] = pv
+  const accent = rowAccent({ role })
+  return (
+    <div className="ctx-row ctx-live" style={{ borderLeftColor: accent }}>
+      <div className="ctx-row-head">
+        <span className="ctx-role" style={{ color: accent }}>{ROLE_FULL[role]}</span>
+        <span className="ctx-summary">{verb}<span className="ctx-live-dots">…</span></span>
+      </div>
+    </div>
+  )
+}
+
+function CouncilTranscript({ data, launching = false }) {
   const [open, setOpen] = useState({})
-  if (!data) return null
+  const [showPrev, setShowPrev] = useState(false)
+  // Boot/loading: the transcript hasn't hydrated yet → a clear skeleton, never a blank panel.
+  if (!data) {
+    return (
+      <div className="ctx">
+        <div className="ctx-head"><span className="ctx-title">Council inbox</span></div>
+        <div className="ctx-skeleton">{launching ? 'Starting autonomous council…' : 'Loading latest council run…'}</div>
+      </div>
+    )
+  }
   const items = data.items || []
+  const run = data.run
+  const prev = data.previousItems || []
+  const noRuns = items.length === 0 && !run && !launching
   return (
     <div className="ctx">
-      <RunBanner run={data.run} />
+      <RunBanner run={run} />
       <div className="ctx-head">
         <span className="ctx-title">Council inbox</span>
         {data.activeStatus && <span className="ctx-status">{data.activeStatus}</span>}
-        {!data.active && <span className="ctx-idle">idle</span>}
+        {!data.active && !run?.running && <span className="ctx-idle">idle</span>}
       </div>
-      {items.length === 0 ? (
-        <div className="ctx-empty">No active external handoff — start council work, or ask below.</div>
+      {launching && !run && <div className="ctx-skeleton">Starting autonomous council…</div>}
+      {noRuns ? (
+        <div className="ctx-empty">No council runs yet — type a task and Run autonomous council, or ask below.</div>
       ) : items.map(it => {
         const accent = rowAccent(it)
         const expandable = !!(it.body || (it.findings || []).length)
@@ -418,6 +445,22 @@ function CouncilTranscript({ data }) {
           </div>
         )
       })}
+      {run?.running && <LivePhaseRow run={run} />}
+      {prev.length > 0 && (
+        <div className="ctx-prev">
+          <button className="ctx-prev-toggle" onClick={() => setShowPrev(s => !s)}>
+            {showPrev ? '▾' : '▸'} previous runs ({data.previousRunCount || 1})
+          </button>
+          {showPrev && prev.map(it => (
+            <div key={it.id} className="ctx-row ctx-prev-row" style={{ borderLeftColor: rowAccent(it) }}>
+              <div className="ctx-row-head">
+                <span className="ctx-role" style={{ color: rowAccent(it) }}>{it.label}</span>
+                <span className="ctx-summary">{it.summary}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

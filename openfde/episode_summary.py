@@ -136,7 +136,7 @@ def is_operational(prompt: str) -> bool:
 # council in its prompt is never folded.
 _COUNCIL_MACHINERY = (
     (re.compile(r"\b(implementation|handoff)\s+prompt\b", re.I), "implementation_prompt"),
-    (re.compile(r"\bautonomous\s+council\s+(relay|verif\w*|review)\b", re.I), "relay"),
+    (re.compile(r"\bautonomous\s+council\s+(relay|verif\w*|review)\b|\bcouncil\s+relay\b", re.I), "relay"),
     (re.compile(r"\bexternal\s+agent\s+council\b", re.I), "council"),
     (re.compile(r"\bcouncil\s+(smoke|verification)\b|\bsmoke\s+test\s+artifact\b", re.I), "smoke"),
 )

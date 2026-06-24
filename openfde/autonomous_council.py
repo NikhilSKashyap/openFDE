@@ -600,7 +600,7 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
     each turn for live WS."""
     repo_root = persistence.openfde_dir.parent
     factory = session_factory or agent_sessions.session_factory_for(
-        repo_root, allow_edits=rec.get("allowEdits", False))
+        repo_root, allow_edits=rec.get("allowEdits", False), run_id=rec["runId"])
     rdir = run_dir(repo_root, rec["runId"])
 
     sessions = {}

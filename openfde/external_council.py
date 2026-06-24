@@ -395,8 +395,20 @@ def build_council_transcript(repo_root, *, council_chat=None) -> dict:
     # Prefer the autonomous relay's recorded turns when present — the full conversation in true order
     # (incl. consultation + decision). Otherwise derive the turns from the bus channels.
     recorded = load_recorded_transcript(repo_root)
-    items = list(recorded)
-    if not recorded:
+    previous_items, previous_run_count = [], 0
+    if recorded:
+        # Scope the inbox to the ACTIVE/LATEST run — never interleave older runs (or stale echo
+        # smoke turns) above it; the rest go to previousItems (shown behind "previous runs").
+        run_ids = [t.get("runId") for t in recorded if t.get("runId")]
+        latest_run_id = run_ids[-1] if run_ids else None
+        if latest_run_id:
+            items = [t for t in recorded if t.get("runId") == latest_run_id]
+            previous_items = [t for t in recorded if t.get("runId") != latest_run_id]
+            previous_run_count = len({t.get("runId") or "manual" for t in previous_items})
+        else:
+            items = list(recorded)
+    else:
+        items = []
         # 0. The user's latest Orient question (a real record) opens the conversation.
         last_user = next((t for t in reversed(council_chat or [])
                           if isinstance(t, dict) and t.get("role") == "user" and (t.get("text") or "").strip()), None)
@@ -445,8 +457,10 @@ def build_council_transcript(repo_root, *, council_chat=None) -> dict:
                     "findings": findings, "body": e["body"],
                 })
 
-    # 3. Pending session-wakeup delivery — the current "waiting on" state, prominent + last.
-    pending = handoff_broker.active_delivery(deliveries)
+    # 3. Pending session-wakeup delivery — the current "waiting on" state, prominent + last. This is
+    #    the MANUAL-council wakeup mechanism; an autonomous run drives its own handoffs, so its bus
+    #    updates must NOT surface a spurious "Waiting for …" row in the recorded transcript.
+    pending = None if recorded else handoff_broker.active_delivery(deliveries)
     pending = pending if (pending and not pending.get("acknowledgedAt")) else None
     if pending:
         to = pending.get("toRole")
@@ -465,6 +479,7 @@ def build_council_transcript(repo_root, *, council_chat=None) -> dict:
     active = bool((active_view and active_view["status"] in ACTIVE_STATUSES) or pending)
     return {
         "ok": True, "active": active, "items": items, "hasBus": has_bus,
+        "previousItems": previous_items, "previousRunCount": previous_run_count,
         "pendingDelivery": handoff_broker.delivery_summary(pending),
         "activeStatus": active_view["status"] if active_view else None,
     }

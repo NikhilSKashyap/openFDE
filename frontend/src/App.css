@@ -3486,6 +3486,17 @@
 .ctx-findings { margin: 0; padding-left: 16px; }
 .ctx-pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10.5px; background: var(--surface-2); border-radius: 5px; padding: 6px 8px; margin-top: 4px; }
+/* Boot skeleton, live in-flight phase row, and the collapsible "previous runs" section. */
+.ctx-skeleton { font-size: 11px; color: var(--text-muted); padding: 8px 4px; font-style: italic; }
+.ctx-row.ctx-live { background: color-mix(in srgb, var(--accent-orange) 8%, transparent); }
+.ctx-live .ctx-summary { color: var(--accent-orange); }
+.ctx-live-dots { display: inline-block; animation: ctx-blink 1.2s steps(3, end) infinite; }
+@keyframes ctx-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+.ctx-prev { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 5px; }
+.ctx-prev-toggle { background: none; border: none; color: var(--text-muted); font-size: 10px; cursor: pointer;
+  padding: 2px 2px 4px; }
+.ctx-prev-toggle:hover { color: var(--text); }
+.ctx-prev-row { opacity: 0.55; }
 
 /* Autonomous relay — "Run autonomous council" launcher + the live run banner. */
 .council-run-auto-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }

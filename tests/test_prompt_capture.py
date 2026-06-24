@@ -42,6 +42,20 @@ class ParseTest(unittest.TestCase):
         self.assertFalse(pc.is_human_prompt(
             _user("[OpenFDE internal summarizer]\n\nSummarize this prompt: build login", "uX")))
 
+    def test_filters_managed_council_subprocess_marker(self):
+        # A managed autonomous-council agent subprocess (claude -p / codex exec OpenFDE launched) is a
+        # council turn, never a standalone human prompt — for BOTH the Claude and Codex capture paths.
+        from openfde.agent_sessions import _managed_prompt
+        marked = _managed_prompt("run_abc123", "You are the ARCHITECT on an autonomous engineering council...")
+        self.assertIn("OPENFDE_MANAGED_RUN_ID", marked)
+        self.assertFalse(pc.is_human_prompt(_user(marked, "uM")))
+        codex_entry = {"type": "response_item",
+                       "payload": {"type": "message", "role": "user",
+                                   "content": [{"type": "text", "text": marked}]}}
+        self.assertFalse(pc.is_codex_human_prompt(codex_entry))
+        # a genuine human prompt is still captured
+        self.assertTrue(pc.is_human_prompt(_user("add a /healthz endpoint", "uH")))
+
     def test_filters_command_and_tool_noise(self):
         self.assertFalse(pc.is_human_prompt(_user("<command-name>/login</command-name>", "u3")))
         self.assertFalse(pc.is_human_prompt(_user("<local-command-stdout>ok</local-command-stdout>", "u4")))

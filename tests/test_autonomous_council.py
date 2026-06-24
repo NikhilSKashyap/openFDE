@@ -124,8 +124,16 @@ class AutonomousCouncilTest(unittest.TestCase):
         labels = [it["label"] for it in tx["items"]]
         for lbl in ("architect (Codex)", "sr dev (Claude Code)", "verifier (Codex)"):
             self.assertIn(lbl, labels)
-        self.assertEqual(len(tx["items"]), len(ec.load_recorded_transcript(self.root)))
         self.assertFalse(tx["active"])                                 # VERIFIED → inactive
+
+    def test_transcript_scopes_to_latest_run_previous_below(self):
+        r1 = self._run(prompt="first task")
+        r2 = self._run(prompt="second task")
+        tx = ec.build_council_transcript(self.root)
+        self.assertEqual({it.get("runId") for it in tx["items"]}, {r2["runId"]})        # only the latest run
+        self.assertEqual({it.get("runId") for it in tx["previousItems"]}, {r1["runId"]})  # older run separated
+        self.assertGreaterEqual(tx["previousRunCount"], 1)
+        self.assertNotIn(r1["runId"], {it.get("runId") for it in tx["items"]})           # never interleaved
 
     # ── Loops + safety ────────────────────────────────────────────────────────
     def test_changes_requested_then_fixed_then_verified(self):
@@ -215,6 +223,8 @@ class CouncilNoiseMigrationTest(unittest.TestCase):
         cases = {
             "Autonomous Council Verification": "relay",
             "Autonomous Council Relay": "relay",
+            "Council Relay Developer Note": "relay",          # managed-agent capture leak
+            "Council Relay Documentation": "relay",           # managed-agent capture leak
             "Claude Code Implementation Prompt": "implementation_prompt",
             "Codex Implementation Prompt": "implementation_prompt",
             "External Agent Council": "council",
