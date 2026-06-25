@@ -188,6 +188,27 @@ def _signal_group(proc, sig) -> None:
             pass
 
 
+def _drain(stream, sink) -> None:
+    """Read a pipe to EOF on a reader thread (no pipe-buffer deadlock); tolerate the stream being
+    closed underneath us during teardown."""
+    try:
+        if stream is not None:
+            sink.append(stream.read())
+    except (ValueError, OSError):                  # stream closed mid-read during cleanup
+        pass
+
+
+def _close_streams(proc) -> None:
+    """Close a managed subprocess's pipe handles after its output is drained, so they don't trip a
+    ResourceWarning when the Popen is garbage-collected."""
+    for stream in (proc.stdout, proc.stderr, proc.stdin):
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001 - best-effort close
+                pass
+
+
 def run_managed(cmd, *, run_id, provider, role, phase, timeout,
                 cwd=None, env=None, input_text=None) -> subprocess.CompletedProcess:
     """Run ``cmd`` as a managed provider subprocess that is BOTH wall-clock bounded and externally
@@ -208,8 +229,8 @@ def run_managed(cmd, *, run_id, provider, role, phase, timeout,
     )
     _register(run_id, proc)
     out_chunks, err_chunks = [], []
-    t_out = threading.Thread(target=lambda: out_chunks.append(proc.stdout.read() if proc.stdout else ""), daemon=True)
-    t_err = threading.Thread(target=lambda: err_chunks.append(proc.stderr.read() if proc.stderr else ""), daemon=True)
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_chunks), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, err_chunks), daemon=True)
     t_out.start()
     t_err.start()
     if input_text is not None:
@@ -236,14 +257,15 @@ def run_managed(cmd, *, run_id, provider, role, phase, timeout,
             outcome = "cancelled"
         if outcome != "ok":
             _kill_group(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
     finally:
         _unregister(run_id, proc)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pass
-    t_out.join(timeout=5)
-    t_err.join(timeout=5)
+        _close_streams(proc)          # drained → close the pipes so the Popen leaks no handles
 
     if outcome == "cancelled":
         raise ProviderCancelled(provider, role, phase)
