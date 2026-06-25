@@ -181,7 +181,9 @@ and treats native wakeup as best-effort only — durable delivery, not the wakeu
 is the source of truth. See `AGENTS.md` for the full protocol. _Verify:_ running
 `openfde council status --role codex` (or `--role claude`) should print a
 `▶ Resume council handoff ...` / inbox banner when work is pending, or
-`No active council handoff.` on a clean checkout.
+`No active council handoff.` on a clean checkout. If a provider call fails, the
+run blocks before the next role and the error is surfaced as a visible receipt
+rather than treated as that role's output.
 
 A single autonomous council run is recorded as one parent episode. Inside that
 episode, the role turns stay ordered as user → Architect → Senior Dev → Verifier.
