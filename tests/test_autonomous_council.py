@@ -376,6 +376,52 @@ class AutonomousCouncilTest(unittest.TestCase):
         for later in ("implement", "verify", "push"):
             self.assertEqual(cards[later]["verificationStatus"], "pending", later)
 
+    def test_reconcile_heals_persisted_blocked_timeout_phase_cards(self):
+        # a real consult-timeout run, then STALE its cards like an old persisted P260 receipt:
+        # 'Architect plan: doing/failed', consult left mid-flight — the load-path repair must fix it.
+        calls = []
+        rec = self._run(provider_ids={"architect": "echo", "srDev": "claude-code", "verifier": "echo"},
+                        session_factory=_recording_factory(calls, timeout_on="consult", timeout_role="sr_dev"))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_TIMEOUT)
+        eid = rec["episodeId"]
+        tasks = self.p.load_tasks()
+        for t in tasks:
+            if t.get("episodeId") == eid and t.get("phaseKey"):
+                stale = {"column": "doing", "verificationStatus": "failed"} if t["phaseKey"] == "plan" \
+                    else {"column": "doing", "verificationStatus": "pending"} if t["phaseKey"] == "consult" \
+                    else {"column": "todo", "verificationStatus": "pending"}
+                t.update(stale, blockedReason=None)
+        self.p.save_tasks(tasks)
+        # heal on the server-side task load path
+        self.assertGreaterEqual(ac.reconcile_blocked_run_phase_cards(self.p), 1)
+        cards = {t["phaseKey"]: t for t in self.p.load_tasks() if t.get("episodeId") == eid and t.get("phaseKey")}
+        self.assertEqual((cards["plan"]["column"], cards["plan"]["verificationStatus"]), ("done", "passed"))
+        self.assertEqual((cards["consult"]["column"], cards["consult"]["verificationStatus"]), ("doing", "failed"))
+        self.assertIn("timed out", cards["consult"]["blockedReason"])
+        for later in ("implement", "verify", "push"):
+            self.assertEqual((cards[later]["column"], cards[later]["verificationStatus"]), ("todo", "pending"), later)
+        # idempotent: a clean second pass changes nothing
+        self.assertEqual(ac.reconcile_blocked_run_phase_cards(self.p), 0)
+
+    def test_reconcile_infers_phase_from_reason_without_timeoutinfo(self):
+        # an OLD persisted run (no structured timeoutInfo) — the failed phase comes from the reason text.
+        eid, run_id = "episode_old1", "run_old1"
+        reason = "Architect timed out while using Codex after 90s (plan)."
+        self.p.upsert_episode({"episodeId": eid, "title": "Old", "status": "blocked", "runIds": [run_id],
+                               "council": {"status": ac.STATUS_BLOCKED_PROVIDER_TIMEOUT, "runId": run_id,
+                                           "blockedReason": reason}})
+        ac.save_run(self.root, {"runId": run_id, "episodeId": eid, "product": True,
+                                "status": ac.STATUS_BLOCKED_PROVIDER_TIMEOUT, "blockedReason": reason})
+        self.p.save_tasks([{"id": f"task_{k}", "episodeId": eid, "phaseKey": k, "title": t,
+                            "column": "doing" if k == "plan" else "todo", "verificationStatus": "pending"}
+                           for k, t in ac._PHASE_TASKS])
+        self.assertEqual(ac.reconcile_blocked_run_phase_cards(self.p), 1)
+        cards = {t["phaseKey"]: t for t in self.p.load_tasks()}
+        self.assertEqual((cards["plan"]["column"], cards["plan"]["verificationStatus"]), ("doing", "failed"))
+        self.assertIn("timed out", cards["plan"]["blockedReason"])
+        for later in ("consult", "implement", "verify", "push"):           # none reached → none marked done
+            self.assertEqual(cards[later]["verificationStatus"], "pending", later)
+
     # ── Provider-error guard (a transport failure never becomes content) ──────
     def test_architect_provider_error_blocks_before_consult(self):
         calls = []

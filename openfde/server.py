@@ -750,6 +750,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
         episodes = episode_llm_summary.ensure_facts(persistence)   # ensure clean episode titles first
         from openfde import autonomous_council, program as _pg
         autonomous_council.hydrate_phase_cards(persistence)        # parents with council data get phase cards
+        autonomous_council.reconcile_blocked_run_phase_cards(persistence)  # heal stale blocked-timeout cards
         _pg.reconcile_program_slices(persistence)                  # backfill program/slice titles onto cards
         tasks = persistence.load_tasks()
         repaired, changed = repair_episode_tasks(tasks, episodes)

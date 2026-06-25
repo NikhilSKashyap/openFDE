@@ -365,23 +365,31 @@ def hydrate_phase_cards(persistence) -> int:
     return added
 
 
-def _set_phase_task(persistence, rec, phase_key, column, verification=None, commit=None, blocked_reason=None):
+def _set_phase_task(persistence, rec, phase_key, column, verification=None, commit=None, blocked_reason=None) -> bool:
+    """Set a phase card's column/verification (+ optional commit / blockedReason). Writes ONLY the
+    fields that actually differ, so it never downgrades an already-correct card and a no-op skips the
+    save. Returns True iff something changed."""
     if not (rec.get("product") and rec.get("episodeId")):
-        return
+        return False
     tasks = persistence.load_tasks()
     changed = False
     for t in tasks:
         if isinstance(t, dict) and t.get("episodeId") == rec["episodeId"] and t.get("phaseKey") == phase_key:
-            t["column"] = column
-            if verification:
+            if t.get("column") != column:
+                t["column"] = column
+                changed = True
+            if verification and t.get("verificationStatus") != verification:
                 t["verificationStatus"] = verification
-            if commit:
+                changed = True
+            if commit and t.get("commitSha") != commit:
                 t["commitSha"] = commit
-            if blocked_reason is not None:
+                changed = True
+            if blocked_reason is not None and t.get("blockedReason") != (blocked_reason or None):
                 t["blockedReason"] = blocked_reason or None
-            changed = True
+                changed = True
     if changed:
         persistence.save_tasks(tasks)
+    return changed
 
 
 def _attach_commit_to_episode(persistence, episode_id, sha):
@@ -765,19 +773,73 @@ _PHASE_TASK_BY_TOKEN = {"plan": "plan", "consult": "consult", "decide": "consult
 _PHASE_CARD_ORDER = ["plan", "consult", "implement", "verify", "push"]
 
 
-def _repair_phase_cards_on_block(persistence, rec, failed_token, reason):
+def _repair_phase_cards_on_block(persistence, rec, failed_token, reason) -> bool:
     """OpenPM truth for a blocked run: phases BEFORE the one that failed are done/passed, the FAILED
     phase is failed (with the reason), and LATER phases stay todo/pending. So a Senior-dev-consult
-    timeout fails the *consult* card — never 'Architect plan'. General across blocked council runs."""
+    timeout fails the *consult* card — never 'Architect plan'. General across blocked council runs and
+    any phase. Idempotent (only fixes what's wrong); returns True iff a card changed."""
     failed_key = _PHASE_TASK_BY_TOKEN.get(failed_token, "plan")
     idx = _PHASE_CARD_ORDER.index(failed_key) if failed_key in _PHASE_CARD_ORDER else 0
+    changed = False
     for i, key in enumerate(_PHASE_CARD_ORDER):
         if i < idx:
-            _set_phase_task(persistence, rec, key, "done", "passed")          # completed prior phases
+            changed |= _set_phase_task(persistence, rec, key, "done", "passed")          # completed prior
         elif i == idx:
-            _set_phase_task(persistence, rec, key, "doing", "failed", blocked_reason=reason)  # the failure
+            changed |= _set_phase_task(persistence, rec, key, "doing", "failed", blocked_reason=reason)  # failure
         else:
-            _set_phase_task(persistence, rec, key, "todo", "pending", blocked_reason="")       # not reached
+            changed |= _set_phase_task(persistence, rec, key, "todo", "pending", blocked_reason="")       # not reached
+    return changed
+
+
+_REASON_PHASE_RE = re.compile(r"\(([a-z_]+)\)\.?\s*$")
+
+
+def _phase_from_reason(reason) -> str:
+    """Fallback when a run has no structured timeoutInfo: pull the phase token out of a blocked reason
+    like '… after 90s (consult).'."""
+    m = _REASON_PHASE_RE.search(reason or "")
+    return m.group(1) if m else ""
+
+
+def _latest_blocked_timeout_run(persistence, e):
+    """The episode's run record that is blocked_provider_timeout — its mirrored ``council.runId`` first,
+    else the newest such among its ``runIds`` — or None."""
+    repo_root = persistence.openfde_dir.parent
+    rid = (e.get("council") or {}).get("runId")
+    if rid:
+        rec = load_run(repo_root, rid)
+        if rec and rec.get("status") == STATUS_BLOCKED_PROVIDER_TIMEOUT:
+            return rec
+    best = None
+    for rid in (e.get("runIds") or []):
+        rec = load_run(repo_root, rid)
+        if rec and rec.get("status") == STATUS_BLOCKED_PROVIDER_TIMEOUT \
+                and (not best or rec.get("updatedAt", "") > best.get("updatedAt", "")):
+            best = rec
+    return best
+
+
+def reconcile_blocked_run_phase_cards(persistence) -> int:
+    """Heal stale OpenPM phase cards for ALREADY-PERSISTED blocked-timeout runs — the block-time repair
+    only fixed future runs, so old P260-style receipts stayed stale (e.g. 'Architect plan: doing/failed'
+    after a *consult* timeout). For each product episode whose latest run is ``blocked_provider_timeout``,
+    derive the failed phase from the run's ``timeoutInfo.phase`` (or, failing that, its blocked reason)
+    and set: prior phases done/passed, the timed-out phase doing/failed (+ reason), later phases
+    todo/pending. Runs on the task load path so receipts heal on reload. No git; idempotent — only writes
+    a card that is actually wrong, never marks an unreached phase done. Returns the episode count fixed."""
+    fixed = 0
+    for e in persistence.load_episodes():
+        if e.get("internal"):
+            continue
+        if (e.get("council") or {}).get("status") != STATUS_BLOCKED_PROVIDER_TIMEOUT:
+            continue
+        rec = _latest_blocked_timeout_run(persistence, e)
+        if not rec:
+            continue
+        phase = (rec.get("timeoutInfo") or {}).get("phase") or _phase_from_reason(rec.get("blockedReason"))
+        if phase and _repair_phase_cards_on_block(persistence, rec, phase, rec.get("blockedReason") or ""):
+            fixed += 1
+    return fixed
 
 
 def _provider_id_for_role(rec, role):
