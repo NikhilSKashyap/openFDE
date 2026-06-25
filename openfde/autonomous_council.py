@@ -56,10 +56,11 @@ STATUS_READY_TO_PUSH = "ready_to_push"
 STATUS_BLOCKED_NEEDS_HUMAN = "blocked_needs_human"
 STATUS_BLOCKED_ADAPTER_UNAVAILABLE = "blocked_adapter_unavailable"
 STATUS_BLOCKED_PROVIDER_TIMEOUT = "blocked_provider_timeout"
+STATUS_BLOCKED_PROVIDER_ERROR = "blocked_provider_error"
 STATUS_CANCELLED = "cancelled"
 TERMINAL_STATUSES = (STATUS_VERIFIED, STATUS_READY_TO_PUSH, STATUS_BLOCKED_NEEDS_HUMAN,
                      STATUS_BLOCKED_ADAPTER_UNAVAILABLE, STATUS_BLOCKED_PROVIDER_TIMEOUT,
-                     STATUS_CANCELLED)
+                     STATUS_BLOCKED_PROVIDER_ERROR, STATUS_CANCELLED)
 
 # ── Story loop edges (the data model preserves loop structure, not a flat line) ─
 EDGE_PROPOSED = "proposed"
@@ -199,6 +200,7 @@ def run_summary(rec: dict | None) -> dict | None:
         "blockedReason": rec.get("blockedReason"), "autoPush": rec.get("autoPush", False),
         "product": rec.get("product", True), "providers": rec.get("providers") or {},
         "providerIds": rec.get("providerIds") or {}, "timeoutInfo": rec.get("timeoutInfo"),
+        "errorInfo": rec.get("errorInfo"),
         "decisionMode": rec.get("decisionMode"), "running": rec.get("status") == STATUS_RUNNING,
     }
 
@@ -723,6 +725,13 @@ _ROLE_KEY = {"architect": "architect", "sr_dev": "srDev", "verifier": "verifier"
 _PHASE_TASK = {PHASE_ARCHITECT_PLANNING: "plan", PHASE_SR_DEV_CONSULTING: "consult",
                PHASE_ARCHITECT_DECIDING: "consult", PHASE_SR_DEV_IMPLEMENTING: "implement",
                PHASE_CODEX_VERIFYING: "verify"}
+# Plain-language phase name keyed by the metadata phase token (used in blocked reasons / turns).
+_PHASE_HUMAN = {"plan": "architect plan", "consult": "senior dev consultation",
+                "decide": "architect decision", "implement": "senior dev implementation",
+                "verify": "verification"}
+# The phase-task column key for each metadata phase token (so a provider error fails the right card).
+_PHASE_TASK_BY_TOKEN = {"plan": "plan", "consult": "consult", "decide": "consult",
+                        "implement": "implement", "verify": "verify"}
 
 
 def _provider_id_for_role(rec, role):
@@ -786,6 +795,47 @@ def _cancelled_inflight(persistence, rec, exc, on_event):
     return rec
 
 
+def _require_real_response(rec, role, phase, text):
+    """Reject an obvious provider/runtime error returned where a real ``role`` response was expected — a
+    transport failure (``API Error: Overloaded``, an empty reply, an auth/rate-limit error) must NEVER
+    become plan/consult/decision/implementation/verification content. Returns the text when it's real;
+    raises :class:`run_control.ProviderError` otherwise so the run blocks before the next role runs."""
+    summary = run_control.classify_provider_error(text)
+    if summary:
+        raise run_control.ProviderError(_provider_id_for_role(rec, role), role, phase, summary)
+    return text
+
+
+def _block_provider_error(persistence, rec, exc, on_event):
+    """Terminal: a provider returned a transport/runtime error instead of a real role response. Reads, in
+    Orient, e.g. 'Claude Code local returned a provider error during architect plan: API Error: Overloaded.'
+    The error text is recorded as a system BLOCKED turn — never as a proposal/consultation/decision."""
+    repo_root = persistence.openfde_dir.parent
+    role = exc.role or rec.get("activeRole") or "architect"
+    phase = exc.phase or rec.get("phase") or ""
+    summary = (exc.summary or "provider error").strip()
+    provider_id = _provider_id_for_role(rec, role)
+    label = _provider_id_label(provider_id)
+    phase_h = _PHASE_HUMAN.get(phase, phase or "the run")
+    rec["phase"], rec["status"], rec["activeRole"] = PHASE_BLOCKED, STATUS_BLOCKED_PROVIDER_ERROR, None
+    rec["blockedReason"] = f"{label} returned a provider error during {phase_h}: {summary}."
+    rec["errorInfo"] = {"role": role, "providerId": provider_id, "displayLabel": label,
+                        "phase": phase, "summary": summary}
+    _add_turn(repo_root, rec, "system", "system", "blocked",
+              summary=f"{label} returned a provider error during {phase_h}: {summary}.",
+              body=f"The {role} provider ({provider_id or label}) returned a transport/runtime error "
+                   f"instead of a real {phase_h} response, so OpenFDE blocked (BLOCKED_PROVIDER_ERROR) "
+                   f"rather than treating it as content. Any managed subprocess was stopped.\n\n"
+                   f"Provider returned: {summary}")
+    _add_edge(rec, EDGE_BLOCKED, "system")
+    _set_phase_task(persistence, rec, _PHASE_TASK_BY_TOKEN.get(phase, "plan"), "doing", "failed")
+    if rec.get("episodeId"):
+        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+        _mark_episode(persistence, rec["episodeId"], "blocked")
+    _emit(persistence, rec, on_event)
+    return rec
+
+
 def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dict:
     """Drive the relay from ARCHITECT_PLANNING to a terminal status. Synchronous (the caller may run
     it off the event loop). ``session_factory(role, provider, run_dir=...)`` builds managed sessions —
@@ -813,7 +863,8 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         _set_phase_task(persistence, rec, "plan", "doing", "pending")
         _emit(persistence, rec, on_event)
         _guard_cancel(rec)
-        plan = arch.send(_plan_prompt(rec["prompt"]), {"phase": "plan", "runId": rec["runId"]})
+        plan = _require_real_response(rec, "architect", "plan",
+                                      arch.send(_plan_prompt(rec["prompt"]), {"phase": "plan", "runId": rec["runId"]}))
         _add_turn(repo_root, rec, "architect", labels["architect"], "proposal",
                   summary=_first_line(plan), body=plan)
         _add_edge(rec, EDGE_PROPOSED, "architect")
@@ -825,7 +876,8 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
         _set_phase_task(persistence, rec, "consult", "doing", "pending")
         _emit(persistence, rec, on_event)
         _guard_cancel(rec)
-        consult = srdev.send(_consult_prompt(plan), {"phase": "consult", "runId": rec["runId"]})
+        consult = _require_real_response(rec, "sr_dev", "consult",
+                                         srdev.send(_consult_prompt(plan), {"phase": "consult", "runId": rec["runId"]}))
         _add_turn(repo_root, rec, "sr_dev", labels["sr_dev"], "consultation",
                   summary=_first_line(consult), body=consult)
         _add_edge(rec, EDGE_CONSULTED, "sr_dev")
@@ -850,7 +902,9 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             rec["decisionMode"] = "architect"
             _emit(persistence, rec, on_event)
             _guard_cancel(rec)
-            decision = arch.send(_decide_prompt(consult, rec["prompt"]), {"phase": "decide", "runId": rec["runId"]})
+            decision = _require_real_response(rec, "architect", "decide",
+                                              arch.send(_decide_prompt(consult, rec["prompt"]),
+                                                        {"phase": "decide", "runId": rec["runId"]}))
             _add_turn(repo_root, rec, "architect", labels["architect"], "decision",
                       summary=_first_line(decision), body=decision)
             _add_edge(rec, EDGE_DECIDED, "architect")
@@ -864,8 +918,10 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             _emit(persistence, rec, on_event)
             _guard_cancel(rec)
             before = _porcelain(repo_root)
-            impl = srdev.send(_implement_prompt(rec["prompt"], plan, consult, work_input),
-                              {"phase": "implement", "runId": rec["runId"], "loop": rec["loop"]})
+            # Validate BEFORE any commit logic — a provider error must produce no commit.
+            impl = _require_real_response(rec, "sr_dev", "implement",
+                                          srdev.send(_implement_prompt(rec["prompt"], plan, consult, work_input),
+                                                     {"phase": "implement", "runId": rec["runId"], "loop": rec["loop"]}))
             if srdev.provider == "echo":
                 sha, checks = _parse_impl(impl)
             elif getattr(srdev, "allow_edits", False):
@@ -893,8 +949,9 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             _set_phase_task(persistence, rec, "verify", "doing", "pending")
             _emit(persistence, rec, on_event)
             _guard_cancel(rec)
-            vtext = verifier.send(_verify_prompt(sha, rec["prompt"]),
-                                  {"phase": "verify", "commit": sha, "loop": rec["loop"]})
+            vtext = _require_real_response(rec, "verifier", "verify",
+                                           verifier.send(_verify_prompt(sha, rec["prompt"]),
+                                                         {"phase": "verify", "commit": sha, "loop": rec["loop"]}))
             rec["loop"] += 1
             if _verdict_from_text(vtext) == council_bus.STATUS_VERIFIED:
                 _add_turn(repo_root, rec, "verifier", labels["verifier"], "verified",
@@ -924,6 +981,8 @@ def advance_run(persistence, rec, *, session_factory=None, on_event=None) -> dic
             rec["phase"] = PHASE_CHANGES_REQUESTED
             _emit(persistence, rec, on_event)
             work_input = vtext       # the next fix attempt works from the change request
+    except run_control.ProviderError as exc:               # transport/runtime error as a "response"
+        return _block_provider_error(persistence, rec, exc, on_event)
     except run_control.ProviderTimeout as exc:
         return _block_provider_timeout(persistence, rec, exc, on_event)
     except run_control.ProviderCancelled as exc:

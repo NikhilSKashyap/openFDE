@@ -16,6 +16,7 @@ provider call un-stoppable and the slice/run stuck ``running``.
 """
 
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -38,6 +39,66 @@ class ProviderCancelled(Exception):
     def __init__(self, provider: str, role: str, phase: str):
         self.provider, self.role, self.phase = provider, role, phase
         super().__init__(f"{provider} cancelled during {phase}")
+
+
+class ProviderError(Exception):
+    """A managed provider returned an obvious transport/runtime error (e.g. ``API Error: Overloaded``)
+    instead of a real role response. Distinct terminal handling: the run blocks with the real reason and
+    the error text is NEVER recorded as plan / consult / decision / verification content."""
+
+    def __init__(self, provider: str, role: str, phase: str, summary: str):
+        self.provider, self.role, self.phase, self.summary = provider, role, phase, summary
+        super().__init__(f"{provider} returned a provider error during {phase}: {summary}")
+
+
+# An *ambiguous* error word (overloaded / rate limit / permission denied) counts as a provider error
+# only when it DOMINATES the response — the whole reply is this short, or the error LEADS it. A real
+# plan/consult/verification that merely mentions rate limits or permissions is longer and leads with its
+# own content (PLAN:/VERIFIED/…), so it is never flagged.
+_SOFT_MAX_LEN = 30
+_SOFT_LEAD = 16
+
+# Hard markers: machine error tokens that never appear in a legitimate role response — match anywhere.
+_HARD_ERROR_PATTERNS = (
+    re.compile(r"\bAPI Error\s*:", re.I),
+    re.compile(r"\badapter_unavailable\b", re.I),
+    re.compile(r"\bprovider (?:unavailable|error)\b", re.I),
+    re.compile(r"\bnot authenticated\b|\bauthentication (?:error|failed|required)\b|\bunauthenticated\b|"
+               r"\binvalid api key\b|\blogin (?:required|expired)\b", re.I),
+    re.compile(r"\b(?:401 unauthorized|403 forbidden|429 too many requests|"
+               r"5\d\d (?:internal server error|bad gateway|service unavailable|gateway timeout))\b", re.I),
+    re.compile(r'"is_error"\s*:\s*true', re.I),
+    re.compile(r"\bexecution error\b", re.I),
+)
+# Soft markers: words that ALSO appear in legitimate prose — only a provider error when the response is
+# short enough to BE the error (not a plan that merely discusses rate limits or permissions).
+_SOFT_ERROR_PAT = re.compile(
+    r"\boverloaded\b|\brate[\s-]?limit|\bpermission denied\b|\bquota (?:exceeded|exhausted)\b|"
+    r"\bconnection (?:refused|reset|error)\b|\bservice unavailable\b|\btoo many requests\b",
+    re.I)
+
+
+def _first_line(text) -> str:
+    return next((ln.strip() for ln in str(text or "").splitlines() if ln.strip()), "")
+
+
+def classify_provider_error(text):
+    """Return a short error summary if ``text`` is an obvious provider/runtime error (a transport
+    failure returned where a real role response was expected), else ``None``. Conservative: a
+    substantive, structured role response is never flagged — hard machine-error tokens match anywhere,
+    but ambiguous words (overloaded / rate limit / permission denied) only count when the whole response
+    is short. Empty/whitespace-only is always an error. No LLM."""
+    s = (text or "").strip()
+    if not s:
+        return "empty response"
+    first = _first_line(s)
+    for pat in _HARD_ERROR_PATTERNS:
+        if pat.search(s):
+            return first[:160] or "provider error"
+    m = _SOFT_ERROR_PAT.search(s)
+    if m and (len(s) <= _SOFT_MAX_LEN or m.start() <= _SOFT_LEAD):
+        return first[:160] or "provider error"
+    return None
 
 
 _lock = threading.Lock()

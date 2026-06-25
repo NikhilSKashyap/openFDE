@@ -81,6 +81,22 @@ def _sleep_factory(block_role="architect", seconds=20):
     return factory
 
 
+class _PlanErrorSession(agent_sessions.EchoSession):
+    """Architect returns a provider error ('API Error: Overloaded') on its plan; echo otherwise."""
+    def send(self, message, metadata=None):
+        if self.role == "architect" and (metadata or {}).get("phase") == "plan":
+            return "API Error: Overloaded"
+        return super().send(message, metadata)
+
+
+def _plan_error_factory():
+    def factory(role, prov, *, run_dir=None):
+        if role == "architect":
+            return _PlanErrorSession(role, run_dir=run_dir)
+        return agent_sessions.EchoSession(role, run_dir=run_dir)
+    return factory
+
+
 ECHO = {"architect": "echo", "srDev": "echo", "verifier": "echo"}
 
 
@@ -142,6 +158,22 @@ class ProgramRunTest(unittest.TestCase):
         self.assertTrue(tasks)
         self.assertTrue(all(t["programId"] == prog["programId"] for t in tasks))
         self.assertEqual(len({t["sliceId"] for t in tasks}), len(prog["slices"]))
+
+    def test_provider_error_blocks_slice_and_program(self):
+        prog = self._run("1. Add a /healthz endpoint.", session_factory=_plan_error_factory())
+        self.assertEqual(prog["status"], pg.STATUS_BLOCKED)
+        self.assertEqual(prog["blockerReason"], pg.BLOCKED_PROVIDER_ERROR)   # propagated to the program
+        sl = prog["slices"][0]
+        self.assertEqual(sl["status"], pg.SLICE_BLOCKED)
+        self.assertEqual(sl["failureReason"], pg.BLOCKED_PROVIDER_ERROR)
+        self.assertIsNone(sl["latestCommit"])                               # no commit on a provider error
+        # the slice episode is blocked and its transcript carries the real provider error
+        ep = self.p.get_episode(sl["episodeId"])
+        self.assertEqual(ep["status"], "blocked")
+        from openfde import external_council as ec
+        tx = ec.load_recorded_transcript(self.root)
+        blocked = [t for t in tx if t["kind"] == "blocked"]
+        self.assertTrue(blocked and "API Error: Overloaded" in blocked[-1]["summary"])
 
     def test_second_slice_starts_automatically(self):
         events = []

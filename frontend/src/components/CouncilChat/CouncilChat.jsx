@@ -6,6 +6,7 @@ import { runIsLive, runDisplayPhase, runBannerClass } from '../../store/councilR
 // for any provider; specific provider names only ever come from state, never hardcoded here.
 const REASON_PLAIN = {
   BLOCKED_PROVIDER_TIMEOUT: 'A provider timed out and was stopped',
+  BLOCKED_PROVIDER_ERROR: 'A provider returned an error and was stopped',
   BLOCKED_ADAPTER_UNAVAILABLE: 'A provider was unavailable',
   BLOCKED_NO_PROVIDER_FOR_ROLE: 'A role has no provider selected',
   BLOCKED_MAX_RETRIES: 'Stopped after too many verification retries',
@@ -18,6 +19,14 @@ function humanizeReason(reason) {
   return REASON_PLAIN[reason] || (typeof reason === 'string' && reason.startsWith('BLOCKED_')
     ? reason.slice(8).replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase())
     : reason)
+}
+
+// Short inbox-status chip derived from the run's OWN terminal status, so a provider error/timeout/
+// cancel never surfaces as the generic bus "BLOCKED_NEEDS_HUMAN".
+const STATUS_CHIP = {
+  blocked_provider_error: 'provider error', blocked_provider_timeout: 'provider timeout',
+  blocked_adapter_unavailable: 'provider unavailable', cancelled: 'cancelled',
+  ready_to_push: 'ready to push', verified: 'verified',
 }
 
 /**
@@ -517,7 +526,10 @@ function CouncilTranscript({ data, launching = false, cancelling = false, onCanc
       <RunBanner run={run} programTerminal={programTerminal} onCancel={onCancelRun} cancelling={cancelling} />
       <div className="ctx-head">
         <span className="ctx-title">Council inbox</span>
-        {data.activeStatus && <span className="ctx-status">{data.activeStatus}</span>}
+        {(() => {
+          const chip = (run && STATUS_CHIP[run.status]) || data.activeStatus
+          return chip ? <span className="ctx-status">{chip}</span> : null
+        })()}
         {!data.active && !run?.running && <span className="ctx-idle">idle</span>}
       </div>
       {launching && !run && <div className="ctx-skeleton">Starting autonomous council…</div>}

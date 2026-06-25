@@ -53,6 +53,7 @@ BLOCKED_NO_PROVIDER_FOR_ROLE = "BLOCKED_NO_PROVIDER_FOR_ROLE"
 BLOCKED_MAX_RETRIES = "BLOCKED_MAX_RETRIES"
 BLOCKED_ADAPTER_UNAVAILABLE = "BLOCKED_ADAPTER_UNAVAILABLE"
 BLOCKED_PROVIDER_TIMEOUT = "BLOCKED_PROVIDER_TIMEOUT"
+BLOCKED_PROVIDER_ERROR = "BLOCKED_PROVIDER_ERROR"
 
 # role name (CLI/UI) → providers-map key
 _ROLE_KEY = {"architect": "architect", "senior-dev": "srDev", "senior_dev": "srDev",
@@ -385,6 +386,8 @@ def _map_block_reason(run_status: str, run_reason: str) -> str:
         return BLOCKED_ADAPTER_UNAVAILABLE
     if run_status == ac.STATUS_BLOCKED_PROVIDER_TIMEOUT:
         return BLOCKED_PROVIDER_TIMEOUT
+    if run_status == ac.STATUS_BLOCKED_PROVIDER_ERROR:
+        return BLOCKED_PROVIDER_ERROR
     if run_status == ac.STATUS_BLOCKED_NEEDS_HUMAN:
         return BLOCKED_MAX_RETRIES
     return run_reason or run_status

@@ -102,6 +102,68 @@ class ConsultationClassifierTest(unittest.TestCase):
             self.assertEqual(ac.classify_consultation(txt), ac.CLEAR_TO_IMPLEMENT, txt)
 
 
+class ProviderErrorClassifierTest(unittest.TestCase):
+    def test_obvious_provider_errors_flagged(self):
+        for txt in ("API Error: Overloaded", "Overloaded", "", "   ", "rate limit exceeded",
+                    "not authenticated", "permission denied", "adapter_unavailable: codex",
+                    "429 Too Many Requests", '{"is_error": true, "result": "boom"}', "execution error"):
+            self.assertIsNotNone(run_control.classify_provider_error(txt), txt)
+
+    def test_legitimate_role_responses_not_flagged(self):
+        for txt in ("PLAN: add authentication and a rate limit guard.\n- task: login\n"
+                    "- task: throttle\nacceptance: requests authenticated and rate limited.",
+                    "The plan is reasonable; keep scope small and add a test for permissions.",
+                    "VERIFIED the change adds rate limiting correctly.",
+                    "IMPLEMENTED: added login flow commit=deadbeef0000 checks=ok"):
+            self.assertIsNone(run_control.classify_provider_error(txt), txt)
+
+
+class _ErrorSession(agent_sessions.AgentSession):
+    """Returns a provider-error string on one chosen phase, real-looking replies otherwise. Records
+    calls so a test can prove NO later role ran after the error — a transport failure must stop the run."""
+
+    def __init__(self, role, *, run_dir=None, calls, error_on=None,
+                 error_text="API Error: Overloaded", consult_reply=None):
+        super().__init__(role, "echo", run_dir=run_dir)
+        self.calls, self.error_on, self.error_text, self.consult_reply = calls, error_on, error_text, consult_reply
+
+    def start(self):
+        self._started = True
+
+    def send(self, message, metadata=None):
+        phase = (metadata or {}).get("phase", "")
+        self.calls.append({"role": self.role, "phase": phase})
+        if phase == self.error_on:
+            return self.error_text
+        if phase == "plan":
+            return "PLAN: do X minimally.\n- task: change X\nacceptance: X works."
+        if phase == "consult":
+            return self.consult_reply or "The plan is reasonable; minor notes."
+        if phase == "decide":
+            return "DECISION: implement X minimally."
+        if phase == "implement":
+            return "IMPLEMENTED: changed X commit=abc1234567 checks=ok"
+        if phase == "verify":
+            return "VERIFIED looks correct"
+        return f"{self.role} {phase}"
+
+    def stop(self):
+        pass
+
+
+_ERR_ROLE = {"plan": "architect", "decide": "architect", "consult": "sr_dev",
+             "implement": "sr_dev", "verify": "verifier"}
+
+
+def _error_factory(calls, *, error_on, error_text="API Error: Overloaded", consult_reply=None):
+    target = _ERR_ROLE[error_on]
+
+    def factory(role, provider, *, run_dir=None):
+        return _ErrorSession(role, run_dir=run_dir, calls=calls, consult_reply=consult_reply,
+                             error_on=(error_on if role == target else None), error_text=error_text)
+    return factory
+
+
 class AutonomousCouncilTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -272,6 +334,53 @@ class AutonomousCouncilTest(unittest.TestCase):
         self.assertNotIn("BLOCKED_NEEDS_HUMAN", summ["blockedReason"] or "")  # …not the generic bus status
         self.assertEqual(summ["timeoutInfo"]["phase"], "decide")
         self.assertEqual(summ["timeoutInfo"]["providerId"], "claude-code-local")
+
+    # ── Provider-error guard (a transport failure never becomes content) ──────
+    def test_architect_provider_error_blocks_before_consult(self):
+        calls = []
+        rec = self._run(product=False,
+                        provider_ids={"architect": "claude-code-local", "srDev": "echo", "verifier": "echo"},
+                        session_factory=_error_factory(calls, error_on="plan"))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_ERROR)
+        self.assertEqual([c["phase"] for c in calls], ["plan"])        # senior dev NEVER consulted
+        self.assertEqual([t["kind"] for t in rec["turns"]], ["prompt", "blocked"])  # no fabricated proposal
+        blk = rec["turns"][-1]
+        self.assertEqual(blk["role"], "system")
+        self.assertIn("API Error: Overloaded", blk["summary"])         # the real reason, in the transcript
+        self.assertEqual(rec["errorInfo"]["phase"], "plan")
+        self.assertEqual(rec["errorInfo"]["providerId"], "claude-code-local")
+        self.assertEqual(rec["errorInfo"]["displayLabel"], "Claude Code local")
+
+    def test_senior_dev_provider_error_blocks_before_classifier(self):
+        calls = []
+        rec = self._run(product=False, session_factory=_error_factory(calls, error_on="consult"))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_ERROR)
+        self.assertEqual([c["phase"] for c in calls], ["plan", "consult"])  # no decide/implement after
+        self.assertNotIn("consultation", [t["kind"] for t in rec["turns"]])  # error not stored as content
+        self.assertEqual(rec["errorInfo"]["phase"], "consult")
+
+    def test_decision_provider_error_blocks(self):
+        calls = []
+        rec = self._run(product=False, session_factory=_error_factory(
+            calls, error_on="decide", consult_reply="Do not proceed — the architect must decide the schema."))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_ERROR)
+        self.assertEqual([c["phase"] for c in calls], ["plan", "consult", "decide"])
+        self.assertNotIn("implementation", [t["kind"] for t in rec["turns"]])
+
+    def test_implementation_provider_error_blocks_with_no_commit(self):
+        calls = []
+        rec = self._run(product=False, session_factory=_error_factory(calls, error_on="implement"))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_ERROR)
+        self.assertIsNone(rec["latestCommit"])                         # blocked BEFORE any commit logic
+        self.assertNotIn("verify", [c["phase"] for c in calls])        # verifier never ran
+        self.assertEqual(rec["errorInfo"]["phase"], "implement")
+
+    def test_empty_provider_response_blocks(self):
+        calls = []
+        rec = self._run(product=False, session_factory=_error_factory(calls, error_on="plan", error_text="   "))
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_ERROR)
+        self.assertEqual([c["phase"] for c in calls], ["plan"])
+        self.assertIn("empty response", rec["errorInfo"]["summary"])
 
     # ── Real-adapter availability (offline, monkeypatched) ────────────────────
     def test_real_codex_adapter_precise_unavailable_reason_when_cli_missing(self):

@@ -209,11 +209,16 @@ def claude_code_availability() -> tuple[bool, str]:
 
 
 def _parse_claude_json(stdout: str) -> str:
-    """Pull the assistant text out of `claude -p --output-format json`; fall back to raw stdout."""
+    """Pull the assistant text out of `claude -p --output-format json`; fall back to raw stdout. An
+    error envelope (``is_error``/``subtype: error_…``) is surfaced as an ``API Error: …`` line so the
+    relay's provider-error guard blocks it instead of treating a transport failure as a role response."""
     try:
         obj = json.loads(stdout)
         if isinstance(obj, dict):
-            return (obj.get("result") or obj.get("text") or "").strip() or stdout.strip()
+            text = (obj.get("result") or obj.get("text") or "").strip()
+            if obj.get("is_error") or str(obj.get("subtype") or "").startswith("error"):
+                return f"API Error: {text or obj.get('subtype') or 'provider error'}".strip()
+            return text or stdout.strip()
     except (ValueError, TypeError):
         pass
     return (stdout or "").strip()
