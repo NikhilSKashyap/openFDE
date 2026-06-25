@@ -155,7 +155,11 @@ def save_run(repo_root, rec: dict) -> dict:
         if prior and prior.get("status") in TERMINAL_STATUSES:
             rec = {**rec, "status": prior["status"], "phase": prior.get("phase", rec.get("phase")),
                    "activeRole": prior.get("activeRole"),
-                   "blockedReason": prior.get("blockedReason"), "timeoutInfo": prior.get("timeoutInfo")}
+                   "blockedReason": prior.get("blockedReason"), "timeoutInfo": prior.get("timeoutInfo"),
+                   "completedAt": prior.get("completedAt")}
+    # Terminal runs (verified / ready_to_push / blocked_* / cancelled) carry a completion timestamp.
+    if rec.get("status") in TERMINAL_STATUSES and not rec.get("completedAt"):
+        rec["completedAt"] = _now()
     with open(_run_path(repo_root, rec["runId"]), "w", encoding="utf-8") as fh:
         json.dump(rec, fh, indent=2)
     return rec
@@ -202,6 +206,7 @@ def run_summary(rec: dict | None) -> dict | None:
         "providerIds": rec.get("providerIds") or {}, "timeoutInfo": rec.get("timeoutInfo"),
         "errorInfo": rec.get("errorInfo"),
         "decisionMode": rec.get("decisionMode"), "running": rec.get("status") == STATUS_RUNNING,
+        "createdAt": rec.get("createdAt"), "completedAt": rec.get("completedAt"),
     }
 
 
@@ -379,17 +384,40 @@ def _set_phase_task(persistence, rec, phase_key, column, verification=None, comm
 
 def _attach_commit_to_episode(persistence, episode_id, sha):
     """Record the implementation commit on the EPISODE — the source of truth OpenPM repairs cards
-    from. Echo emits a synthetic sha; the real path emits the actual commit."""
+    from. Echo emits a synthetic sha; the real path emits the actual commit. When a REAL commit lands,
+    hydrate the episode's file list from the commit diff (the receipt should name the files it touched)."""
     if not (sha and episode_id):
         return
     ep = persistence.get_episode(episode_id)
-    if ep:
-        shas = list(ep.get("commitShas") or [])
-        if sha not in shas:
-            shas.append(sha)
-            ep["commitShas"] = shas
-            ep["updatedAt"] = _now()
-            persistence.upsert_episode(ep)
+    if not ep:
+        return
+    shas = list(ep.get("commitShas") or [])
+    if sha not in shas:
+        shas.append(sha)
+        ep["commitShas"] = shas
+    changed = _hydrate_episode_files(persistence.openfde_dir.parent, ep)
+    ep["updatedAt"] = _now()
+    persistence.upsert_episode(ep)
+    return changed
+
+
+def _hydrate_episode_files(repo_root, ep) -> bool:
+    """Set ``ep['files']`` to the union of files actually touched by the episode's landed commits, so a
+    landed receipt names its files even if it was created empty/stale. No-op when the commits yield no
+    diff (echo's synthetic shas, or a not-yet-present commit) — never wipes an existing list. General:
+    derived purely from the episode's own commitShas. Returns True if it changed the list."""
+    from openfde import git_timeline
+    derived = []
+    seen = set()
+    for sha in (ep.get("commitShas") or []):
+        for f in git_timeline.commit_files(repo_root, sha):
+            if f not in seen:
+                seen.add(f)
+                derived.append(f)
+    if derived and sorted(derived) != sorted(ep.get("files") or []):
+        ep["files"] = derived
+        return True
+    return False
 
 
 def _update_episode_council(persistence, rec):

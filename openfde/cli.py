@@ -187,6 +187,7 @@ def main() -> None:
         if pc == "status":
             persistence = Persistence(Path(args.path) / ".openfde")
             pg.reconcile_program_slices(persistence)     # heal slice episode status before reporting
+            pg.hydrate_program_episode_files(persistence)  # landed slice episodes name their files
             prog = pg.active_program(args.path) or pg.latest_program(args.path)
             print(pg.program_status(prog, args.role))
         elif pc == "start":

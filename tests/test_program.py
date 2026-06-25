@@ -3,6 +3,7 @@
 A high-level direction → ≤3 scoped slices → each runs the autonomous council loop → auto-advance with
 episode/task/commit receipts; honest blocks (clarity, blast radius, no provider, retry budget)."""
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,18 @@ from openfde import agent_sessions, run_control
 from openfde import autonomous_council as ac
 from openfde import program as pg
 from openfde.persistence import Persistence
+
+
+def _git_init_commit(root, filename, content):
+    """Init a git repo at ``root`` + commit one file; return the real commit sha."""
+    g = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)
+    g("init")
+    g("config", "user.email", "t@t.co")
+    g("config", "user.name", "t")
+    (root / filename).write_text(content)
+    g("add", filename)
+    g("commit", "-m", f"add {filename}")
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 
 def _echo_factory(scripts=None):
@@ -174,6 +187,37 @@ class ProgramRunTest(unittest.TestCase):
         tx = ec.load_recorded_transcript(self.root)
         blocked = [t for t in tx if t["kind"] == "blocked"]
         self.assertTrue(blocked and "API Error: Overloaded" in blocked[-1]["summary"])
+
+    def test_terminal_program_slice_and_run_have_completed_at(self):
+        prog = self._run("1. Add a /healthz endpoint. 2. Add request logging.")
+        self.assertEqual(prog["status"], pg.STATUS_COMPLETE)
+        self.assertTrue(prog["completedAt"])                       # complete program timestamped
+        for sl in prog["slices"]:
+            self.assertEqual(sl["status"], pg.SLICE_VERIFIED)
+            self.assertTrue(sl["completedAt"])                     # each verified slice timestamped
+            self.assertTrue(ac.load_run(self.root, sl["runId"])["completedAt"])  # and its run
+        self.assertTrue(pg.program_summary(prog)["completedAt"])   # exposed in the summary
+
+    def test_blocked_program_has_completed_at(self):
+        f = _echo_factory({"verifier": ["CHANGES_REQUESTED: still broken"]})
+        prog = self._run("1. Add a /healthz endpoint.", session_factory=f, max_loops=1)
+        self.assertEqual(prog["status"], pg.STATUS_BLOCKED)
+        self.assertTrue(prog["completedAt"])                       # blocked terminal also timestamped
+
+    def test_hydrate_program_episode_files_from_commit(self):
+        sha = _git_init_commit(self.root, "feature.py", "z = 3\n")
+        self.p.upsert_episode({"episodeId": "episode_p", "status": "landed", "files": [], "commitShas": [sha]})
+        pg.upsert_program(self.root, {"programId": "program_x", "title": "P", "status": "complete", "slices": [
+            {"sliceId": "slice_a", "status": "verified", "episodeId": "episode_p", "commits": [sha], "runId": ""}]})
+        self.assertGreaterEqual(pg.hydrate_program_episode_files(self.p), 1)
+        self.assertEqual(self.p.get_episode("episode_p")["files"], ["feature.py"])  # named from the diff
+
+    def test_successful_receipt_keeps_commits_and_tasks(self):
+        prog = self._run("1. Add a /healthz endpoint.")                # regression: receipts intact
+        sl = prog["slices"][0]
+        self.assertTrue(self.p.get_episode(sl["episodeId"])["commitShas"])  # commit receipt still attached
+        cards = [t for t in self.p.load_tasks() if t.get("phaseKey") and t["episodeId"] == sl["episodeId"]]
+        self.assertEqual(len(cards), 5)                            # OpenPM phase cards still created
 
     def test_second_slice_starts_automatically(self):
         events = []

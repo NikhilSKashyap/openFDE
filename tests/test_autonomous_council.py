@@ -7,6 +7,7 @@ pollute Story/OpenPM, the five OpenPM phase cards, and transcript role order."""
 
 import secrets
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,19 @@ from openfde import external_council as ec
 from openfde import run_control
 from openfde.episode_summary import internal_council_kind
 from openfde.persistence import Persistence
+
+
+def _git_init_commit(root, filename, content):
+    """Init a git repo at ``root`` and commit one file; return the commit sha — a REAL commit so
+    commit-diff hydration has something to read (echo's synthetic shas have no diff)."""
+    g = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)
+    g("init")
+    g("config", "user.email", "t@t.co")
+    g("config", "user.name", "t")
+    (root / filename).write_text(content)
+    g("add", filename)
+    g("commit", "-m", f"add {filename}")
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 
 def _echo_factory(scripts=None):
@@ -381,6 +395,41 @@ class AutonomousCouncilTest(unittest.TestCase):
         self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_ERROR)
         self.assertEqual([c["phase"] for c in calls], ["plan"])
         self.assertIn("empty response", rec["errorInfo"]["summary"])
+
+    # ── Receipt correctness: commit-diff files + terminal completedAt ─────────
+    def test_attach_commit_hydrates_episode_files_from_real_commit(self):
+        sha = _git_init_commit(self.root, "alpha.py", "x = 1\n")
+        self.p.upsert_episode({"episodeId": "episode_x", "title": "t", "status": "landed",
+                               "files": [], "commitShas": []})
+        ac._attach_commit_to_episode(self.p, "episode_x", sha)
+        ep = self.p.get_episode("episode_x")
+        self.assertEqual(ep["files"], ["alpha.py"])              # files named from the landed commit diff
+        self.assertIn(sha, ep["commitShas"])
+
+    def test_attach_commit_replaces_stale_files(self):
+        sha = _git_init_commit(self.root, "real.py", "y = 2\n")
+        self.p.upsert_episode({"episodeId": "episode_z", "files": ["stale.py"], "commitShas": []})
+        ac._attach_commit_to_episode(self.p, "episode_z", sha)
+        self.assertEqual(self.p.get_episode("episode_z")["files"], ["real.py"])
+
+    def test_synthetic_sha_never_wipes_existing_files(self):
+        # echo's synthetic sha has no diff (no git repo here) → keep whatever files were attributed
+        self.p.upsert_episode({"episodeId": "episode_y", "files": ["kept.py"], "commitShas": []})
+        ac._attach_commit_to_episode(self.p, "episode_y", "abc1234567ab")
+        self.assertEqual(self.p.get_episode("episode_y")["files"], ["kept.py"])
+
+    def test_terminal_run_has_completed_at(self):
+        rec = self._run()
+        self.assertEqual(rec["status"], ac.STATUS_READY_TO_PUSH)
+        self.assertTrue(rec.get("completedAt"))                  # terminal run carries a timestamp
+        self.assertTrue(ac.run_summary(rec)["completedAt"])
+        self.assertTrue(ac.load_run(self.root, rec["runId"])["completedAt"])  # persisted
+
+    def test_blocked_run_has_completed_at(self):
+        f = _echo_factory({"verifier": ["CHANGES_REQUESTED: still broken"]})
+        rec = self._run(session_factory=f, max_loops=2)
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_NEEDS_HUMAN)
+        self.assertTrue(rec.get("completedAt"))                  # blocked terminal also timestamped
 
     # ── Real-adapter availability (offline, monkeypatched) ────────────────────
     def test_real_codex_adapter_precise_unavailable_reason_when_cli_missing(self):

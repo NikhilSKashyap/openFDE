@@ -1051,6 +1051,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     async def get_programs(request: web.Request) -> web.Response:
         from openfde import program as pg
         pg.reconcile_program_slices(persistence)     # heal slice episode status on load (no stale open)
+        pg.hydrate_program_episode_files(persistence)  # landed slice episodes name their files (git-allowed here)
         return web.json_response({"ok": True, "programs": [pg.program_summary(p) for p in pg.load_programs(path)],
                                   "active": pg.latest_program_summary(path)})
 

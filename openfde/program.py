@@ -45,6 +45,7 @@ SLICE_VERIFIED = "verified"
 SLICE_FAILED = "failed"
 SLICE_BLOCKED = "blocked"
 SLICE_CANCELLED = "cancelled"
+TERMINAL_SLICE = (SLICE_VERIFIED, SLICE_FAILED, SLICE_BLOCKED, SLICE_CANCELLED)
 
 # ── Block reasons (honest, named) ─────────────────────────────────────────────
 BLOCKED_NEEDS_PRODUCT_CLARITY = "BLOCKED_NEEDS_PRODUCT_CLARITY"
@@ -188,21 +189,49 @@ def reconcile_program_slices(persistence) -> int:
         for sl in prog.get("slices", []):
             eid = sl.get("episodeId")
             ep = persistence.get_episode(eid) if eid else None
-            if not ep:
+            if ep:
+                changed = False
+                if sl.get("status") == SLICE_VERIFIED and (sl.get("commits") or sl.get("latestCommit")) \
+                        and ep.get("status") != "landed":
+                    ep["status"] = "landed"
+                    changed = True
+                if ep.get("internal") or ep.get("nonImplementation") or ep.get("signal") == "operational":
+                    ep["internal"], ep["nonImplementation"], ep["signal"] = False, False, "product"
+                    ep.pop("internalKind", None)
+                    changed = True
+                if prog.get("title") and ep.get("programTitle") != prog["title"]:
+                    ep["programTitle"] = prog["title"]
+                    changed = True
+                if changed:
+                    ep["updatedAt"] = _now()
+                    persistence.upsert_episode(ep)
+                    fixed += 1
+            # Terminal run metadata (JSON, no git): a finished slice's run carries completedAt.
+            rid = sl.get("runId")
+            if rid and sl.get("status") in TERMINAL_SLICE:
+                run = ac.load_run(repo_root, rid)
+                if run and run.get("status") in ac.TERMINAL_STATUSES and not run.get("completedAt"):
+                    ac.save_run(repo_root, run)        # save_run stamps completedAt on a terminal run
+        if _stamp_terminal_timestamps(prog):           # program + slices carry completedAt
+            upsert_program(repo_root, prog)
+            fixed += 1
+    return fixed
+
+
+def hydrate_program_episode_files(persistence) -> int:
+    """Heal landed program-slice episodes whose ``files`` is empty/stale by deriving it from their
+    commit diffs. Runs git, so call ONLY from git-allowed load paths (never build_rail_payload).
+    Idempotent; returns the count hydrated. General — derived purely from each episode's commitShas."""
+    repo_root = persistence.openfde_dir.parent
+    fixed, seen = 0, set()
+    for prog in load_programs(repo_root):
+        for sl in prog.get("slices", []):
+            eid = sl.get("episodeId")
+            if not eid or eid in seen:
                 continue
-            changed = False
-            if sl.get("status") == SLICE_VERIFIED and (sl.get("commits") or sl.get("latestCommit")) \
-                    and ep.get("status") != "landed":
-                ep["status"] = "landed"
-                changed = True
-            if ep.get("internal") or ep.get("nonImplementation") or ep.get("signal") == "operational":
-                ep["internal"], ep["nonImplementation"], ep["signal"] = False, False, "product"
-                ep.pop("internalKind", None)
-                changed = True
-            if prog.get("title") and ep.get("programTitle") != prog["title"]:
-                ep["programTitle"] = prog["title"]
-                changed = True
-            if changed:
+            seen.add(eid)
+            ep = persistence.get_episode(eid)
+            if ep and ep.get("commitShas") and ac._hydrate_episode_files(repo_root, ep):
                 ep["updatedAt"] = _now()
                 persistence.upsert_episode(ep)
                 fixed += 1
@@ -241,7 +270,31 @@ def get_program(repo_root, program_id) -> dict | None:
     return next((p for p in load_programs(repo_root) if p.get("programId") == program_id), None)
 
 
+def _stamp_terminal_timestamps(program: dict) -> bool:
+    """Keep terminal metadata consistent: a terminal program/slice (complete/blocked/cancelled/failed)
+    carries a ``completedAt``; a program/slice that is back to running/queued (e.g. resumed) loses it.
+    Idempotent; returns True if it changed anything."""
+    changed = False
+    if program.get("status") in TERMINAL_PROGRAM:
+        if not program.get("completedAt"):
+            program["completedAt"] = _now()
+            changed = True
+    elif program.get("completedAt"):
+        program["completedAt"] = None
+        changed = True
+    for sl in program.get("slices", []):
+        if sl.get("status") in TERMINAL_SLICE:
+            if not sl.get("completedAt"):
+                sl["completedAt"] = _now()
+                changed = True
+        elif sl.get("completedAt"):
+            sl["completedAt"] = None
+            changed = True
+    return changed
+
+
 def upsert_program(repo_root, program: dict) -> dict:
+    _stamp_terminal_timestamps(program)            # terminal program/slices carry completedAt
     programs = load_programs(repo_root)
     for i, p in enumerate(programs):
         if p.get("programId") == program["programId"]:
@@ -316,7 +369,7 @@ def _make_slice(text: str) -> dict:
         "sliceId": "slice_" + secrets.token_hex(4), "title": title, "prompt": text.strip(),
         "acceptance": [f"{title} is implemented and the verifier passes"],
         "blastRadius": _risk_note(text), "status": SLICE_QUEUED, "episodeId": "", "taskIds": [],
-        "commits": [], "latestCommit": None, "retryCount": 0, "failureReason": None,
+        "commits": [], "latestCommit": None, "retryCount": 0, "failureReason": None, "completedAt": None,
     }
 
 
@@ -546,7 +599,7 @@ def _final_report(program: dict) -> str:
 def slice_summary(sl: dict) -> dict:
     return {k: sl.get(k) for k in ("sliceId", "title", "status", "episodeId", "taskIds", "commits",
                                    "latestCommit", "retryCount", "failureReason", "acceptance",
-                                   "blastRadius", "runId")}
+                                   "blastRadius", "runId", "completedAt")}
 
 
 def program_summary(program: dict | None) -> dict | None:
@@ -568,6 +621,7 @@ def program_summary(program: dict | None) -> dict | None:
             program.get("roleAssignments", {}), program.get("roleProviderIds", {})),
         "slices": [slice_summary(s) for s in slices],
         "finalReport": program.get("finalReport"), "updatedAt": program.get("updatedAt"),
+        "createdAt": program.get("createdAt"), "completedAt": program.get("completedAt"),
     }
 
 
