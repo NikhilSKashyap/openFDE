@@ -602,6 +602,13 @@ function TaskCard({ task, allBoxes, selected, blocked, dragging, dimmed, onSelec
         </div>
       )}
 
+      {/* Why this phase is blocked/failed (e.g. a provider timeout) — the real reason, on the card. */}
+      {task.blockedReason && (
+        <div title={task.blockedReason} style={{ fontSize: 10, color: 'var(--violation)', marginBottom: 5, lineHeight: 1.4 }}>
+          ⛔ {task.blockedReason.length > 90 ? task.blockedReason.slice(0, 90) + '…' : task.blockedReason}
+        </div>
+      )}
+
       {/* Linked box chips + the landed-commit chip (evidence). Clicking the commit
           opens its impact/diff on the canvas via the existing commit spotlight. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 5, minHeight: 16 }}>

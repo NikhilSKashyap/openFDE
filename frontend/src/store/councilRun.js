@@ -8,7 +8,8 @@
 export const TERMINAL_PHASES = new Set(['VERIFIED', 'READY_TO_PUSH', 'BLOCKED', 'FAILED'])
 export const TERMINAL_STATUSES = new Set([
   'verified', 'ready_to_push', 'landed', 'blocked', 'blocked_needs_human',
-  'blocked_adapter_unavailable', 'failed', 'cancelled',
+  'blocked_adapter_unavailable', 'blocked_provider_timeout', 'blocked_provider_error',
+  'failed', 'cancelled',
 ])
 
 export function runIsTerminal(run) {
@@ -27,7 +28,9 @@ export function runIsLive(run) {
 const STATUS_LABEL = {
   verified: 'verified', ready_to_push: 'ready to push', landed: 'landed',
   blocked: 'blocked', blocked_needs_human: 'blocked — needs human',
-  blocked_adapter_unavailable: 'blocked — adapter unavailable', failed: 'failed', cancelled: 'cancelled',
+  blocked_adapter_unavailable: 'blocked — adapter unavailable',
+  blocked_provider_timeout: 'blocked — provider timeout', blocked_provider_error: 'blocked — provider error',
+  failed: 'failed', cancelled: 'cancelled',
 }
 const PHASE_LABEL = {
   USER_PROMPT: 'queued', ARCHITECT_PLANNING: 'architect planning', SR_DEV_CONSULTING: 'sr dev consulting',

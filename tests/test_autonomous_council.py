@@ -349,6 +349,33 @@ class AutonomousCouncilTest(unittest.TestCase):
         self.assertEqual(summ["timeoutInfo"]["phase"], "decide")
         self.assertEqual(summ["timeoutInfo"]["providerId"], "claude-code-local")
 
+    def test_senior_dev_consult_timeout_is_not_needs_human(self):
+        from openfde import council_bus
+        calls = []
+        rec = self._run(provider_ids={"architect": "echo", "srDev": "claude-code", "verifier": "echo"},
+                        session_factory=_recording_factory(calls, timeout_on="consult", timeout_role="sr_dev"))
+        # 1. distinct terminal state, real reason (role/provider/phase/seconds), NOT needs-human
+        self.assertEqual(rec["status"], ac.STATUS_BLOCKED_PROVIDER_TIMEOUT)
+        self.assertEqual([c["phase"] for c in calls], ["plan", "consult"])     # no role ran after consult
+        self.assertIn("Senior Dev timed out while using Claude Code", rec["blockedReason"])
+        self.assertEqual(rec["timeoutInfo"]["phase"], "consult")
+        self.assertIsNone(rec.get("programId"))                                # standalone run, not a Program
+        summ = ac.run_summary(rec)
+        self.assertEqual(summ["status"], "blocked_provider_timeout")
+        self.assertNotIn("NEEDS_HUMAN", (summ["blockedReason"] or "").upper())
+        # 2. bus work item is the timeout status → no "Council needs you" handoff event fires
+        view = ec.bus_snapshot(self.root)[rec["episodeId"]]
+        self.assertEqual(view["status"], council_bus.STATUS_BLOCKED_PROVIDER_TIMEOUT)
+        self.assertNotEqual(view["status"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+        self.assertIsNone(ec.detect_council_bus_event(None, view))
+        # 3. OpenPM: plan passed, consult failed (with reason), later phases pending
+        cards = {t["phaseKey"]: t for t in self.p.load_tasks() if t.get("phaseKey")}
+        self.assertEqual((cards["plan"]["column"], cards["plan"]["verificationStatus"]), ("done", "passed"))
+        self.assertEqual(cards["consult"]["verificationStatus"], "failed")
+        self.assertIn("timed out", cards["consult"]["blockedReason"])
+        for later in ("implement", "verify", "push"):
+            self.assertEqual(cards[later]["verificationStatus"], "pending", later)
+
     # ── Provider-error guard (a transport failure never becomes content) ──────
     def test_architect_provider_error_blocks_before_consult(self):
         calls = []

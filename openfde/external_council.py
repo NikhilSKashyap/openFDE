@@ -679,6 +679,7 @@ _CODEX_NEXT = {
     council_bus.STATUS_VERIFIED:                     "No action. Verified.",
     council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT:      "Architecture decision needed.",
     council_bus.STATUS_BLOCKED_NEEDS_HUMAN:          "Human decision needed.",
+    council_bus.STATUS_BLOCKED_PROVIDER_TIMEOUT:     "A provider timed out — retry or cancel the run (not a human decision).",
 }
 _CLAUDE_NEXT = {
     council_bus.STATUS_READY_FOR_CC:                 "Implement this task, run checks, commit with OpenFDE trailers.",
@@ -688,6 +689,7 @@ _CLAUDE_NEXT = {
     council_bus.STATUS_VERIFIED:                     "No action. Verified.",
     council_bus.STATUS_BLOCKED_NEEDS_ARCHITECT:      "Waiting for Codex architecture decision.",
     council_bus.STATUS_BLOCKED_NEEDS_HUMAN:          "Waiting for a human decision.",
+    council_bus.STATUS_BLOCKED_PROVIDER_TIMEOUT:     "A provider timed out — retry or cancel the run (not a human decision).",
 }
 # Statuses where Claude Code still owes a commit → show the exact trailers to stamp.
 _CLAUDE_NEEDS_TRAILERS = (council_bus.STATUS_READY_FOR_CC, council_bus.STATUS_CLAUDE_WORKING,

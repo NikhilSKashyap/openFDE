@@ -73,9 +73,11 @@ class StatusTest(unittest.TestCase):
     def test_status_machine_values(self):
         self.assertEqual(set(cb.STATUSES), {
             "READY_FOR_CC", "CLAUDE_WORKING", "READY_FOR_CODEX_VERIFICATION",
-            "CHANGES_REQUESTED", "VERIFIED", "BLOCKED_NEEDS_ARCHITECT", "BLOCKED_NEEDS_HUMAN"})
+            "CHANGES_REQUESTED", "VERIFIED", "BLOCKED_NEEDS_ARCHITECT", "BLOCKED_NEEDS_HUMAN",
+            "BLOCKED_PROVIDER_TIMEOUT"})
         self.assertIn("VERIFIED", cb.TERMINAL_STATUSES)
         self.assertIn("BLOCKED_NEEDS_HUMAN", cb.TERMINAL_STATUSES)
+        self.assertIn("BLOCKED_PROVIDER_TIMEOUT", cb.TERMINAL_STATUSES)   # terminal, but not a human decision
 
     def test_set_status_preserves_everything_else(self):
         out = cb.set_status(ITEM, cb.STATUS_VERIFIED)

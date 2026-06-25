@@ -435,6 +435,13 @@ function RunBanner({ run, programTerminal = false, onCancel, cancelling }) {
       </div>
       {run.latestTurn?.summary && <div className="acr-last">{run.latestTurn.summary}</div>}
       {run.blockedReason && <div className="acr-blockedreason">{humanizeReason(run.blockedReason)}</div>}
+      {run.status === 'blocked_provider_timeout' && (
+        // A provider timeout is a runtime fault, not a human decision — say so, and be honest that
+        // one-click retry/continue isn't wired yet.
+        <div className="acr-actions" role="note">
+          Provider timed out — not a human decision. Retry/Continue aren’t wired yet; start a new run from the composer below.
+        </div>
+      )}
     </div>
   )
 }

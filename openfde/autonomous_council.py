@@ -365,7 +365,7 @@ def hydrate_phase_cards(persistence) -> int:
     return added
 
 
-def _set_phase_task(persistence, rec, phase_key, column, verification=None, commit=None):
+def _set_phase_task(persistence, rec, phase_key, column, verification=None, commit=None, blocked_reason=None):
     if not (rec.get("product") and rec.get("episodeId")):
         return
     tasks = persistence.load_tasks()
@@ -377,6 +377,8 @@ def _set_phase_task(persistence, rec, phase_key, column, verification=None, comm
                 t["verificationStatus"] = verification
             if commit:
                 t["commitSha"] = commit
+            if blocked_reason is not None:
+                t["blockedReason"] = blocked_reason or None
             changed = True
     if changed:
         persistence.save_tasks(tasks)
@@ -760,6 +762,22 @@ _PHASE_HUMAN = {"plan": "architect plan", "consult": "senior dev consultation",
 # The phase-task column key for each metadata phase token (so a provider error fails the right card).
 _PHASE_TASK_BY_TOKEN = {"plan": "plan", "consult": "consult", "decide": "consult",
                         "implement": "implement", "verify": "verify"}
+_PHASE_CARD_ORDER = ["plan", "consult", "implement", "verify", "push"]
+
+
+def _repair_phase_cards_on_block(persistence, rec, failed_token, reason):
+    """OpenPM truth for a blocked run: phases BEFORE the one that failed are done/passed, the FAILED
+    phase is failed (with the reason), and LATER phases stay todo/pending. So a Senior-dev-consult
+    timeout fails the *consult* card — never 'Architect plan'. General across blocked council runs."""
+    failed_key = _PHASE_TASK_BY_TOKEN.get(failed_token, "plan")
+    idx = _PHASE_CARD_ORDER.index(failed_key) if failed_key in _PHASE_CARD_ORDER else 0
+    for i, key in enumerate(_PHASE_CARD_ORDER):
+        if i < idx:
+            _set_phase_task(persistence, rec, key, "done", "passed")          # completed prior phases
+        elif i == idx:
+            _set_phase_task(persistence, rec, key, "doing", "failed", blocked_reason=reason)  # the failure
+        else:
+            _set_phase_task(persistence, rec, key, "todo", "pending", blocked_reason="")       # not reached
 
 
 def _provider_id_for_role(rec, role):
@@ -792,9 +810,12 @@ def _block_provider_timeout(persistence, rec, exc, on_event):
               body=f"The {role} provider ({provider_id or label}) did not return within {seconds}s during "
                    f"{phase}. Blocked (BLOCKED_PROVIDER_TIMEOUT); the managed subprocess was stopped.")
     _add_edge(rec, EDGE_BLOCKED, "system")
-    _set_phase_task(persistence, rec, _PHASE_TASK.get(phase, "plan"), "doing", "failed")
+    # OpenPM: fail the phase that actually timed out (e.g. consult), not 'Architect plan'.
+    _repair_phase_cards_on_block(persistence, rec, phase, rec["blockedReason"])
     if rec.get("episodeId"):
-        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_NEEDS_HUMAN)
+        # A provider timeout is a RUNTIME fault, NOT a human decision — never BLOCKED_NEEDS_HUMAN
+        # (which the inbox/handoff renders as "Council needs you / human decision needed").
+        external_council.set_work_item_status(repo_root, rec["episodeId"], council_bus.STATUS_BLOCKED_PROVIDER_TIMEOUT)
         _mark_episode(persistence, rec["episodeId"], "blocked")
     _emit(persistence, rec, on_event)
     return rec
