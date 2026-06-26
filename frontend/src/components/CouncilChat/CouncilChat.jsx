@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun, postProgramRun, cancelAutonomousCouncilRun, cancelProgram, routeIntent } from '../../api/backend'
 import { runIsLive, runDisplayPhase, runBannerClass } from '../../store/councilRun'
+import { resolveRoute, routeRunsImplementation } from '../../store/orientRoute'
 
 // Turn a machine block/cancel reason into one plain-language line for the cockpit. Generic — works
 // for any provider; specific provider names only ever come from state, never hardcoded here.
@@ -40,6 +41,7 @@ function routeReceipt(route) {
     case 'ask':     return 'Asking Council · no file edits'
     case 'issue':   return 'Opening the issue report · no file edits'
     case 'clarify': return `Needs a clearer prompt · ${route.reason}`
+    case 'error':   return route.reason                       // router unavailable — nothing ran
     default:        return route.reason || ''
   }
 }
@@ -213,12 +215,15 @@ export default function CouncilChat({ onOpenAgentSettings = null, onRaiseIssue =
     const prompt = (q ?? question).trim()
     if (!prompt || launching || asking) return
     setLaunching(true)
-    let route = null
-    try { route = (await routeIntent(prompt))?.route } catch { /* fall back to council below */ }
-    route = route || { mode: 'council', allowEdits: true, reason: 'Routing unavailable — running the council loop.' }
+    let raw
+    try { raw = (await routeIntent(prompt))?.route } catch { raw = null }
+    // FAIL CLOSED. resolveRoute turns a down/stale router (or an unknown mode) into an `error` route —
+    // never a silent council fallback, which would turn a multi-slice product prompt into a standalone
+    // programId:null run (the P267 bug). On error we run NOTHING and keep the prompt for a retry.
+    const route = resolveRoute(raw)
     setLastRoute(route)
-    const impl = route.mode === 'program' || route.mode === 'council'
-    const edits = impl && route.allowEdits !== false && allowEdits     // edits only on implementation paths
+    if (route.mode === 'error') { setLaunching(false); return }
+    const edits = routeRunsImplementation(route) && route.allowEdits !== false && allowEdits
     try {
       if (route.mode === 'program') {
         const res = await postProgramRun(prompt, { allowEdits: edits })
@@ -564,7 +569,7 @@ function CouncilTranscript({ data, launching = false, cancelling = false, onCanc
       </div>
       {launching && !run && <div className="ctx-skeleton">Starting autonomous council…</div>}
       {noRuns ? (
-        <div className="ctx-empty">No council runs yet — type a task and Run autonomous council, or ask below.</div>
+        <div className="ctx-empty">No council runs yet — type a task, question, or product direction, then Run.</div>
       ) : items.map(it => {
         const accent = rowAccent(it)
         const expandable = !!(it.body || (it.findings || []).length)

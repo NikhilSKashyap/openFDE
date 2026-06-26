@@ -3340,6 +3340,7 @@
 .council-route-receipt { margin: 5px 2px 0; font-size: 11px; line-height: 1.35; color: var(--text-muted); }
 .council-route-receipt.route-program { color: var(--accent); font-weight: 600; }
 .council-route-receipt.route-clarify { color: var(--violation); }
+.council-route-receipt.route-error { color: var(--violation); font-weight: 600; }
 .concept-foot { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
 .concept-savebtn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px;
   text-align: left; padding: 0; }
@@ -3507,7 +3508,7 @@
   animation: pm-shimmer 1.4s ease-in-out infinite; }
 @keyframes pm-shimmer { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.75; } }
 
-/* Autonomous relay — "Run autonomous council" launcher + the live run banner. */
+/* Autonomous relay — the unified Run launcher + the live run banner. */
 .council-run-auto-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .council-run-auto { flex: 1; padding: 7px 10px; font-size: 12px; font-weight: 600;
   color: var(--accent-orange); background: color-mix(in srgb, var(--accent-orange) 9%, transparent);
