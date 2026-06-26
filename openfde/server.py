@@ -1015,6 +1015,18 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
                 pass
         return on_event
 
+    async def post_intent_route(request: web.Request) -> web.Response:
+        """Deterministic intent router for the unified Orient Run button: prompt → {mode, confidence,
+        reason, allowEdits, detectedSlices, signals}. The client dispatches to the program/council/ask/
+        issue flow from the mode — so a multi-slice prompt becomes a Program, never a null-program run."""
+        from openfde import intent_router
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        route = intent_router.route_intent((body.get("prompt") or "").strip(), context=body.get("context"))
+        return web.json_response({"ok": True, "route": route})
+
     async def post_programs_run(request: web.Request) -> web.Response:
         """Plan + start a Program: decompose the direction into slices synchronously (ids come back
         immediately), then run the slices through the council loop off the event loop."""
@@ -5278,6 +5290,7 @@ async def start(repo_path: str, port: int = 7373, auto_open: bool = True) -> Non
     app.router.add_post("/api/autonomous-council/run", post_autonomous_council_run)
     app.router.add_get( "/api/autonomous-council/runs/{run_id}", get_autonomous_council_run)
     app.router.add_post("/api/autonomous-council/runs/{run_id}/cancel", post_autonomous_council_cancel)
+    app.router.add_post("/api/intent/route", post_intent_route)
     app.router.add_post("/api/programs/run", post_programs_run)
     app.router.add_get( "/api/programs", get_programs)
     app.router.add_get( "/api/programs/{program_id}", get_program_one)

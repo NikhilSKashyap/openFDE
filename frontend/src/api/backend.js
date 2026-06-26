@@ -117,6 +117,15 @@ export const postAutonomousCouncilRun = (prompt, opts = {}) =>
   })
 export const getAutonomousCouncilRun = (runId) => apiFetch(`/api/autonomous-council/runs/${runId}`)
 
+// Deterministic intent router for the unified Orient Run button → { mode, confidence, reason,
+// allowEdits, detectedSlices, signals }. The client dispatches to program/council/ask/issue from mode.
+export const routeIntent = (prompt, context = null) =>
+  apiFetch('/api/intent/route', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, context }),
+  })
+
 // Autonomous Program Mode — a product direction → a managed program of ≤3 scoped council slices.
 export const postProgramRun = (prompt, opts = {}) =>
   apiFetch('/api/programs/run', {

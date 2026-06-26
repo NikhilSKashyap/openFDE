@@ -32,7 +32,7 @@ export default function WorkPanel({
   specMarkdown = null, commitDiff = null, agentMessages = [], approvals = [],
   onExecute = null, onExplain = null, onOpenDiff = null, onReset = null,
   intent = '', onIntentChange = null, run = null, onStop = null,
-  onOpenAgentSettings = null, councilNonce = 0,
+  onOpenAgentSettings = null, councilNonce = 0, onRaiseIssue = null,
   councilTranscript = null, onRefreshCouncilTranscript = null,
 }) {
   const setIntent = onIntentChange || (() => {})
@@ -90,6 +90,7 @@ export default function WorkPanel({
         {moment === 'orient' && (
           <Section title="Ask the council">
             <CouncilChat onOpenAgentSettings={onOpenAgentSettings} councilNonce={councilNonce}
+              onRaiseIssue={onRaiseIssue}
               transcript={councilTranscript} onRefreshTranscript={onRefreshCouncilTranscript} />
             <p className="work-hint">OpenFDE routes your question to the right council member.
               Select a module on the canvas to dig into its architecture and make a change.</p>

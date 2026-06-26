@@ -2510,6 +2510,7 @@ export default function App() {
                 run={run}
                 onStop={onStopRun}
                 onOpenAgentSettings={() => setAgentSettingsOpen(true)}
+                onRaiseIssue={() => setRaiseOpen(true)}
               />
             )}
             {rightOpen && rightView === 'work' && (
@@ -2565,6 +2566,7 @@ export default function App() {
               onResolveApproval={onResolveApproval}
               agentSettings={agentSettings}
               onOpenAgentSettings={() => setAgentSettingsOpen(true)}
+              onRaiseIssue={() => setRaiseOpen(true)}
               onExplain={null}
               story={flowMode === 'story' ? story : null}
             />}

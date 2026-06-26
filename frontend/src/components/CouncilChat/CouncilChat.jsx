@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun, postProgramRun, cancelAutonomousCouncilRun, cancelProgram } from '../../api/backend'
+import { postCouncilAsk, getCouncilContext, getCouncilHistory, postCouncilImplementation, postAutonomousCouncilRun, postProgramRun, cancelAutonomousCouncilRun, cancelProgram, routeIntent } from '../../api/backend'
 import { runIsLive, runDisplayPhase, runBannerClass } from '../../store/councilRun'
 
 // Turn a machine block/cancel reason into one plain-language line for the cockpit. Generic — works
@@ -27,6 +27,21 @@ const STATUS_CHIP = {
   blocked_provider_error: 'provider error', blocked_provider_timeout: 'provider timeout',
   blocked_adapter_unavailable: 'provider unavailable', cancelled: 'cancelled',
   ready_to_push: 'ready to push', verified: 'verified',
+}
+
+// Tiny plain-language receipt under the unified Run button — what the intent router decided + why.
+function routeReceipt(route) {
+  const slices = (route.signals || []).filter(s => /^[a-z]+\d+$/i.test(s))
+    .map(s => s.replace(/([a-z]+)(\d+)/i, (_, a, b) => a[0].toUpperCase() + a.slice(1) + ' ' + b))
+  switch (route.mode) {
+    case 'program': return `Running as Program · ${slices.length ? slices.join('/') + ' detected'
+      : (route.detectedSlices?.length || 0) + ' slices detected'}`
+    case 'council': return 'Running as Council · single implementation task'
+    case 'ask':     return 'Asking Council · no file edits'
+    case 'issue':   return 'Opening the issue report · no file edits'
+    case 'clarify': return `Needs a clearer prompt · ${route.reason}`
+    default:        return route.reason || ''
+  }
 }
 
 /**
@@ -66,7 +81,7 @@ const busyText = (roles) => {
   return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} mid-work — read-only chat stays available.`
 }
 
-export default function CouncilChat({ onOpenAgentSettings = null,
+export default function CouncilChat({ onOpenAgentSettings = null, onRaiseIssue = null,
                                       transcript = null, onRefreshTranscript = null }) {
   const [target, setTarget]       = useState('auto')
   const [question, setQuestion]   = useState('')
@@ -75,36 +90,18 @@ export default function CouncilChat({ onOpenAgentSettings = null,
   const [busyRoles, setBusyRoles] = useState([])
   const [launching, setLaunching] = useState(false)    // autonomous relay being kicked off
   const [cancelling, setCancelling] = useState(false)  // a cancel request is in flight
-  const [allowEdits, setAllowEdits] = useState(false)  // let the senior dev write files (real commit)
+  // Implementation defaults to writing files (real commit). Push stays off (separate, explicit). The
+  // intent router forces edits OFF for ask/issue/clarify regardless of this toggle.
+  const [allowEdits, setAllowEdits] = useState(true)
+  const [lastRoute, setLastRoute] = useState(null)     // the latest intent-router receipt for the UI
 
   // The council transcript is OWNED by App — hydrated at boot, refreshed on every council websocket
   // event — and passed in, so the Orient inbox is already populated when this panel opens (never
   // waiting on a hover or a late websocket). Actions just ask App to refresh.
   const refreshTranscript = useCallback(() => { onRefreshTranscript?.() }, [onRefreshTranscript])
 
-  // Launch the autonomous relay for the typed prompt — OpenFDE runs the full
-  // architect→consult→decide→implement→verify loop; turns stream into the transcript live.
-  const runAutonomous = useCallback(async (q) => {
-    const prompt = (q ?? question).trim()
-    if (!prompt || launching) return
-    setLaunching(true)
-    // Real adapters by default (Codex architect/verifier, Claude Code senior dev). allowEdits lets
-    // the senior dev write files so the run produces an actual commit; default off (plan-only).
-    const res = await postAutonomousCouncilRun(prompt, { allowEdits })
-    setLaunching(false)
-    if (res?.ok) { setQuestion(''); refreshTranscript() }
-  }, [question, launching, allowEdits, refreshTranscript])
-
-  // Run a PROGRAM — OpenFDE decomposes the product direction into ≤3 scoped slices and runs each
-  // through the council loop, auto-advancing on verify. One active program at a time.
-  const runProgram = useCallback(async (q) => {
-    const prompt = (q ?? question).trim()
-    if (!prompt || launching) return
-    setLaunching(true)
-    const res = await postProgramRun(prompt, { allowEdits })
-    setLaunching(false)
-    if (res?.ok) { setQuestion(''); refreshTranscript() }
-  }, [question, launching, allowEdits, refreshTranscript])
+  // The unified `run` handler (one Run button → intent router → the right flow) is defined after
+  // `ask`, since it dispatches questions to it.
 
   // Cancel the live Program / council run — hits the REAL backend cancel endpoint (kills the managed
   // subprocess + marks run/slice/program cancelled), then refreshes so the UI shows the true state.
@@ -208,6 +205,40 @@ export default function CouncilChat({ onOpenAgentSettings = null,
     }
   }, [question, asking, target, patch, refreshTranscript])
 
+  // The ONE Run button. Ask the deterministic intent router what the prompt is, then dispatch:
+  // program → Program Mode, council → autonomous relay, ask → chat (no edits), issue → the issue flow,
+  // clarify → just show the reason (no run). The router forces edits OFF for ask/issue/clarify, so a
+  // multi-slice prompt becomes a Program — never a standalone programId:null council run.
+  const run = useCallback(async (q) => {
+    const prompt = (q ?? question).trim()
+    if (!prompt || launching || asking) return
+    setLaunching(true)
+    let route = null
+    try { route = (await routeIntent(prompt))?.route } catch { /* fall back to council below */ }
+    route = route || { mode: 'council', allowEdits: true, reason: 'Routing unavailable — running the council loop.' }
+    setLastRoute(route)
+    const impl = route.mode === 'program' || route.mode === 'council'
+    const edits = impl && route.allowEdits !== false && allowEdits     // edits only on implementation paths
+    try {
+      if (route.mode === 'program') {
+        const res = await postProgramRun(prompt, { allowEdits: edits })
+        if (res?.ok) { setQuestion('') ; refreshTranscript() }
+      } else if (route.mode === 'council') {
+        const res = await postAutonomousCouncilRun(prompt, { allowEdits: edits })
+        if (res?.ok) { setQuestion(''); refreshTranscript() }
+      } else if (route.mode === 'ask') {
+        setLaunching(false)
+        return ask(prompt)                       // conversational answer, never edits files
+      } else if (route.mode === 'issue') {
+        onRaiseIssue?.()                          // open the existing issue flow
+        setQuestion('')
+      }
+      // clarify → leave the prompt in the box; the receipt shows why it needs narrowing
+    } finally {
+      setLaunching(false)
+    }
+  }, [question, launching, asking, allowEdits, refreshTranscript, ask, onRaiseIssue])
+
   const cancel = () => abortRef.current?.abort()
 
   // Start implementation: hand the structured brief to the server, which re-validates the gate and
@@ -236,7 +267,7 @@ export default function CouncilChat({ onOpenAgentSettings = null,
     if (e.key !== 'Enter') return
     if (e.shiftKey) return                         // newline
     e.preventDefault()
-    ask()
+    run()                                          // Enter = the one smart Run (router decides)
   }
 
   const busy = busyText(busyRoles)
@@ -338,38 +369,30 @@ export default function CouncilChat({ onOpenAgentSettings = null,
         ))}
       </div>
 
-      {/* Bottom-docked composer */}
+      {/* Bottom-docked composer — ONE Run button; OpenFDE routes by intent. */}
       <div className="council-composer">
         <textarea
           ref={taRef} className="council-input" rows={1}
-          placeholder="Ask what to do next…  (Enter to send · Shift+Enter for newline)"
+          placeholder="Type a task, a product direction, or a question — then Run.  (Enter to run · Shift+Enter for newline)"
           value={question} onChange={e => setQuestion(e.target.value)} onKeyDown={onKeyDown}
         />
-        <button className="council-send" disabled={!question.trim() || asking} onClick={() => ask()}>
-          {asking ? '…' : 'Send'}
+        <button className="council-send council-run-one" disabled={!question.trim() || launching || asking}
+          onClick={() => run()}
+          title="OpenFDE routes your prompt: a multi-slice direction → Program, one task → Council, a question → answered with no edits, an issue report → the issue flow">
+          {launching ? '…' : '▶ Run'}
         </button>
       </div>
-      {/* Hand the whole task to the autonomous relay — no human copy-paste between Codex and CC. */}
+      {lastRoute && <div className={`council-route-receipt route-${lastRoute.mode}`}>{routeReceipt(lastRoute)}</div>}
       <div className="council-run-auto-row">
-        <button className="council-run-auto" disabled={!question.trim() || launching}
-          onClick={() => runAutonomous()}
-          title="One scoped task → the council loop (architect → consult → decide → implement → verify), streamed here">
-          {launching ? 'Starting…' : '▶ Run council'}
-        </button>
-        <button className="council-run-auto council-run-program" disabled={!question.trim() || launching}
-          onClick={() => runProgram()}
-          title="A product direction → a managed Program of up to 3 scoped slices, each run through the council loop, auto-advancing on verify">
-          {launching ? '…' : '▶▶ Run Program'}
-        </button>
-        <label className="council-run-edits" title="Let the senior dev write files and produce a real commit (off = plan only, no repo changes)">
+        <label className="council-run-edits" title="Let the senior dev write files and produce a real commit (off = plan-only, no repo changes). Ignored for questions / issue reports, which never edit.">
           <input type="checkbox" checked={allowEdits} onChange={e => setAllowEdits(e.target.checked)} />
           allow file edits
         </label>
       </div>
       <div className="council-run-hint">
         {allowEdits
-          ? 'Real run: the senior dev will write files and the relay will commit them.'
-          : 'Plan-only: drives the real Codex + Claude Code loop and verifies, but writes nothing. Turn on “allow file edits” for a real implementation + commit.'}
+          ? 'Implementation runs write files and commit; questions and issue reports never edit. Push stays off.'
+          : 'Plan-only: drives the real loop and verifies, but writes nothing. Turn on “allow file edits” for a real implementation + commit.'}
       </div>
 
       {onOpenAgentSettings && (

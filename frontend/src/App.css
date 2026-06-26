@@ -3335,6 +3335,11 @@
   border: none; background: var(--accent); color: #fff; font: inherit; font-size: 12px;
   font-weight: 600; cursor: pointer; }
 .council-send:disabled { opacity: 0.45; cursor: default; }
+.council-run-one { min-width: 64px; }
+/* Intent-router receipt: what the one Run button decided (program / council / ask / issue / clarify). */
+.council-route-receipt { margin: 5px 2px 0; font-size: 11px; line-height: 1.35; color: var(--text-muted); }
+.council-route-receipt.route-program { color: var(--accent); font-weight: 600; }
+.council-route-receipt.route-clarify { color: var(--violation); }
 .concept-foot { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
 .concept-savebtn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px;
   text-align: left; padding: 0; }
