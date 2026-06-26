@@ -192,6 +192,9 @@ episode, the role turns stay ordered as user → Architect → Senior Dev → Ve
 OpenPM tracks the phase cards against that same parent episode, so the council
 timeline and OpenPM work view describe one shared lifecycle.
 
+A single, bounded implementation task routes directly through the
+**Architect → Senior Dev → Verifier** council loop — no Program Mode slicing.
+
 OpenFDE routes a high-level product direction through **Program Mode**, the layer
 above this loop: it turns one direction into a managed sequence of scoped slices,
 then feeds each slice through the same Architect → Senior Dev → Verifier council
