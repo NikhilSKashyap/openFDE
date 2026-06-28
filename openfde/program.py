@@ -191,6 +191,12 @@ def reconcile_program_slices(persistence) -> int:
             ep = persistence.get_episode(eid) if eid else None
             if ep:
                 changed = False
+                if ep.get("programId") != prog.get("programId"):
+                    ep["programId"] = prog.get("programId")
+                    changed = True
+                if ep.get("sliceId") != sl.get("sliceId"):
+                    ep["sliceId"] = sl.get("sliceId")
+                    changed = True
                 if sl.get("status") == SLICE_VERIFIED and (sl.get("commits") or sl.get("latestCommit")) \
                         and ep.get("status") != "landed":
                     ep["status"] = "landed"
@@ -201,6 +207,9 @@ def reconcile_program_slices(persistence) -> int:
                     changed = True
                 if prog.get("title") and ep.get("programTitle") != prog["title"]:
                     ep["programTitle"] = prog["title"]
+                    changed = True
+                if sl.get("title") and ep.get("sliceTitle") != sl["title"]:
+                    ep["sliceTitle"] = sl["title"]
                     changed = True
                 if changed:
                     ep["updatedAt"] = _now()

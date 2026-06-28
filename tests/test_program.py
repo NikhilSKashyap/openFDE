@@ -309,6 +309,21 @@ class ProgramRunTest(unittest.TestCase):
         self.assertFalse(healed["internal"])
         self.assertEqual(healed["signal"], "product")         # never demoted — it's product journey
 
+    def test_reconcile_backfills_program_and_slice_ids_onto_episode(self):
+        prog = self._run("1. Add a /healthz endpoint. 2. Add request logging.")
+        sl = prog["slices"][1]
+        ep = self.p.get_episode(sl["episodeId"])
+        for k in ("programId", "sliceId", "programTitle", "sliceTitle"):
+            ep.pop(k, None)                                    # regression: slice 2 lost its grouping
+        self.p.upsert_episode(ep)
+
+        self.assertGreaterEqual(pg.reconcile_program_slices(self.p), 1)
+        healed = self.p.get_episode(sl["episodeId"])
+        self.assertEqual(healed["programId"], prog["programId"])
+        self.assertEqual(healed["sliceId"], sl["sliceId"])
+        self.assertEqual(healed["programTitle"], prog["title"])
+        self.assertEqual(healed["sliceTitle"], sl["title"])
+
     def test_program_slice_never_classified_internal(self):
         from openfde.episode_summary import internal_council_kind
         self.assertIsNone(internal_council_kind({"title": "Implementation Prompt", "programId": "program_x"}))
