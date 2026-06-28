@@ -193,14 +193,20 @@ OpenPM tracks the phase cards against that same parent episode, so the council
 timeline and OpenPM work view describe one shared lifecycle.
 
 A single, bounded implementation task routes directly through the
-**Architect → Senior Dev → Verifier** council loop — no Program Mode slicing.
+**Architect → Senior Dev → Verifier** council loop. A high-level product
+direction with multiple parts routes through **Program Mode**: OpenFDE decomposes
+it into a managed sequence of scoped slices and feeds each through the same
+council loop verbatim — so every slice gets its own episode, OpenPM phase cards,
+and commit receipts, grouped under the parent program. Program Mode is
+deliberately bounded — one active program at a time, at most 3 slices, no
+auto-push.
 
-OpenFDE routes a high-level product direction through **Program Mode**, the layer
-above this loop: it turns one direction into a managed sequence of scoped slices,
-then feeds each slice through the same Architect → Senior Dev → Verifier council
-loop verbatim. Program Mode is deliberately bounded — one active program at a
-time, at most 3 slices, and no auto-push. It is conceptual for now; confirm the
-real invocation before scripting against it.
+You don't choose the mode. One **Run** button reads the intent and routes
+deterministically — Program, a single council task, a question (answered with no
+file edits), or an issue report — and **fails closed** rather than guess. And the
+loop is honest under failure: when a provider times out, errors, or you cancel,
+OpenFDE records exactly which role, which phase, and why — it never fabricates a
+"needs a human" state, and the OpenPM cards reflect the true failed step.
 
 ### Codex (local CLI): keyless thinking roles
 
@@ -321,7 +327,11 @@ The local-first council can run with **Codex local CLI for Architect/Verifier**
 and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
 canvas, and a stop control can halt a run. The main loop works now: select scope,
 describe intent, let the council implement, verify the real diff, then commit
-inside the boundaries you drew.
+inside the boundaries you drew. **Program Mode** (multi-slice decomposition), the
+one-button **intent router**, and honest **blocked states** (provider timeout/
+error, cancel — each naming the role, phase, and reason) are implemented and
+tested on this repo; the fully autonomous real-provider success path is still
+being hardened.
 
 OpenFDE also keeps a development memory. Prompts become episodes through the
 council, OpenFDE wrappers, or passive Claude Code/Codex capture. Episodes are
