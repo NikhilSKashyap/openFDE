@@ -24,11 +24,10 @@ shows the repo as a living canvas, lets you scope what can change, can run an
 Agent Council when you want it to, reviews the real diff, commits the work, and
 keeps the record.
 
-It also remembers. Prompts from the council, OpenFDE wrappers, and passive
-Claude Code/Codex capture become episodes. Each episode gets attributed scope,
-commits, receipts, and a place in the replayable **Story**. Codex can handle
-thinking roles, Claude Code can handle coding, and OpenFDE keeps the work
-visible, scoped, reviewed, and understandable.
+It also remembers. Prompts from the council, OpenFDE wrappers, and supported
+local-agent capture become episodes. Each episode gets attributed scope,
+commits, receipts, and a place in the replayable **Story**. You choose the
+engines; OpenFDE keeps the work visible, scoped, reviewed, and understandable.
 
 ## The cockpit and orange box theory
 
@@ -91,6 +90,24 @@ Then open:
 http://127.0.0.1:7420
 ```
 
+If you would rather have your coding agent do the setup, paste this into Codex,
+Claude Code, Cursor, or whichever agent you already use:
+
+```text
+Set up OpenFDE locally for this machine.
+
+Please read the README first, then:
+1. Confirm Python and Node are available.
+2. Install the Python package in editable mode.
+3. Install frontend dependencies and build the frontend.
+4. Start OpenFDE watching this repo on port 7420.
+5. Tell me the local URL to open.
+
+Use my existing shell environment and logins. Do not create API keys, do not
+push anything, and if a command fails, stop and explain the exact failure and
+the safest next command.
+```
+
 ## What It Does
 
 - Turns modules, files, functions, and dataflow into an interactive canvas for
@@ -110,8 +127,8 @@ http://127.0.0.1:7420
 - **Watches any edit as it happens**: yours, the council's, or another agent's.
   It glows the touched nodes, then surfaces **what changed** once the work
   settles: files, affected concepts, and diff.
-- **Remembers the path**: council prompts, OpenFDE wrapper prompts, and passive
-  Claude Code/Codex prompts become episodes, auto-committed with attributed scope and
+- **Remembers the path**: council prompts, OpenFDE wrapper prompts, and supported
+  local-agent prompts become episodes, auto-committed with attributed scope and
   replayable as a **Story** and an **OpenPM** board (below).
 - Respects scope: **dotted = agent-editable**, **solid = locked** (protected files
   force an approval gate before anything touches them). The toolbar draws both box
@@ -208,7 +225,7 @@ loop is honest under failure: when a provider times out, errors, or you cancel,
 OpenFDE records exactly which role, which phase, and why — it never fabricates a
 "needs a human" state, and the OpenPM cards reflect the true failed step.
 
-### Codex (local CLI): keyless thinking roles
+### Codex (local CLI)
 
 Set **Architect** and/or **Verifier** to provider **Codex (local CLI)**.
 OpenFDE uses your existing Codex login for text-only reasoning: the Architect
@@ -216,15 +233,14 @@ writes the scoped implementation brief, and the Verifier reviews the actual
 worktree diff before anything lands. No OpenFDE API key is needed, and each role
 is labeled in Review so the proof is visible.
 
-### Claude Code (local CLI): keyless coding role
+### Claude Code (local CLI)
 
 Set any role to provider **Claude Code (local CLI)**. OpenFDE drives your local
 `claude` CLI headlessly. There is no copy-paste and no API key in OpenFDE. It
-is the preferred **Senior Dev** backend for code edits: scope is enforced before
-and after the run, pre-existing dirty files are never reverted, and read/write
-progress streams onto the canvas as file glow. Auth comes from your existing
-`claude` login. On a Pro/Max plan the coding role runs against your subscription,
-with no OpenFDE API key in the project.
+works well as a **Senior Dev** backend for code edits because scope is enforced
+before and after the run, pre-existing dirty files are never reverted, and
+read/write progress streams onto the canvas as file glow. Auth comes from your
+existing `claude` login; OpenFDE does not need a separate key for that path.
 
 ### Real models (API)
 
@@ -323,8 +339,9 @@ an **additive focused path** (`POST /api/focus/neighborhood`) returns an issue/f
 neighborhood + scoped-verify selection for large repos — backend groundwork toward O(issue), not
 yet full focused rendering. Repro-and-fix is still Python/pytest.
 
-The local-first council can run with **Codex local CLI for Architect/Verifier**
-and **Claude Code local CLI for Senior Dev**. Coding activity streams live on the
+The local-first council is currently tested most often with **Codex local CLI**
+for planning/verification and **Claude Code local CLI** for implementation, but
+those are engines, not the product boundary. Coding activity streams live on the
 canvas, and a stop control can halt a run. The main loop works now: select scope,
 describe intent, let the council implement, verify the real diff, then commit
 inside the boundaries you drew. **Program Mode** (multi-slice decomposition), the
